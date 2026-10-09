@@ -1,0 +1,19 @@
+{
+  "code": "unsupported_target",
+  "category": "unsupported_target",
+  "message": "Unsupported target for inspect_binary_layout at /home/user/vita-recomp-lab/build/diff/raycast-O2/raycast-O2.elf: Initial layout profile requires ELF64 little-endian objects.",
+  "retryable": false,
+  "remediation": {
+    "action": "Select a target supported by this operation or choose an operation supporting the reported target format."
+  },
+  "details": {
+    "operation": "inspect_binary_layout",
+    "path": "/home/user/vita-recomp-lab/build/diff/raycast-O2/raycast-O2.elf",
+    "reason": "Initial layout profile requires ELF64 little-endian objects.",
+    "captured_output": {
+      "stdout": "",
+      "stderr": "",
+      "truncated": false
+    }
+  }
+}

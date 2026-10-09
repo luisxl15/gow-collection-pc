@@ -1,0 +1,14 @@
+{
+  "error": "Analysis failed",
+  "code": "target_unavailable",
+  "category": "unavailable",
+  "message": "Cannot open artifact: unsupported binary format. Check that the path exists, is readable, and points to a supported file.",
+  "retryable": false,
+  "remediation": {
+    "action": "Cannot open artifact: unsupported binary format. Check that the path exists, is readable, and points to a supported file."
+  },
+  "details": {
+    "path": "/home/user/vita-recomp-lab/build/vita/raycast/eboot.bin",
+    "reason": "unsupported binary format"
+  }
+}

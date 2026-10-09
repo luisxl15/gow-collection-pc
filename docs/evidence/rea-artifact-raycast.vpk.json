@@ -1,0 +1,402 @@
+{
+  "evidence_id": "ev_28194bc86d8afce61e218e9c72620083d0657076f76c2ac8128e5e178426936d",
+  "subject": {
+    "name": "raycast.vpk",
+    "digest": {
+      "sha256": "b9955feb8be6630f3b3433e2b8bd9b57bacb82b08c715233df46ebc30a651d05"
+    },
+    "format": "zip",
+    "architecture": null,
+    "local_path": "/home/user/vita-recomp-lab/build/vita/raycast/raycast.vpk"
+  },
+  "provider": {
+    "id": "rea-artifact-graph",
+    "name": "REA safe artifact graph provider",
+    "version": "1"
+  },
+  "analysis_profile": null,
+  "predicate_type": "rea.analysis",
+  "operation": "inspect_artifact",
+  "parameters": {
+    "integrity_policy": "fail"
+  },
+  "raw_result": null,
+  "normalized_result": {
+    "inspection_id": "ai_5e7a8bf3da8c7f7e53a2fd89b531dd6289ba603e4ab4d52cd172cebcf0d77110",
+    "subject": {
+      "manifest_id": "agm_7a33dc71a662e8b9d67ce8af9702638d442178d7f1296b3c5589ebe78b28040e",
+      "root_artifact_id": "art_f50fc791c26c4884c3e98e67deff7c3425549d7abdb32ac560b334fa3b880d11",
+      "root_sha256": "b9955feb8be6630f3b3433e2b8bd9b57bacb82b08c715233df46ebc30a651d05",
+      "root_format": "zip"
+    },
+    "substeps": [
+      {
+        "substep_id": "ais_c1ed0b6d767167a7c70d8fcbaa8d9c318aee3d2e88b79a5b1fd6e73c7e7f2393",
+        "operation": "inventory_artifact",
+        "status": "completed",
+        "evidence_id": "ev_2683b5ba4f080aebffb1c418df6dd02c4a1bf7b7b26cd22a7c9fdb6eb2cc5e89",
+        "evidence": {
+          "evidence_id": "ev_2683b5ba4f080aebffb1c418df6dd02c4a1bf7b7b26cd22a7c9fdb6eb2cc5e89",
+          "subject": {
+            "name": "raycast.vpk",
+            "digest": {
+              "sha256": "b9955feb8be6630f3b3433e2b8bd9b57bacb82b08c715233df46ebc30a651d05"
+            },
+            "format": "zip",
+            "architecture": null,
+            "local_path": "/home/user/vita-recomp-lab/build/vita/raycast/raycast.vpk"
+          },
+          "provider": {
+            "id": "rea-artifact-graph",
+            "name": "REA safe artifact graph provider",
+            "version": "1"
+          },
+          "analysis_profile": null,
+          "predicate_type": "rea.analysis",
+          "operation": "inventory_artifact",
+          "parameters": {
+            "integrity_policy": "fail"
+          },
+          "raw_result": null,
+          "normalized_result": {
+            "manifest": {
+              "manifest_id": "agm_7a33dc71a662e8b9d67ce8af9702638d442178d7f1296b3c5589ebe78b28040e",
+              "root_artifact_id": "art_f50fc791c26c4884c3e98e67deff7c3425549d7abdb32ac560b334fa3b880d11",
+              "root_sha256": "b9955feb8be6630f3b3433e2b8bd9b57bacb82b08c715233df46ebc30a651d05",
+              "root_format": "zip",
+              "graph_sha256": "0dea12ea169ba3079d83566a8730f1bb969a21be794fec56499d46805d61fc5e",
+              "node_count": 3,
+              "occurrence_count": 3,
+              "edge_count": 2
+            },
+            "nodes": [
+              {
+                "artifact_id": "art_04c7b82a8bc2bca5da64c92073c6f3b52c21bf330ec8606d2fabbbcaa53bf2f1",
+                "format": "file",
+                "sha256": "5d5af502eb498fb834a1586ec8b7308acca70074d757af20e4dffe5a3106c146",
+                "size": 33912,
+                "media_type": null,
+                "architecture": null,
+                "content_state": "embedded",
+                "limitations": []
+              },
+              {
+                "artifact_id": "art_21c6755b4c8faea59faa10852b928122e43ba1e4e5e242b7185df75ebdb9f34c",
+                "format": "file",
+                "sha256": "bb49c8d73dcf29254fc628dcaf86c309481c8e48a78ff412d582e2ccfcc7ccd0",
+                "size": 788,
+                "media_type": null,
+                "architecture": null,
+                "content_state": "embedded",
+                "limitations": []
+              },
+              {
+                "artifact_id": "art_f50fc791c26c4884c3e98e67deff7c3425549d7abdb32ac560b334fa3b880d11",
+                "format": "zip",
+                "sha256": "b9955feb8be6630f3b3433e2b8bd9b57bacb82b08c715233df46ebc30a651d05",
+                "size": 30659,
+                "media_type": null,
+                "architecture": null,
+                "content_state": "materialized",
+                "limitations": []
+              }
+            ],
+            "occurrences": [
+              {
+                "occurrence_id": "occ_09bc261b7999cff28af21117598b2322bbd7d5f6783fb8040627a14a77ab4735",
+                "artifact_id": "art_f50fc791c26c4884c3e98e67deff7c3425549d7abdb32ac560b334fa3b880d11",
+                "parent_occurrence_id": null,
+                "logical_path": ".",
+                "entry_kind": "file",
+                "artifact_kind": "container",
+                "artifact_format": "zip",
+                "declared_size": 30659,
+                "compressed_size": null,
+                "executable": false,
+                "encrypted": false,
+                "hash_status": "verified",
+                "source_location": null,
+                "limitations": []
+              },
+              {
+                "occurrence_id": "occ_4ddba3fb66a611198fef919ce930a85a1774daae305abc101982d6c1af5555df",
+                "artifact_id": "art_04c7b82a8bc2bca5da64c92073c6f3b52c21bf330ec8606d2fabbbcaa53bf2f1",
+                "parent_occurrence_id": "occ_09bc261b7999cff28af21117598b2322bbd7d5f6783fb8040627a14a77ab4735",
+                "logical_path": "eboot.bin",
+                "entry_kind": "file",
+                "artifact_kind": "resource",
+                "artifact_format": "file",
+                "declared_size": 33912,
+                "compressed_size": 30108,
+                "executable": false,
+                "encrypted": false,
+                "hash_status": "verified",
+                "source_location": null,
+                "limitations": []
+              },
+              {
+                "occurrence_id": "occ_81b40753a2fa6faeaab7fdedf0d7dd413cfc170a6a70a079f3ad67297c5c5f03",
+                "artifact_id": "art_21c6755b4c8faea59faa10852b928122e43ba1e4e5e242b7185df75ebdb9f34c",
+                "parent_occurrence_id": "occ_09bc261b7999cff28af21117598b2322bbd7d5f6783fb8040627a14a77ab4735",
+                "logical_path": "sce_sys/param.sfo",
+                "entry_kind": "file",
+                "artifact_kind": "resource",
+                "artifact_format": "file",
+                "declared_size": 788,
+                "compressed_size": 325,
+                "executable": false,
+                "encrypted": false,
+                "hash_status": "verified",
+                "source_location": null,
+                "limitations": []
+              }
+            ],
+            "edges": [
+              {
+                "edge_id": "edge_71d0737bc4677b56315d38907f8d5d5ab219603dd9462da5eea125dda5585b3f",
+                "ordinal": 0,
+                "parent_artifact_id": "art_f50fc791c26c4884c3e98e67deff7c3425549d7abdb32ac560b334fa3b880d11",
+                "child_artifact_id": "art_21c6755b4c8faea59faa10852b928122e43ba1e4e5e242b7185df75ebdb9f34c",
+                "relation": "contains",
+                "occurrence_id": "occ_81b40753a2fa6faeaab7fdedf0d7dd413cfc170a6a70a079f3ad67297c5c5f03",
+                "logical_path": "sce_sys/param.sfo",
+                "producer": null
+              },
+              {
+                "edge_id": "edge_7858952bf835c93368269d79e1a9b6b7b62abbebd64957d595231da6a4f70abe",
+                "ordinal": 1,
+                "parent_artifact_id": "art_f50fc791c26c4884c3e98e67deff7c3425549d7abdb32ac560b334fa3b880d11",
+                "child_artifact_id": "art_04c7b82a8bc2bca5da64c92073c6f3b52c21bf330ec8606d2fabbbcaa53bf2f1",
+                "relation": "contains",
+                "occurrence_id": "occ_4ddba3fb66a611198fef919ce930a85a1774daae305abc101982d6c1af5555df",
+                "logical_path": "eboot.bin",
+                "producer": null
+              }
+            ],
+            "provenance": [],
+            "integrity_contradictions": [],
+            "limitations": []
+          },
+          "confidence": "observed",
+          "authority": "shipped-artifact",
+          "environment": null,
+          "limitations": [],
+          "locations": [
+            {
+              "kind": "artifact-path",
+              "path": "."
+            },
+            {
+              "kind": "artifact-path",
+              "path": "eboot.bin"
+            },
+            {
+              "kind": "artifact-path",
+              "path": "sce_sys/param.sfo"
+            }
+          ],
+          "evidence_links": []
+        }
+      }
+    ],
+    "observations": [
+      {
+        "observation_id": "aio_1c08118d90029949581ab400198d597333aa78e5c40b10a35625ff3d5fb55fc6",
+        "kind": "root-manifest",
+        "subject": "art_f50fc791c26c4884c3e98e67deff7c3425549d7abdb32ac560b334fa3b880d11",
+        "value": {
+          "manifest_id": "agm_7a33dc71a662e8b9d67ce8af9702638d442178d7f1296b3c5589ebe78b28040e",
+          "root_artifact_id": "art_f50fc791c26c4884c3e98e67deff7c3425549d7abdb32ac560b334fa3b880d11",
+          "root_sha256": "b9955feb8be6630f3b3433e2b8bd9b57bacb82b08c715233df46ebc30a651d05",
+          "root_format": "zip",
+          "graph_sha256": "0dea12ea169ba3079d83566a8730f1bb969a21be794fec56499d46805d61fc5e",
+          "node_count": 3,
+          "occurrence_count": 3,
+          "edge_count": 2
+        },
+        "evidence_id": "ev_2683b5ba4f080aebffb1c418df6dd02c4a1bf7b7b26cd22a7c9fdb6eb2cc5e89"
+      },
+      {
+        "observation_id": "aio_9ba4006f612d45c71ee11a5193cbfb1d20ee64a92c37c37f0b5794b7b92f1ea8",
+        "kind": "artifact",
+        "subject": "art_04c7b82a8bc2bca5da64c92073c6f3b52c21bf330ec8606d2fabbbcaa53bf2f1",
+        "value": {
+          "artifact_id": "art_04c7b82a8bc2bca5da64c92073c6f3b52c21bf330ec8606d2fabbbcaa53bf2f1",
+          "format": "file",
+          "sha256": "5d5af502eb498fb834a1586ec8b7308acca70074d757af20e4dffe5a3106c146",
+          "size": 33912,
+          "media_type": null,
+          "architecture": null,
+          "content_state": "embedded",
+          "limitations": []
+        },
+        "evidence_id": "ev_2683b5ba4f080aebffb1c418df6dd02c4a1bf7b7b26cd22a7c9fdb6eb2cc5e89"
+      },
+      {
+        "observation_id": "aio_98e2ed785acd89546fb57f662b8172f2eb8b6168b1f7e523f27f759babf29696",
+        "kind": "artifact",
+        "subject": "art_21c6755b4c8faea59faa10852b928122e43ba1e4e5e242b7185df75ebdb9f34c",
+        "value": {
+          "artifact_id": "art_21c6755b4c8faea59faa10852b928122e43ba1e4e5e242b7185df75ebdb9f34c",
+          "format": "file",
+          "sha256": "bb49c8d73dcf29254fc628dcaf86c309481c8e48a78ff412d582e2ccfcc7ccd0",
+          "size": 788,
+          "media_type": null,
+          "architecture": null,
+          "content_state": "embedded",
+          "limitations": []
+        },
+        "evidence_id": "ev_2683b5ba4f080aebffb1c418df6dd02c4a1bf7b7b26cd22a7c9fdb6eb2cc5e89"
+      },
+      {
+        "observation_id": "aio_039389c57f073d40e81d39c3a499a475d1ae0abe5bfa7010c1c12dff104db768",
+        "kind": "artifact",
+        "subject": "art_f50fc791c26c4884c3e98e67deff7c3425549d7abdb32ac560b334fa3b880d11",
+        "value": {
+          "artifact_id": "art_f50fc791c26c4884c3e98e67deff7c3425549d7abdb32ac560b334fa3b880d11",
+          "format": "zip",
+          "sha256": "b9955feb8be6630f3b3433e2b8bd9b57bacb82b08c715233df46ebc30a651d05",
+          "size": 30659,
+          "media_type": null,
+          "architecture": null,
+          "content_state": "materialized",
+          "limitations": []
+        },
+        "evidence_id": "ev_2683b5ba4f080aebffb1c418df6dd02c4a1bf7b7b26cd22a7c9fdb6eb2cc5e89"
+      },
+      {
+        "observation_id": "aio_2029a69d2a4178731c53e1f42977a96f894508978d2b06433cc0c5fb56695fd5",
+        "kind": "occurrence",
+        "subject": "occ_09bc261b7999cff28af21117598b2322bbd7d5f6783fb8040627a14a77ab4735",
+        "value": {
+          "occurrence_id": "occ_09bc261b7999cff28af21117598b2322bbd7d5f6783fb8040627a14a77ab4735",
+          "artifact_id": "art_f50fc791c26c4884c3e98e67deff7c3425549d7abdb32ac560b334fa3b880d11",
+          "parent_occurrence_id": null,
+          "logical_path": ".",
+          "entry_kind": "file",
+          "artifact_kind": "container",
+          "artifact_format": "zip",
+          "declared_size": 30659,
+          "compressed_size": null,
+          "executable": false,
+          "encrypted": false,
+          "hash_status": "verified",
+          "source_location": null,
+          "limitations": []
+        },
+        "evidence_id": "ev_2683b5ba4f080aebffb1c418df6dd02c4a1bf7b7b26cd22a7c9fdb6eb2cc5e89"
+      },
+      {
+        "observation_id": "aio_ee19f8dbe3db0e9d46a37f832520cfc5fa9b7ef85c5ae1015923dbbd94f2b22a",
+        "kind": "occurrence",
+        "subject": "occ_4ddba3fb66a611198fef919ce930a85a1774daae305abc101982d6c1af5555df",
+        "value": {
+          "occurrence_id": "occ_4ddba3fb66a611198fef919ce930a85a1774daae305abc101982d6c1af5555df",
+          "artifact_id": "art_04c7b82a8bc2bca5da64c92073c6f3b52c21bf330ec8606d2fabbbcaa53bf2f1",
+          "parent_occurrence_id": "occ_09bc261b7999cff28af21117598b2322bbd7d5f6783fb8040627a14a77ab4735",
+          "logical_path": "eboot.bin",
+          "entry_kind": "file",
+          "artifact_kind": "resource",
+          "artifact_format": "file",
+          "declared_size": 33912,
+          "compressed_size": 30108,
+          "executable": false,
+          "encrypted": false,
+          "hash_status": "verified",
+          "source_location": null,
+          "limitations": []
+        },
+        "evidence_id": "ev_2683b5ba4f080aebffb1c418df6dd02c4a1bf7b7b26cd22a7c9fdb6eb2cc5e89"
+      },
+      {
+        "observation_id": "aio_9309ff6e62ba450988569f09823b64f49ea882b39a668e437714de4bf6ff0768",
+        "kind": "occurrence",
+        "subject": "occ_81b40753a2fa6faeaab7fdedf0d7dd413cfc170a6a70a079f3ad67297c5c5f03",
+        "value": {
+          "occurrence_id": "occ_81b40753a2fa6faeaab7fdedf0d7dd413cfc170a6a70a079f3ad67297c5c5f03",
+          "artifact_id": "art_21c6755b4c8faea59faa10852b928122e43ba1e4e5e242b7185df75ebdb9f34c",
+          "parent_occurrence_id": "occ_09bc261b7999cff28af21117598b2322bbd7d5f6783fb8040627a14a77ab4735",
+          "logical_path": "sce_sys/param.sfo",
+          "entry_kind": "file",
+          "artifact_kind": "resource",
+          "artifact_format": "file",
+          "declared_size": 788,
+          "compressed_size": 325,
+          "executable": false,
+          "encrypted": false,
+          "hash_status": "verified",
+          "source_location": null,
+          "limitations": []
+        },
+        "evidence_id": "ev_2683b5ba4f080aebffb1c418df6dd02c4a1bf7b7b26cd22a7c9fdb6eb2cc5e89"
+      }
+    ],
+    "derived_relationships": [
+      {
+        "relationship_id": "air_0297bbf8640e9c378319db74d764502691022d1ff588514bdfdeafb4ea0d0c36",
+        "relation": "contains",
+        "source_artifact_id": "art_f50fc791c26c4884c3e98e67deff7c3425549d7abdb32ac560b334fa3b880d11",
+        "target_artifact_id": "art_21c6755b4c8faea59faa10852b928122e43ba1e4e5e242b7185df75ebdb9f34c",
+        "occurrence_id": "occ_81b40753a2fa6faeaab7fdedf0d7dd413cfc170a6a70a079f3ad67297c5c5f03",
+        "logical_path": "sce_sys/param.sfo",
+        "evidence_id": "ev_2683b5ba4f080aebffb1c418df6dd02c4a1bf7b7b26cd22a7c9fdb6eb2cc5e89"
+      },
+      {
+        "relationship_id": "air_3ceb2333d2de345095c743bfab5cae93b882a1c45d92244ad20eacca6508d82b",
+        "relation": "contains",
+        "source_artifact_id": "art_f50fc791c26c4884c3e98e67deff7c3425549d7abdb32ac560b334fa3b880d11",
+        "target_artifact_id": "art_04c7b82a8bc2bca5da64c92073c6f3b52c21bf330ec8606d2fabbbcaa53bf2f1",
+        "occurrence_id": "occ_4ddba3fb66a611198fef919ce930a85a1774daae305abc101982d6c1af5555df",
+        "logical_path": "eboot.bin",
+        "evidence_id": "ev_2683b5ba4f080aebffb1c418df6dd02c4a1bf7b7b26cd22a7c9fdb6eb2cc5e89"
+      }
+    ],
+    "hypotheses": [],
+    "contradictions": [],
+    "unexplored_branches": [],
+    "next_probes": [],
+    "coverage": {
+      "status": "complete-within-substeps",
+      "substeps_completed": 1,
+      "observations_retained": 7,
+      "observations_omitted": 0,
+      "relationships_retained": 2,
+      "relationships_omitted": 0,
+      "hypotheses_retained": 0,
+      "hypotheses_omitted": 0,
+      "unexplored_branches_retained": 0,
+      "unexplored_branches_omitted": 0,
+      "next_probes_retained": 0,
+      "next_probes_omitted": 0
+    },
+    "evidence_links": [
+      "ev_2683b5ba4f080aebffb1c418df6dd02c4a1bf7b7b26cd22a7c9fdb6eb2cc5e89"
+    ],
+    "limitations": [
+      "Inspection derives bounded static hypotheses and next probes; it does not execute the artifact or claim format-specific semantics."
+    ]
+  },
+  "confidence": "observed",
+  "authority": "shipped-artifact",
+  "environment": null,
+  "limitations": [
+    "Inspection derives bounded static hypotheses and next probes; it does not execute the artifact or claim format-specific semantics."
+  ],
+  "locations": [
+    {
+      "kind": "artifact-path",
+      "path": "."
+    },
+    {
+      "kind": "artifact-path",
+      "path": "eboot.bin"
+    },
+    {
+      "kind": "artifact-path",
+      "path": "sce_sys/param.sfo"
+    }
+  ],
+  "evidence_links": [
+    "ev_2683b5ba4f080aebffb1c418df6dd02c4a1bf7b7b26cd22a7c9fdb6eb2cc5e89"
+  ]
+}

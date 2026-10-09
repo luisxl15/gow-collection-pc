@@ -27,8 +27,9 @@ CFLAGS=("${ARCH_FLAGS[@]}" -O2 -ffreestanding -fno-builtin -fno-common -ffunctio
         -Wall -Wno-unused-function -I"$VITASDK/arm-vita-eabi/include" -I"$ROOT/runtime/vita"
         -I"$ROOT/runtime")
 STUBS=(-lSceLibKernel_stub -lSceSysmem_stub -lSceDisplay_stub -lSceDriverUser_stub
-       -lSceCtrl_stub -lSceKernelThreadMgr_stub -lSceIofilemgr_stub -lSceProcessmgr_stub
-       -lSceRtabi_stub)
+       -lSceCtrl_stub -lSceKernelThreadMgr_stub -lSceIofilemgr_stub -lSceProcessmgr_stub)
+# Note: SceRtabi is deliberately not linked: its __aeabi_* exports would shadow
+# libgcc's soft helpers (e.g. __aeabi_d2lz) and Vita3K does not implement them.
 
 "$CC" "${CFLAGS[@]}" "${extra[@]}" -nostartfiles -nostdlib -Wl,-q -Wl,-e,_start \
   -Wl,--gc-sections -o "$out/$name.elf" \

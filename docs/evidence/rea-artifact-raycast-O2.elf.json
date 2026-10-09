@@ -1,0 +1,14 @@
+{
+  "error": "Analysis failed",
+  "code": "target_unavailable",
+  "category": "unavailable",
+  "message": "Cannot open artifact: unsupported ELF architecture. Check that the path exists, is readable, and points to a supported file.",
+  "retryable": false,
+  "remediation": {
+    "action": "Cannot open artifact: unsupported ELF architecture. Check that the path exists, is readable, and points to a supported file."
+  },
+  "details": {
+    "path": "/home/user/vita-recomp-lab/build/diff/raycast-O2/raycast-O2.elf",
+    "reason": "unsupported ELF architecture"
+  }
+}
