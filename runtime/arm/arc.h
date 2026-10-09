@@ -12,6 +12,7 @@ typedef struct arc_ctx {
   uint64_t d[32];      /* VFP/NEON D registers; S(2k) = low half of D(k), S(2k+1) = high half */
   uint32_t fpscr;
   uint32_t tpidruro;
+  uint32_t apsr_rest; /* APSR bits other than NZCV (Q, GE); Q is not yet modelled */
 } arc_ctx;
 
 typedef void (*arc_func)(arc_ctx *);

@@ -176,6 +176,8 @@ class FnEmitter:
         if extra is not None:   # post-indexed: access at base, then base += extra
             if extra.type == A.ARM_OP_IMM:
                 e = extra.imm
+                if not i.thumb:  # ARM: the sign lives in the U bit (capstone drops it for LDRH/LDRSB/STRH...)
+                    e = abs(e) if (int.from_bytes(i.raw, "little") >> 23) & 1 else -abs(e)
                 post = f"{base} + {u32(e)}" if e >= 0 else f"{base} - {u32(-e)}"
             else:
                 val, _ = self.shifted(i, extra, False)
@@ -399,8 +401,9 @@ class FnEmitter:
             rot = src.shift.value if src.shift.type == SFT_ROR else 0
             if rot:
                 x = f"ARC_ROR({x}, {rot})"
-            ext = {"b": "(uint8_t)", "h": "(uint16_t)"}[n[3]]
-            val = f"(uint32_t){ext}{x}" if n[0] == "u" else f"(uint32_t)(int32_t)({'int8_t' if n[3] == 'b' else 'int16_t'}){x}"
+            size = n[-1]  # uxtb / uxtab -> 'b'
+            ext = {"b": "(uint8_t)", "h": "(uint16_t)"}[size]
+            val = f"(uint32_t){ext}{x}" if n[0] == "u" else f"(uint32_t)(int32_t)({'int8_t' if size == 'b' else 'int16_t'}){x}"
             if len(n) == 5:  # *xta*: add
                 val = f"{self.r(i, R(1))} + {val}"
             return [f"{self.w(R(0))} = {val};"]
@@ -422,6 +425,17 @@ class FnEmitter:
             x, _ = self.shifted(i, ops[2], False)
             fn_ = "arc_usat" if n == "usat" else "arc_ssat"
             return [f"{self.w(R(0))} = {fn_}({x}, {sat});"]
+
+        if n == "mrs":
+            self.flag_r("fn", "fz", "fc", "fv")
+            return [f"{self.w(R(0))} = (fn << 31) | (fz << 30) | (fc << 29) | (fv << 28) | ctx->apsr_rest;"]
+        if n == "msr":
+            src = ops[-1]
+            val = u32(src.imm) if src.type == A.ARM_OP_IMM else self.r(i, self.regnum(i, src))
+            self.flag_w("fn", "fz", "fc", "fv")
+            t = self.new_tmp()
+            return [f"{{ uint32_t {t} = {val}; fn = {t} >> 31; fz = ({t} >> 30) & 1u; fc = ({t} >> 29) & 1u;"
+                    f" fv = ({t} >> 28) & 1u; ctx->apsr_rest = (ctx->apsr_rest & ~0x08000000u) | ({t} & 0x08000000u); }}"]
 
         # ---- VFP ----
         if n.startswith("v") or n in ("fconsts", "fconstd", "fmstat"):
@@ -805,6 +819,10 @@ def emit_function(prog: Program, f: Function, trace: bool = False) -> tuple[str,
             body += ["    " + l for l in em.insn(i)]
         except EmitError as e:
             errors.append(str(e))
+            body.append(f"    arc_unimpl(ctx, {a:#010x}u);")
+            continue
+        except Exception as e:  # translator bug: keep going, report precisely
+            errors.append(f"{a:#x}: internal error {type(e).__name__}: {e} in '{i.cs.mnemonic} {i.cs.op_str}'")
             body.append(f"    arc_unimpl(ctx, {a:#010x}u);")
         nxt = i.next
         if nxt not in f.insns and not _ends_flow(i):
