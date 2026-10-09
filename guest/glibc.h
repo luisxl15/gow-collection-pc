@@ -22,12 +22,17 @@ typedef long long s64;
 
 #define NULL ((void *)0)
 
-#define SYS_exit 4001
-#define SYS_write 4004
+#if defined(__mips__)
+#define SYS_BASE 4000 /* Linux o32 */
+#else
+#define SYS_BASE 0 /* Linux ARM EABI */
+#endif
+#define SYS_exit (SYS_BASE + 1)
+#define SYS_write (SYS_BASE + 4)
 /* Platform syscalls (not Linux; -ENOSYS under qemu). */
-#define SYS_plat_present 4900 /* a0 = framebuffer (RGBA8888), a1 = width, a2 = height */
-#define SYS_plat_buttons 4901 /* returns button bitmask, or -ENOSYS */
-#define SYS_plat_ticks 4902   /* returns microseconds, or -ENOSYS */
+#define SYS_plat_present (SYS_BASE + 900) /* a0 = framebuffer (RGBA8888), a1 = width, a2 = height */
+#define SYS_plat_buttons (SYS_BASE + 901) /* returns button bitmask, or -ENOSYS */
+#define SYS_plat_ticks (SYS_BASE + 902)   /* returns microseconds, or -ENOSYS */
 
 long g_syscall3(long n, long a, long b, long c);
 void g_exit(int code) __attribute__((noreturn));

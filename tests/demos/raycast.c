@@ -10,8 +10,12 @@
  */
 #include "../../guest/glibc.h"
 
+#ifndef W
 #define W 320
+#endif
+#ifndef H
 #define H 240
+#endif
 #ifndef DEMO_FRAMES
 #define DEMO_FRAMES 48
 #endif

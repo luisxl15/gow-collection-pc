@@ -1,6 +1,7 @@
 #include <stdarg.h>
 #include "glibc.h"
 
+#if defined(__mips__)
 long g_syscall3(long n, long a, long b, long c) {
   register long v0 __asm__("$2") = n;
   register long a0 __asm__("$4") = a;
@@ -14,6 +15,23 @@ long g_syscall3(long n, long a, long b, long c) {
                      "$25", "hi", "lo", "memory");
   return a3 ? -v0 : v0;
 }
+#elif defined(__arm__)
+/* ARM EABI Linux: number in r7, args r0-r2, result (or -errno) in r0.
+ * Written as naked asm because r7 is the Thumb frame pointer at -O0. */
+__attribute__((naked)) long g_syscall3(long n, long a, long b, long c) {
+  __asm__ volatile(
+      "push {r7}\n"
+      "mov r7, r0\n"
+      "mov r0, r1\n"
+      "mov r1, r2\n"
+      "mov r2, r3\n"
+      "svc #0\n"
+      "pop {r7}\n"
+      "bx lr\n");
+}
+#else
+#error "unsupported guest architecture"
+#endif
 
 void g_exit(int code) {
   g_syscall3(SYS_exit, code, 0, 0);
@@ -221,3 +239,8 @@ void g_puts(const char *s) {
   g_write(1, s, strlen(s));
   g_write(1, "\n", 1);
 }
+
+#if defined(__arm__)
+/* libgcc's __aeabi_idiv0/__aeabi_ldiv0 (division by zero) call raise(SIGFPE). */
+int raise(int sig) { g_exit(128 + sig); }
+#endif

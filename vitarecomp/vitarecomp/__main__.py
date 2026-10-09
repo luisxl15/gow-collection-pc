@@ -76,13 +76,49 @@ def inspect(path: Path, out: Path | None) -> int:
     return 0
 
 
+def recomp(path: Path, out: Path, linux: bool, trace: bool = False) -> int:
+    from .arm import analysis, generate, image
+    data = path.read_bytes()
+    if linux:
+        img = image.from_linux_elf(data)
+    else:
+        try:
+            mod = modmod.load(data, path.name)
+        except modmod.ModuleError as e:
+            print(f"vitarecomp: error: {e}", file=sys.stderr)
+            return 1
+        db = nids.load_db()
+        for imp in mod.imports:
+            imp.name = nids.name_of(imp.library_nid, imp.nid, db)
+        for exp in mod.exports:
+            exp.name = nids.name_of(exp.library_nid, exp.nid, db)
+        img = image.from_vita_module(mod)
+    prog = analysis.analyze(img)
+    m = generate.generate(prog, out, trace)
+    print(f"vitarecomp: {m['functions']} functions ({m['thumb_functions']} Thumb), "
+          f"{m['instructions']} instructions -> {out}")
+    if m["untranslated"]:
+        print(f"vitarecomp: {len(m['untranslated'])} instruction(s) not translated yet (runtime trap):",
+              file=sys.stderr)
+        for e in m["untranslated"][:15]:
+            print("   ", e, file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="vitarecomp")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("inspect", help="load a Vita module and report its structure")
     p.add_argument("path", type=Path)
     p.add_argument("-o", "--out", type=Path)
+    p = sub.add_parser("recomp", help="recompile ARM code to C")
+    p.add_argument("path", type=Path)
+    p.add_argument("-o", "--out", type=Path, required=True)
+    p.add_argument("--linux", action="store_true", help="input is a Linux ARM ELF (test guests)")
+    p.add_argument("--trace-insn", action="store_true", help="log full CPU state before every instruction")
     args = ap.parse_args(argv)
+    if args.cmd == "recomp":
+        return recomp(args.path, args.out, args.linux, args.trace_insn)
     if args.cmd == "inspect":
         return inspect(args.path, args.out)
     return 2
