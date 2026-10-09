@@ -22,7 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RT = ROOT / "runtime"
-GEN_FLAGS = ["-fno-strict-aliasing", "-ffp-contract=off", "-fno-math-errno", "-w"]
+GEN_FLAGS = ["-fno-thread-jumps", "-fwrapv", "-fno-strict-aliasing", "-ffp-contract=off", "-fno-math-errno", "-w"]
 ARM_CC = ["arm-linux-gnueabihf-gcc", "-static", "-mthumb", "-march=armv7-a+simd",
           "-mtune=cortex-a9", "-mfloat-abi=hard"]
 

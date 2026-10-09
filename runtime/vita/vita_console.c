@@ -43,6 +43,8 @@ int vcon_init(void) {
 
 void vcon_set_color(uint32_t abgr) { fg = abgr; }
 
+uint32_t *vcon_framebuffer(void) { return fb; }
+
 void vcon_clear(void) {
   for (int i = 0; i < FB_PITCH * FB_H; i++) fb[i] = bg;
   cur_x = cur_y = 0;

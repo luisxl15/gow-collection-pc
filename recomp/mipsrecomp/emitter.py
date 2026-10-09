@@ -12,6 +12,8 @@ Model
 """
 from __future__ import annotations
 
+import re
+
 from .analysis import Function, Program
 from .decoder import (BRANCH, BRANCH_LIKELY, BRANCH_LINK, CALL, CALL_REG, FMT_D, FMT_S, FMT_W,
                       JUMP, JUMP_REG, Insn)
@@ -47,8 +49,10 @@ def fname(f: Function) -> str:
 
 
 class Emitter:
-    def __init__(self, prog: Program, trace: bool = False, trace_insn: bool = False):
+    def __init__(self, prog: Program, trace: bool = False, trace_insn: bool = False,
+                 locals_: bool = True):
         self.prog = prog
+        self.locals = locals_
         self.trace = trace
         self.trace_insn = trace_insn
 
@@ -194,7 +198,8 @@ class Emitter:
         if op in ("swl", "swr"):
             return [f"rc_{op}({ea(i)}, {R(rt)});"]
         if op == "mul":
-            return W(rd, f"(uint32_t)({S(rs)} * {S(rt)})")
+            # Unsigned multiply: signed overflow would be UB in C (and GCC exploits it).
+            return W(rd, f"{R(rs)} * {R(rt)}")
         if op == "clz":
             return W(rd, f"RC_CLZ({R(rs)})")
         if op == "clo":
@@ -446,4 +451,98 @@ class Emitter:
                 else:
                     lines.append(f"    rc_fallthrough(ctx, {e:#010x}u);")
         lines.append("}")
-        return "\n".join(lines)
+        return "\n".join(localize(lines)) if self.locals else "\n".join(lines)
+
+
+# ---- register promotion ------------------------------------------------------
+# Guest registers are rewritten from ctx fields into C locals so the host
+# compiler can keep them in machine registers (guest memory stores through
+# rc_mem would otherwise force reloads of every ctx field). State is written
+# back to ctx before calls/syscalls/returns and reloaded after calls.
+
+_CALL_RE = re.compile(r"\b((?:rc_[0-9a-f]{8}_\w+)|rc_dispatch|rc_syscall|rc_trace_insn)\((ctx[^;]*)\);")
+_TAIL_RE = re.compile(r"\b(rc_[0-9a-f]{8}_\w+|rc_dispatch)\((ctx[^;]*)\); return;")
+_ASSIGN_RE = re.compile(r"\b(r\d+|f\d+|hi|lo|fcsr) (?:[|&]?=)(?!=)")
+
+
+PROMOTE_FPRS = True
+
+
+def localize(lines: list[str]) -> list[str]:
+    head, body = lines[:2], lines[2:-1]
+    text = "\n".join(body)
+    gprs: set[int] = set()
+    fprs: set[int] = set()
+    written: set[str] = set()
+
+    def gpr(m):
+        gprs.add(int(m[1]))
+        return f"r{m[1]}"
+
+    def fpr(m):
+        fprs.add(int(m[1]))
+        return f"f{m[1]}"
+
+    def fs(m):
+        fprs.add(int(m[1]))
+        return f"RC_LFS({m[1]})"
+
+    def fd(m):
+        n = int(m[1])
+        fprs.update((n & ~1, n | 1))
+        return f"RC_LFD({n & ~1}, {n | 1})"
+
+    def set_fs(m):
+        fprs.add(int(m[1]))
+        written.add(f"f{m[1]}")
+        return f"RC_LSET_FS({m[1]},"
+
+    def set_fd(m):
+        n = int(m[1])
+        fprs.update((n & ~1, n | 1))
+        written.update((f"f{n & ~1}", f"f{n | 1}"))
+        return f"RC_LSET_FD({n & ~1}, {n | 1},"
+
+    text = re.sub(r"ctx->r\[(\d+)\]", gpr, text)
+    if PROMOTE_FPRS:
+        text = re.sub(r"ctx->f\[(\d+)\]", fpr, text)
+        text = re.sub(r"RC_FS\(ctx, (\d+)\)", fs, text)
+        text = re.sub(r"RC_FD\(ctx, (\d+)\)", fd, text)
+        text = re.sub(r"RC_SET_FS\(ctx, (\d+),", set_fs, text)
+        text = re.sub(r"RC_SET_FD\(ctx, (\d+),", set_fd, text)
+        text = text.replace("ctx->fcr31", "fcsr")
+    text = text.replace("ctx->hi", "hi").replace("ctx->lo", "lo")
+    if "rc_div(ctx, " in text or "rc_divu(ctx, " in text:
+        written.update(("hi", "lo"))
+    text = text.replace("rc_divu(ctx, ", "RC_DIVU(").replace("rc_div(ctx, ", "RC_DIV(")
+    text = re.sub(r"rc_cfc1\(ctx, (\d+)\)", r"RC_CFC1(\1)", text)
+    if PROMOTE_FPRS:
+        if "rc_ctc1(ctx, " in text:
+            written.add("fcsr")
+        text = text.replace("rc_ctc1(ctx, ", "RC_CTC1(")
+    else:
+        text = re.sub(r"RC_CFC1\((\d+)\)", r"rc_cfc1(ctx, \1)", text)
+    written.update(_ASSIGN_RE.findall(text))
+
+    special = [n for n in (("hi", "lo", "fcsr") if PROMOTE_FPRS else ("hi", "lo")) if re.search(rf"\b{n}\b", text) or
+               (n in ("hi", "lo") and "RC_DIV" in text) or (n == "fcsr" and "RC_C" in text)]
+    field = {"hi": "hi", "lo": "lo", "fcsr": "fcr31"}
+    used = [f"r{n}" for n in sorted(gprs)] + [f"f{n}" for n in sorted(fprs)] + special
+
+    def ctx_field(v: str) -> str:
+        if v[0] == "r" and v[1:].isdigit():
+            return f"ctx->r[{v[1:]}]"
+        if v[0] == "f" and v[1:].isdigit():
+            return f"ctx->f[{v[1:]}]"
+        return f"ctx->{field[v]}"
+
+    out_vars = [v for v in used if v in written]
+    sync_out = " ".join(f"{ctx_field(v)} = {v};" for v in out_vars)
+    sync_in = " ".join(f"{v} = {ctx_field(v)};" for v in used)
+
+    text = _TAIL_RE.sub(lambda m: f"{{ {sync_out} {m[1]}({m[2]}); return; }}", text)
+    text = _CALL_RE.sub(lambda m: f"{{ {sync_out} {m[1]}({m[2]}); {sync_in} }}", text)
+    text = re.sub(r"(?<![{;] )\breturn;", f"{{ {sync_out} return; }}", text)
+    # Returns already guarded by a tail-call sync above keep a single flush.
+    decls = [f"    uint32_t {v} = {ctx_field(v)};" for v in used]
+    return head + decls + text.split("\n") + ["    " + sync_out, lines[-1]]

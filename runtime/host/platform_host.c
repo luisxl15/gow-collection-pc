@@ -18,8 +18,7 @@ long rc_platform_write(int fd, const void *buf, uint32_t len) {
 }
 
 void rc_platform_exit(int code) {
-  fflush(stdout);
-  _exit(code);
+  exit(code);
 }
 
 long rc_platform_present(const uint8_t *rgba, uint32_t w, uint32_t h) {

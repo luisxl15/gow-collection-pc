@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from gen_fuzz import generate  # noqa: E402
 
 RT = ROOT / "runtime"
-FLAGS = ["-O1", "-fno-strict-aliasing", "-ffp-contract=off", "-fno-math-errno", "-w",
+FLAGS = ["-O1", "-fno-thread-jumps", "-fwrapv", "-fno-strict-aliasing", "-ffp-contract=off", "-fno-math-errno", "-w",
          f"-I{RT}"]
 ARM_CC = ["arm-linux-gnueabihf-gcc", "-static", "-mthumb", "-march=armv7-a+simd",
           "-mtune=cortex-a9", "-mfloat-abi=hard"]
