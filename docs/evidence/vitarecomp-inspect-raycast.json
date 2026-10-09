@@ -1,0 +1,145 @@
+{
+  "module": "raycast.elf",
+  "segments": [
+    {
+      "index": 0,
+      "vaddr": "0x00008000",
+      "memsz": 41680,
+      "filesz": 41680,
+      "flags": 5
+    },
+    {
+      "index": 1,
+      "vaddr": "0x00013030",
+      "memsz": 1332,
+      "filesz": 1032,
+      "flags": 6
+    }
+  ],
+  "module_start": "0x00008001",
+  "module_stop": null,
+  "relocations": {
+    "ABS32": 86,
+    "THM_CALL": 238,
+    "THM_MOVW_ABS_NC": 47,
+    "THM_MOVT_ABS": 47
+  },
+  "imports": [
+    {
+      "library": "SceCtrl",
+      "library_nid": "0xd197e3c7",
+      "nid": "0xa497b150",
+      "name": "sceCtrlSetSamplingMode",
+      "kind": "func",
+      "stub": "0x0000f470",
+      "vita3k": "implemented"
+    },
+    {
+      "library": "SceCtrl",
+      "library_nid": "0xd197e3c7",
+      "nid": "0xa9c3ced6",
+      "name": "sceCtrlPeekBufferPositive",
+      "kind": "func",
+      "stub": "0x0000f460",
+      "vita3k": "implemented"
+    },
+    {
+      "library": "SceLibKernel",
+      "library_nid": "0xcae9ace6",
+      "nid": "0x7595d9aa",
+      "name": "sceKernelExitProcess",
+      "kind": "func",
+      "stub": "0x0000f400",
+      "vita3k": "implemented"
+    },
+    {
+      "library": "SceLibKernel",
+      "library_nid": "0xcae9ace6",
+      "nid": "0xb110c123",
+      "name": "sceKernelGetProcessTimeWide",
+      "kind": "func",
+      "stub": "0x0000f410",
+      "vita3k": "implemented"
+    },
+    {
+      "library": "SceLibKernel",
+      "library_nid": "0xcae9ace6",
+      "nid": "0xfa26bc62",
+      "name": "sceClibPrintf",
+      "kind": "func",
+      "stub": "0x0000f3f0",
+      "vita3k": "implemented"
+    },
+    {
+      "library": "SceThreadmgr",
+      "library_nid": "0x859a24b1",
+      "nid": "0x4b675d05",
+      "name": "sceKernelDelayThread",
+      "kind": "func",
+      "stub": "0x0000f480",
+      "vita3k": "implemented"
+    },
+    {
+      "library": "SceDisplay",
+      "library_nid": "0x5ed8f994",
+      "nid": "0x5795e898",
+      "name": "sceDisplayWaitVblankStart",
+      "kind": "func",
+      "stub": "0x0000f440",
+      "vita3k": "implemented"
+    },
+    {
+      "library": "SceDisplayUser",
+      "library_nid": "0x4faacd11",
+      "nid": "0x7a410b64",
+      "name": "sceDisplaySetFrameBuf",
+      "kind": "func",
+      "stub": "0x0000f450",
+      "vita3k": "implemented"
+    },
+    {
+      "library": "SceSysmem",
+      "library_nid": "0x37fe725a",
+      "nid": "0xb8ef5818",
+      "name": "sceKernelGetMemBlockBase",
+      "kind": "func",
+      "stub": "0x0000f430",
+      "vita3k": "implemented"
+    },
+    {
+      "library": "SceSysmem",
+      "library_nid": "0x37fe725a",
+      "nid": "0xb9d5ebde",
+      "name": "sceKernelAllocMemBlock",
+      "kind": "func",
+      "stub": "0x0000f420",
+      "vita3k": "implemented"
+    }
+  ],
+  "exports": [
+    {
+      "library": "<main>",
+      "nid": "0x935cd196",
+      "name": null,
+      "addr": "0x00008001",
+      "kind": "func"
+    },
+    {
+      "library": "<main>",
+      "nid": "0x6c2224ba",
+      "name": null,
+      "addr": "0x00012030",
+      "kind": "var"
+    },
+    {
+      "library": "<main>",
+      "nid": "0x70fba1e7",
+      "name": null,
+      "addr": "0x0001208c",
+      "kind": "var"
+    }
+  ],
+  "vita3k_hle_summary": {
+    "implemented": 10
+  }
+}
