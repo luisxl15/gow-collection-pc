@@ -616,6 +616,12 @@ class FnEmitter:
     def vfp(self, i: Insn) -> list[str]:  # noqa: C901
         n, ops, cs = i.name, i.cs.operands, i.cs
         mn = cs.mnemonic
+        if is_neon(i):
+            from .neon import Neon, NeonError
+            try:
+                return Neon(self, i).translate()
+            except NeonError as e:
+                raise EmitError(f"{i.addr:#x}: {e}")
         if n in ("vldr", "vstr"):
             kind, k = self.vreg(i, ops[0])
             addr, _, _ = self.mem_addr(i, ops[1])
@@ -786,6 +792,42 @@ class FnEmitter:
             ty = "float" if dk == "s" else "double"
             return [self.vset(dk, d, f"({ty}){src}")]
         raise EmitError(f"{i.addr:#x}: vcvt {to}<-{frm} not supported yet")
+
+
+NEON_ONLY = {"vld1", "vld2", "vld3", "vld4", "vst1", "vst2", "vst3", "vst4", "vdup", "vext", "vtrn", "vzip",
+             "vuzp", "vswp", "vtbl", "vtbx", "vrev16", "vrev32", "vrev64", "vmovl", "vmovn", "vqmovn",
+             "vqmovun", "vshrn", "vrshrn", "vqshrn", "vqrshrn", "vqshrun", "vqrshrun", "vshll", "vaddl",
+             "vsubl", "vaddw", "vsubw", "vmull", "vmlal", "vmlsl", "vpadd", "vpaddl", "vpadal", "vpmax",
+             "vpmin", "vbsl", "vbit", "vbif", "vand", "vorr", "veor", "vbic", "vorn", "vmvn", "vtst",
+             "vceq", "vcge", "vcgt", "vcle", "vclt", "vacge", "vacgt", "vqadd", "vqsub", "vhadd", "vrhadd",
+             "vhsub", "vabd", "vaba", "vabdl", "vabal", "vmax", "vmin", "vrecpe", "vrsqrte", "vrecps",
+             "vrsqrts", "vshl", "vshr", "vrshr", "vsra", "vrsra", "vsri", "vsli", "vqshl", "vqshlu",
+             "vrshl", "vqrshl", "vqdmulh", "vqrdmulh", "vcnt", "vclz", "vcls", "vqabs", "vqneg",
+             "vaddhn", "vraddhn", "vsubhn", "vrsubhn"}
+VFP_ONLY = {"vldr", "vstr", "vpush", "vpop", "vldmia", "vstmia", "vldmdb", "vstmdb", "vmrs", "vmsr",
+            "fmstat", "fconsts", "fconstd", "vcmp", "vcmpe", "vsqrt", "vdiv", "vnmul", "vnmla", "vnmls",
+            "vcvtr"}
+
+
+def is_neon(i: Insn) -> bool:
+    """Advanced SIMD vs scalar VFP share mnemonics; decide from operands and data type."""
+    if i.name in VFP_ONLY:
+        return False
+    names = [i.cs.reg_name(o.reg) for o in i.cs.operands if o.type == A.ARM_OP_REG]
+    if any(nm[0] == "q" for nm in names):
+        return True
+    if any(nm[0] == "s" and nm[1:].isdigit() for nm in names):
+        return False
+    if i.name in NEON_ONLY:
+        return True
+    dts = i.cs.mnemonic.split(".")[1:]
+    if "f64" in dts:
+        return False
+    if i.name == "vmov":
+        has_lane = any(o.vector_index != -1 for o in i.cs.operands)
+        has_imm = any(o.type in (A.ARM_OP_IMM, A.ARM_OP_FP) for o in i.cs.operands)
+        return has_lane or has_imm or (bool(dts) and dts[0] != "f64" and not any(nm[0] == "r" for nm in names))
+    return any(nm[0] == "d" for nm in names)
 
 
 class _FakeShift:

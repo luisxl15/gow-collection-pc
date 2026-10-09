@@ -163,6 +163,81 @@ void arc_trace_insn(arc_ctx *ctx, uint32_t pc) {
   arc_platform_log(buf);
 }
 
+/* ---- NEON reciprocal estimates (ARMv7 ARM pseudocode, 8-bit tables) ---- */
+static int recip_est(int q) { /* q in 256..511 */
+  double r = 1.0 / (((double)q + 0.5) / 512.0);
+  return (int)(256.0 * r + 0.5);
+}
+static int rsqrt_est(int q, int lowrange) {
+  double r = lowrange ? 1.0 / __builtin_sqrt(((double)q + 0.5) / 512.0) : 1.0 / __builtin_sqrt(((double)q + 0.5) / 256.0);
+  return (int)(256.0 * r + 0.5);
+}
+
+float arc_recpe(float xf) {
+  uint32_t op = arc_fbits(arc_nftz(xf)), sign = op & 0x80000000u, exp = (op >> 23) & 0xff;
+  if ((op & 0x7fffffffu) > 0x7f800000u) return arc_bitsf(0x7fc00000u);
+  if (exp == 0xff) return arc_bitsf(sign);
+  if (exp == 0) return arc_bitsf(sign | 0x7f800000u);
+  if (exp >= 253) return arc_bitsf(sign);
+  int s = recip_est(256 + ((op & 0x7fffff) >> 15));
+  return arc_bitsf(sign | ((253 - exp) << 23) | ((uint32_t)(s - 256) << 15));
+}
+
+float arc_rsqrte(float xf) {
+  uint32_t op = arc_fbits(arc_nftz(xf)), exp = (op >> 23) & 0xff;
+  if ((op & 0x7fffffffu) > 0x7f800000u) return arc_bitsf(0x7fc00000u);
+  if ((op & 0x7fffffffu) == 0) return arc_bitsf((op & 0x80000000u) | 0x7f800000u);
+  if (op & 0x80000000u) return arc_bitsf(0x7fc00000u);
+  if (exp == 0xff) return arc_bitsf(0);
+  /* even exponent: significand scaled to [0.5,1) (q/256); odd: [0.25,0.5) (q/512) */
+  int s = rsqrt_est(128 + (int)((op & 0x7fffff) >> 16), (int)(exp & 1));
+  return arc_bitsf(((uint32_t)((380 - exp) / 2) << 23) | ((uint32_t)(s - 256) << 15));
+}
+
+uint32_t arc_recpe_u32(uint32_t x) {
+  if (!(x & 0x80000000u)) return 0xffffffffu;
+  return 0x80000000u | ((uint32_t)(recip_est((int)(x >> 23)) - 256) << 23);
+}
+
+uint32_t arc_rsqrte_u32(uint32_t x) {
+  if (!(x & 0xc0000000u)) return 0xffffffffu;
+  int s = (x & 0x80000000u) ? rsqrt_est((int)(x >> 24), 0) : rsqrt_est((int)(x >> 23), 1);
+  return 0x80000000u | ((uint32_t)(s - 256) << 23);
+}
+
+float arc_recps(float a, float b) {
+  a = arc_nftz(a), b = arc_nftz(b);
+  if (a != a || b != b) return arc_bitsf(0x7fc00000u);
+  if ((__builtin_isinf(a) && b == 0) || (__builtin_isinf(b) && a == 0)) return 2.0f;
+  return arc_nfix(2.0f - arc_nfix(a * b));
+}
+
+float arc_rsqrts(float a, float b) {
+  a = arc_nftz(a), b = arc_nftz(b);
+  if (a != a || b != b) return arc_bitsf(0x7fc00000u);
+  if ((__builtin_isinf(a) && b == 0) || (__builtin_isinf(b) && a == 0)) return 1.5f;
+  return arc_nfix(arc_nfix(3.0f - arc_nfix(a * b)) / 2.0f);
+}
+
+uint64_t arc_nshl(uint64_t x, int8_t sh, int n, int is_signed, int rounding, int saturating) {
+  __int128 v = is_signed ? (__int128)(int64_t)(x << (64 - n)) >> (64 - n) : (__int128)(x & (n == 64 ? ~0ull : (1ull << n) - 1));
+  __int128 r;
+  if (sh >= 0) {
+    r = sh >= 64 ? (v ? (v < 0 ? -((__int128)1 << 100) : ((__int128)1 << 100)) : 0) : v << sh;
+  } else {
+    int s = -sh;
+    if (rounding) r = s > 64 ? 0 : (v + ((__int128)1 << (s - 1))) >> s;
+    else r = s >= 64 ? (v < 0 ? -1 : 0) : v >> s;
+  }
+  if (saturating) {
+    __int128 lo = is_signed ? -((__int128)1 << (n - 1)) : 0;
+    __int128 hi = is_signed ? ((__int128)1 << (n - 1)) - 1 : (((__int128)1 << n) - 1);
+    if (r < lo) r = lo;
+    if (r > hi) r = hi;
+  }
+  return (uint64_t)r;
+}
+
 int arc_run(void) {
   arc_mem = arc_platform_reserve_4g();
   if (!arc_mem) {

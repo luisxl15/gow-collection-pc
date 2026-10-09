@@ -120,6 +120,50 @@ uint32_t arc_f2s16(double v, unsigned rmode); /* result sign-extended to 32 bits
 uint32_t arc_f2u16(double v, unsigned rmode);
 uint32_t arc_vcmp_flags(double a, double b);
 
+/* ---- NEON ---- */
+static inline uint32_t ARC_L8(uint32_t a) { return ARC_LBU(a); }
+static inline uint32_t ARC_L16(uint32_t a) { return ARC_LHU(a); }
+static inline uint32_t ARC_L32(uint32_t a) { return ARC_LW(a); }
+static inline uint64_t ARC_L64(uint32_t a) { uint64_t v; __builtin_memcpy(&v, ARC_P(a), 8); return v; }
+static inline void ARC_S8(uint32_t a, uint32_t v) { ARC_SB(a, v); }
+static inline void ARC_S16(uint32_t a, uint32_t v) { ARC_SH(a, v); }
+static inline void ARC_S32(uint32_t a, uint32_t v) { ARC_SW(a, v); }
+static inline void ARC_S64(uint32_t a, uint64_t v) { __builtin_memcpy(ARC_P(a), &v, 8); }
+/* "Standard FPSCR" semantics used by every NEON float op: flush-to-zero + default NaN. */
+static inline float arc_nftz(float x) {
+  uint32_t b = arc_fbits(x);
+  return (b & 0x7f800000u) == 0 ? arc_bitsf(b & 0x80000000u) : x;
+}
+static inline float arc_nfix(float r) {
+  if (r != r) return arc_bitsf(0x7fc00000u);
+  return arc_nftz(r);
+}
+static inline float arc_nmax(float a, float b) {
+  if (a != a || b != b) return arc_bitsf(0x7fc00000u);
+  if (a == 0 && b == 0) return arc_bitsf(arc_fbits(a) & arc_fbits(b)); /* +0 wins */
+  return a > b ? a : b;
+}
+static inline float arc_nmin(float a, float b) {
+  if (a != a || b != b) return arc_bitsf(0x7fc00000u);
+  if (a == 0 && b == 0) return arc_bitsf(arc_fbits(a) | arc_fbits(b)); /* -0 wins */
+  return a < b ? a : b;
+}
+float arc_recpe(float x);
+float arc_rsqrte(float x);
+uint32_t arc_recpe_u32(uint32_t x);
+uint32_t arc_rsqrte_u32(uint32_t x);
+float arc_recps(float a, float b);
+float arc_rsqrts(float a, float b);
+static inline __int128 arc_sat_s(__int128 v, long long lo, long long hi) { return v < lo ? lo : v > hi ? hi : v; }
+static inline __int128 arc_sat_u(__int128 v, unsigned long long hi) { return v < 0 ? 0 : v > (__int128)hi ? (__int128)hi : v; }
+static inline uint32_t arc_cls(int32_t x, int n) {
+  int32_t v = (int32_t)((uint32_t)x << (32 - n)) >> (32 - n);
+  uint32_t t = (uint32_t)(v ^ (v >> 31));
+  return t == 0 ? (uint32_t)(n - 1) : (uint32_t)(__builtin_clz(t) - (32 - n) - 1);
+}
+/* VSHL/VRSHL/VQSHL/VQRSHL by a signed per-lane register amount. */
+uint64_t arc_nshl(uint64_t x, int8_t sh, int n, int is_signed, int rounding, int saturating);
+
 /* ---- services ---- */
 void arc_dispatch(arc_ctx *ctx, uint32_t target, uint32_t from);
 void arc_svc(arc_ctx *ctx, uint32_t imm, uint32_t pc);

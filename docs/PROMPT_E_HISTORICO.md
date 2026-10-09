@@ -168,6 +168,14 @@ Achado: o *jump threading* do GCC deixava o código promovido 40% mais lento.
   - **validação: imagem relocada idêntica byte a byte ao ELF linkado** (0 divergências);
   - comando: `python -m vitarecomp inspect eboot.bin`.
 
+### 3.8 Tradutor ARMv7 → C (fase 2 do `vitarecomp`)
+Pedido: "e continue com o tradutor". Detalhes em `docs/tradutor-arm.md`.
+* Cobre **ARM + Thumb-2 + VFPv3 + NEON**, a CPU do Vita (Cortex-A9). O oráculo é o `qemu-arm`, que tem o mesmo ISA.
+* **20/20** suítes C (-O0…-Os, com NEON autovetorizado), 4/4 em modo ARM e o raycaster: idênticos.
+* **Fuzzing: 620/620 Thumb-2, 420/420 ARM e 460/460 NEON**, comparando o estado completo.
+* `tools/lockstep_arm.py` encontra a primeira instrução divergente. Revelou o estado IT perdido e bugs do
+  capstone (bit S em `ADC.W`, sinal pós-índice em modo ARM), todos corrigidos.
+
 ---
 
 ## 4. Commits
@@ -178,7 +186,10 @@ Achado: o *jump threading* do GCC deixava o código promovido 40% mais lento.
 | `974ca57` | Promoção de registradores, plataforma Vita, raycaster |
 | `a3626af` | Execução no Vita3K, documentação e relatório de viabilidade |
 | `6dd4544` | `vitarecomp` fase 1 (carregador Vita) e arquitetura do recomp do GoW |
-| *(este)* | `docs/PROMPT_E_HISTORICO.md` |
+| `46cdb81` | `docs/PROMPT_E_HISTORICO.md` |
+| `62be87f` | Tradutor ARMv7 (ARM + Thumb-2 + VFP) → C |
+| `3e90fed` | Fuzzer ARM/Thumb/VFP e correções |
+| *(este)* | NEON completo para o subconjunto do Cortex-A9 + fuzzer NEON + docs |
 
 O repositório tem 58 arquivos versionados e cerca de 3 mil linhas de código próprio entre Python, C e scripts.
 
@@ -190,7 +201,7 @@ O repositório tem 58 arquivos versionados e cerca de 3 mil linhas de código pr
 |---|---|
 | Analisar o God of War Collection | O PKG está no computador do usuário, fora do alcance desta sessão na nuvem. Também é preciso a **zRIF** (licença) para descriptografar, ou um dump já descriptografado. |
 | Testar os formatos compactos de relocação do SDK oficial | Só é possível com o binário do jogo |
-| Fase 2: tradutor ARM/Thumb-2/VFP/NEON → C | Próxima etapa; não depende do jogo |
+| Fase 3: ligar os imports (NIDs) do Vita ao HLE do Vita3K | Próxima etapa |
 | Renderizador `sceGxm` → Vulkan | Depende das fases 2 e 3; projetado em `docs/gow-arquitetura.md` |
 | Medir em hardware real | Não há Vita físico. O alvo agora é PC, então a medição passa a ser no próprio PC. |
 | Persistir o trabalho | O repositório existe só neste container temporário. **É preciso indicar um repositório do GitHub para o push.** |
