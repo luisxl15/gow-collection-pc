@@ -59,7 +59,9 @@ Medição: `tools/usse_translate_all.py <captura>` traduz todos os programas e p
 | + predicados (vtst), kill | 2.299 |
 | + vpck f32/f16 | 2.306 |
 | + vbw | 2.437 |
-| + vldst (storage buffer), i32mad, vpck f32→u16, spec/smlsi | **3.111 de 4.922 (63%)**, 0 inválidos |
+| + vldst (storage buffer), i32mad, vpck f32→u16, spec/smlsi | 3.111 |
+| + repetição SLMSI (vmov, vpck, vbw) | 3.824 |
+| + vdual | **4.785 de 4.922 (97,2%)**, 0 inválidos |
 
 Fatos medidos no caminho:
 - Os ossos do skinning são matrizes 4x4 em vetor-linha (16 palavras por `vldst`), misturadas como
@@ -79,14 +81,15 @@ Fatos medidos no caminho:
 - `vlog`/`vexp` estão em base 2, o que ainda precisa ser validado.
 - A semântica ainda não foi comparada com execução real.
 
-Falta, por programa (primeira instrução não coberta):
-- `vdual` 761;
-- `vmov` 701 (repetição e inteiro condicional);
-- `vpck` 328 (repetição no modo SLMSI);
-- `br` 10, `vdp` 8 (repetido), `smp` 3 (texturas dependentes).
-
-As instruções repetidas são recusadas de propósito: traduzi-las sem o modelo SLMSI daria SPIR-V válido e
+Falta, por programa (primeira instrução não coberta): `vdp` repetido 112, `smp` 15 (texturas dependentes),
+`br` 10. As instruções repetidas sem modelo são recusadas de propósito: traduzi-las daria SPIR-V válido e
 errado.
+
+O próximo marco não é cobertura, é **fidelidade**:
+1. ligar a E/S de verdade (contêineres de SA, endereços de buffer, literais, varyings e as leituras de
+   textura não dependentes nos PA);
+2. rodar o `interp.py` sobre os desenhos capturados e conferir as posições na tela;
+3. rodar o SPIR-V numa GPU e comparar com o interpretador.
 
 ## Próximos passos (em ordem)
 
