@@ -25,6 +25,7 @@ class Machine:
                   ((O.TEMP, 256), (O.PA, 256), (O.SA, 512), (O.OUT, 128), (O.FPI, 64), (O.GLOBAL, 256))}
         self.pred = [False] * 4
         self.killed = False
+        self.rep = O.RepeatState()
         self.memory = None  # bytes: memória vista pelo vldst (endereço = deslocamento em bytes)
 
     def _half(self, bank, w, h, val=None):
@@ -72,6 +73,9 @@ class Machine:
                 k += 1
 
     def step(self, ins, second=False):
+        if ins.op == "smlsi":
+            self.rep.smlsi(ins.f)
+            return
         low = lower(ins, second)
         if low is None:
             raise NotImplementedError(ins.op)
@@ -150,6 +154,12 @@ class Machine:
                 rhs = 0.0
             self.pred[d.num] = {"ne": lhs != rhs, "eq": lhs == rhs, "lt": lhs < rhs, "le": lhs <= rhs,
                                 "gt": lhs > rhs, "ge": lhs >= rhs}[cmp]
+            return
+        if mn.startswith("vmovrep"):
+            for r in range(int(mn[7:]) + 1):
+                src = O.shifted(srcs[0], self.rep.offset(1, r, srcs[0].bank, 2))
+                dst = O.shifted(d, self.rep.offset(3, r, d.bank, 2))
+                self.write(dst, m, rd(src, m), half)
             return
         if mn == "vmov":
             self.write(d, m, rd(srcs[0], m), half)

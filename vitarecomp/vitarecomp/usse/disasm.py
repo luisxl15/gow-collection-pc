@@ -69,8 +69,10 @@ def lower(ins, second=False):
     if ins.op == "vmov":
         # move_data_type: 0 i8, 1 i16, 2 i32, 3 c10, 4 f16, 5 f32, 6 u8, 7 u16, 8 u32
         t = f["move_data_type"]
-        if t not in (2, 4, 5, 8) or f["move_type"] == 2 or f["repeat_count"]:
+        if t not in (2, 4, 5, 8) or f["move_type"] == 2:
             return None
+        if f["repeat_count"] and (f["move_type"] != 0 or t != 5):
+            return None  # repetição: só a cópia F32 incondicional por enquanto
         double = t in (4, 5)
         bits = 7 if double else 6
         d = O.dest(f["dest_n"], f["dest_bank_sel"], f["dest_bank_ext"], double, bits, second)
@@ -80,6 +82,8 @@ def lower(ins, second=False):
             s1.swizzle = O.vec34_swizzle(f["src0_swiz"], False, 2)
         suffix = ".f16" if t == 4 else ""
         if f["move_type"] == 0:
+            if f["repeat_count"]:
+                return ("vmovrep%d" % f["repeat_count"], d, mask, [s1])
             return ("vmov" + suffix, d, mask, [s1])
         if t not in (4, 5):
             return None  # comparação inteira: ainda não
@@ -191,7 +195,9 @@ def lower(ins, second=False):
         return ("vldst", d, f["mask_count"] + 1, [s0, s1, s2])
     if ins.op == "kill":
         return ("kill", O.Operand(O.PRED, 0), 0, [])
-    if ins.op in ("nop", "phas", "spec", "smlsi"):
+    if ins.op == "smlsi":
+        return ("smlsi", None, 0, [])  # o estado é aplicado por quem executa (RepeatState)
+    if ins.op in ("nop", "phas", "spec"):
         # spec: sincronização; smlsi: incrementos de repetição (recusamos instruções repetidas)
         return (ins.op, None, 0, [])
     return None

@@ -156,3 +156,31 @@ def predicate(ins):
     if v not in table:
         raise ValueError("predicado %d não suportado em %s" % (v, ins.op))
     return table[v]
+
+
+class RepeatState:
+    """Incrementos de repetição (modo SLMSI): por operando (0 src0, 1 src1, 2 src2, 3 dest) e
+    repetição r; padrão r; redefinidos pelo smlsi para as instruções seguintes."""
+
+    def __init__(self):
+        self.inc = [[j for j in range(17)] for _ in range(4)]
+
+    def smlsi(self, f):
+        for idx, mode, val in ((3, f["dest_inc_mode"], f["dest_inc"]), (0, f["src0_inc_mode"], f["src0_inc"]),
+                               (1, f["src1_inc_mode"], f["src1_inc"]), (2, f["src2_inc_mode"], f["src2_inc"])):
+            if mode:
+                for i in range(4):
+                    self.inc[idx][i] = (val >> (2 * i)) & 3
+            else:
+                sv = val - 256 if val >= 128 else val
+                for i in range(17):
+                    self.inc[idx][i] = i * sv
+
+    def offset(self, idx, r, bank, mult):
+        inc = self.inc[idx][r]
+        return inc * mult if bank in (TEMP, PA, OUT, SA) else inc
+
+
+def shifted(op, n):
+    """Cópia do operando deslocada n registradores (de 32 bits)."""
+    return Operand(op.bank, op.num + n, op.swizzle, op.neg, op.abs, op.gpi)

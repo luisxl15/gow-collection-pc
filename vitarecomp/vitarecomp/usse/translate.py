@@ -35,6 +35,7 @@ class Translator:
         self.boolt = b._type("bool", 20)
         self.preds = b.variable(b.array(self.f32, 4), S.SCPrivate, "pred")
         self.cur_pred = None  # (id do bool) enquanto a instrução atual é predicada
+        self.rep = O.RepeatState()
 
     def const(self, v):
         return self.b.const(self.f32, float(v))
@@ -105,6 +106,9 @@ class Translator:
                 k += 1
 
     def instr(self, ins, second):
+        if ins.op == "smlsi":
+            self.rep.smlsi(ins.f)
+            return
         low = lower(ins, second)
         if low is None:
             raise Unsupported(ins.op)
@@ -268,6 +272,12 @@ class Translator:
                 old = b.load(self.f32, b.chain(S.SCPrivate, self.f32, self.preds, b.const(self.i32, d.num)))
                 val = b.emit(169, self.f32, self.cur_pred, val, old)
             b.store(b.chain(S.SCPrivate, self.f32, self.preds, b.const(self.i32, d.num)), val)
+            return
+        if mn.startswith("vmovrep"):
+            for r in range(int(mn[7:]) + 1):
+                src = O.shifted(srcs[0], self.rep.offset(1, r, srcs[0].bank, 2))
+                dst = O.shifted(d, self.rep.offset(3, r, d.bank, 2))
+                self.write(dst, m, rd(src, m), half)
             return
         if mn == "vmov":
             self.write(d, m, rd(srcs[0], m), half)
