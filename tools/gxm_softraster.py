@@ -121,26 +121,28 @@ class Raster:
         if "g_Transforms" in names:
             tr = uniform(vu, vparams, "g_Transforms", 4 * 64)
             if tr is not None and proj is not None:
-                # Ossos como matrizes 3x4 (três vec4 cada); dois ossos por vértice, peso em posAndWeight.w.
-                bones = tr[:len(tr) // 12 * 12].reshape(-1, 3, 4)
+                # Ossos 4x4 em convenção de vetor-linha (16 floats cada; o shader lê 16 palavras com
+                # vldst e faz x*L0 + y*L1 + z*L2 + L3), dois ossos misturados como A + w*(B - A).
+                bones = tr[:len(tr) // 16 * 16].reshape(-1, 4, 4)
                 ph = np.c_[p4[:, :3], np.ones(nv)]
                 if "indices" in attrs:
                     kind = "skin"
                     ind = attrs["indices"].astype(np.int64) % len(bones)
                     wgt = pos[:, 3:4] if pos.shape[1] > 3 else np.ones((nv, 1))
-                    w0 = np.einsum("nij,nj->ni", bones[ind[:, 0]], ph)
-                    w1 = np.einsum("nij,nj->ni", bones[ind[:, 1]], ph)
-                    wp = wgt * w0 + (1 - wgt) * w1
+                    a = np.einsum("nj,nji->ni", ph, bones[ind[:, 0]])
+                    b = np.einsum("nj,nji->ni", ph, bones[ind[:, 1]])
+                    wp = (a + wgt * (b - a))[:, :3]
                 else:
                     kind = "rigid"
-                    wp = ph @ bones[0].T
-                clip = np.c_[wp, np.ones(nv)] @ proj.reshape(4, 4)
+                    wp = (ph @ bones[0])[:, :3]
+                # Medido: projeção aplicada como coluna (P @ v), 82.637 de 170.719 vértices na tela contra 12.078.
+                clip = np.c_[wp, np.ones(nv)] @ proj.reshape(4, 4).T
         elif vp_m is not None and world is not None:
             kind = "world"
-            clip = (p4 @ world.reshape(4, 4)) @ vp_m.reshape(4, 4)
+            clip = (p4 @ world.reshape(4, 4)) @ vp_m.reshape(4, 4).T
         elif proj is not None:
             kind = "proj"
-            clip = p4 @ proj.reshape(4, 4)
+            clip = p4 @ proj.reshape(4, 4).T
         self.stats[kind] = self.stats.get(kind, 0) + 1
 
         # cor por vértice e coordenada de textura
