@@ -110,6 +110,13 @@ instruções. Hipóteses a testar:
 
 O teste é ler com +4 e ver se as posições caem na tela.
 
+**Resultado:** +4 não resolve (`USSE_MEM_SHIFT=4` dá w ≈ 477 e x ≈ −1400, ainda fora da tela), e a hipótese
+"base deslocada de uma palavra" foi descartada. Próximo a examinar:
+- o conteúdo real de `g_Transforms` no buffer capturado (compará-lo com o que o rasterizador de prova usa e
+  que funcionou);
+- a ordem das metades `u16` dos índices;
+- o fato de `posAndWeight.w` = 0 nos primeiros vértices.
+
 O próximo marco não é cobertura, é **fidelidade**:
 1. ligar a E/S de verdade (contêineres de SA, endereços de buffer, literais, varyings e as leituras de
    textura não dependentes nos PA);

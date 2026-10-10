@@ -57,7 +57,8 @@ def main():
     samples = []
     for v in range(nv):
         m = Machine()
-        m.memory = vu
+        shift = int(os.environ.get("USSE_MEM_SHIFT", "0"))  # teste de hipótese da base do buffer
+        m.memory = vu[shift:] if shift >= 0 else bytes(-shift) + vu
         for res, (vals, comps) in by_res.items():
             m.r[O.PA][res:res + 4] = vals[v]
         if 14 in cont:
