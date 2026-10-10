@@ -13,6 +13,9 @@
 #include <fcntl.h>
 #include <io.h>
 #include <sys/stat.h>
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
 
 namespace fs = std::filesystem;
 
@@ -101,9 +104,26 @@ VT_HLE(sceIoClose) {
     g_files.erase(it);
     ret(ctx, 0);
 }
+// Leitura/escrita posicional atômica (várias threads do jogo usam o mesmo descritor).
+static int pio(int fd, uint32_t buf, uint32_t n, int64_t off, bool write) {
+    commit_range(buf, n);
+    HANDLE h = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+    OVERLAPPED ov{};
+    ov.Offset = (DWORD)off;
+    ov.OffsetHigh = (DWORD)(off >> 32);
+    DWORD done = 0;
+    const BOOL ok = write ? WriteFile(h, ptr<void>(buf), n, &done, &ov) : ReadFile(h, ptr<void>(buf), n, &done, &ov);
+    if (!ok && GetLastError() != ERROR_HANDLE_EOF) {
+        logf("vitart: E/S posicional falhou (erro %lu, buf 0x%08x, %u bytes, offset %lld)", GetLastError(), buf, n, (long long)off);
+        return -1;
+    }
+    return (int)done;
+}
+
 VT_HLE(sceIoRead) {
     const int fd = host_fd(arg(ctx, 0));
     if (fd < 0) return ret(ctx, SCE_ERROR_ERRNO_EBADF);
+    commit_range(arg(ctx, 1), arg(ctx, 2));
     const int n = _read(fd, ptr<void>(arg(ctx, 1)), arg(ctx, 2));
     ret(ctx, n < 0 ? SCE_ERROR_ERRNO_EBADF : (uint32_t)n);
 }
@@ -116,6 +136,7 @@ VT_HLE(sceIoWrite) {
         logf("[jogo] %s", s.c_str());
         return ret(ctx, arg(ctx, 2));
     }
+    commit_range(arg(ctx, 1), arg(ctx, 2));
     const int n = _write(fd, ptr<void>(arg(ctx, 1)), arg(ctx, 2));
     ret(ctx, n < 0 ? SCE_ERROR_ERRNO_EBADF : (uint32_t)n);
 }
@@ -132,20 +153,14 @@ VT_HLE(sceIoPread) {
     const int fd = host_fd(arg(ctx, 0));
     if (fd < 0) return ret(ctx, SCE_ERROR_ERRNO_EBADF);
     const int64_t off = (int64_t)((uint64_t)arg(ctx, 4) | ((uint64_t)arg(ctx, 5) << 32));
-    const int64_t cur = _lseeki64(fd, 0, SEEK_CUR);
-    _lseeki64(fd, off, SEEK_SET);
-    const int n = _read(fd, ptr<void>(arg(ctx, 1)), arg(ctx, 2));
-    _lseeki64(fd, cur, SEEK_SET);
+    const int n = pio(fd, arg(ctx, 1), arg(ctx, 2), off, false);
     ret(ctx, n < 0 ? SCE_ERROR_ERRNO_EBADF : (uint32_t)n);
 }
 VT_HLE(sceIoPwrite) {
     const int fd = host_fd(arg(ctx, 0));
     if (fd < 0) return ret(ctx, SCE_ERROR_ERRNO_EBADF);
     const int64_t off = (int64_t)((uint64_t)arg(ctx, 4) | ((uint64_t)arg(ctx, 5) << 32));
-    const int64_t cur = _lseeki64(fd, 0, SEEK_CUR);
-    _lseeki64(fd, off, SEEK_SET);
-    const int n = _write(fd, ptr<void>(arg(ctx, 1)), arg(ctx, 2));
-    _lseeki64(fd, cur, SEEK_SET);
+    const int n = pio(fd, arg(ctx, 1), arg(ctx, 2), off, true);
     ret(ctx, n < 0 ? SCE_ERROR_ERRNO_EBADF : (uint32_t)n);
 }
 VT_HLE(sceIoSync) { ret(ctx, 0); }

@@ -95,6 +95,45 @@ bool region_of(uint32_t addr, uint32_t *start, uint32_t *size, std::string *what
 static std::string describe_host_pc(const void *pc);
 static void dump_thread_regs();
 
+void commit_range(uint32_t addr, uint32_t size) {
+    if (!size) return;
+    const uint64_t first = (uint64_t)addr & ~0xFFFFull, last = ((uint64_t)addr + size - 1) & ~0xFFFFull;
+    for (uint64_t page = first; page <= last; page += 0x10000)
+        if (region_of((uint32_t)page, nullptr, nullptr, nullptr) || region_of((uint32_t)(page + 0xFFFF), nullptr, nullptr, nullptr))
+            VirtualAlloc(g_mem + page, 0x10000, MEM_COMMIT, PAGE_READWRITE);
+}
+
+void dump_regions(const std::string &dir, uint32_t lo, uint32_t hi) {
+    std::vector<Region> rs;
+    {
+        const std::lock_guard<std::mutex> lock(g_regions_mutex);
+        for (auto &[st, r] : g_regions)
+            if (st >= lo && st < hi)
+                rs.push_back(r);
+    }
+    std::ofstream idx(dir + "/regions.txt");
+    for (const Region &r : rs) {
+        char name[64];
+        std::snprintf(name, sizeof name, "/mem_%08x.bin", r.start);
+        std::ofstream f(dir + name, std::ios::binary);
+        // Só as páginas já confirmadas: as demais são zero e não precisam existir no arquivo.
+        for (uint32_t off = 0; off < r.size;) {
+            MEMORY_BASIC_INFORMATION mbi{};
+            VirtualQuery(g_mem + r.start + off, &mbi, sizeof mbi);
+            const uint8_t *end = static_cast<const uint8_t *>(mbi.BaseAddress) + mbi.RegionSize;
+            const uint32_t n = static_cast<uint32_t>(std::min<uint64_t>(end - (g_mem + r.start + off), r.size - off));
+            if (mbi.State == MEM_COMMIT)
+                f.write(reinterpret_cast<const char *>(g_mem + r.start + off), n);
+            else {
+                f.seekp(n, std::ios::cur);
+                if (off + n == r.size) { f.seekp(-1, std::ios::cur); f.put(0); }
+            }
+            off += n;
+        }
+        idx << std::hex << r.start << " " << r.size << " " << r.what << '\n';
+    }
+}
+
 static LONG CALLBACK on_fault(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
     if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2)
@@ -202,6 +241,15 @@ static std::unordered_map<std::string, HleFn> &hle_table() {
 HleReg::HleReg(const char *name, HleFn fn) { hle_table()[name] = fn; }
 
 static bool g_trace = false, g_strict = false;
+static std::vector<std::string> g_trace_filter; // VITART_TRACE=a,b,c: só nomes que contêm a, b ou c
+
+static bool trace_wanted(const char *name) {
+    if (g_trace_filter.empty()) return true;
+    if (!name) return false;
+    for (const std::string &f : g_trace_filter)
+        if (std::strstr(name, f.c_str())) return true;
+    return false;
+}
 
 // ============================================================ serviços da DLL
 static thread_local Thread *t_current;
@@ -235,16 +283,22 @@ static void host_import(arc_ctx *ctx, uint32_t nid, uint32_t stub) {
     Binding &b = *it->second;
     switch (b.kind) {
     case Binding::exported:
-        stats().export_calls++;
-        call_guest_raw(ctx, b.target);
+    case Binding::hle: {
+        const bool tr = g_trace && trace_wanted(b.imp->name);
+        uint32_t a[4] = { ctx->r[0], ctx->r[1], ctx->r[2], ctx->r[3] };
+        const uint32_t lr = ctx->r[14];
+        if (b.kind == Binding::exported) {
+            stats().export_calls++;
+            call_guest_raw(ctx, b.target);
+        } else {
+            stats().hle_calls++;
+            b.fn(ctx);
+        }
+        if (tr)
+            logf("[%s t%d] %s(%08x, %08x, %08x, %08x) = %08x lr=%08x", b.kind == Binding::hle ? "hle" : "exp",
+                t_current ? t_current->id & 0xFFFF : 0, b.imp->name ? b.imp->name : "?", a[0], a[1], a[2], a[3], ctx->r[0], lr);
         return;
-    case Binding::hle:
-        stats().hle_calls++;
-        if (g_trace)
-            logf("[hle] %s:%s(%08x, %08x, %08x, %08x) lr=%08x", b.imp->lib ? b.imp->lib : "?", b.imp->name ? b.imp->name : "?",
-                ctx->r[0], ctx->r[1], ctx->r[2], ctx->r[3], ctx->r[14]);
-        b.fn(ctx);
-        return;
+    }
     case Binding::missing:
         stats().missing_calls++;
         if (!b.reported.exchange(true))
@@ -568,7 +622,16 @@ int main(int argc, char **argv) {
         usage();
     if (g_data.empty())
         g_data = g_app + "/../vitart-data";
-    g_trace = getenv("VITART_TRACE") != nullptr;
+    if (const char *tr = getenv("VITART_TRACE")) {
+        g_trace = true;
+        std::string f = tr;
+        if (f != "1")
+            for (size_t p = 0; p <= f.size();) {
+                const size_t q = (std::min)(f.find(',', p), f.size());
+                if (q > p) g_trace_filter.push_back(f.substr(p, q - p));
+                p = q + 1;
+            }
+    }
     g_strict = getenv("VITART_STRICT") != nullptr;
 
     mem_init();

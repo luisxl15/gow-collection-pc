@@ -38,6 +38,11 @@ inline void wr64(uint32_t a, uint64_t v) { std::memcpy(mem_base() + a, &v, 8); }
 inline const char *gstr(uint32_t a) { return a ? reinterpret_cast<const char *>(mem_base() + a) : ""; }
 void map_region(uint32_t addr, uint32_t size, const char *what);
 bool region_of(uint32_t addr, uint32_t *start, uint32_t *size, std::string *what);
+// Despeja as regiões mapeadas em [lo, hi) como arquivos <dir>/mem_<início>.bin (diagnóstico).
+void dump_regions(const std::string &dir, uint32_t lo, uint32_t hi);
+// Confirma as páginas de [addr, addr+size) antes de o host (E/S do sistema) escrever nelas: o
+// kernel do Windows não passa pelo tratador de falhas e falharia com acesso negado.
+void commit_range(uint32_t addr, uint32_t size);
 // Alocadores simples por faixa (sem devolução por enquanto: o objetivo é medir o que o jogo pede).
 enum class Pool { kernel, user, cdram };
 uint32_t galloc(Pool pool, uint32_t size, uint32_t align, const char *what);

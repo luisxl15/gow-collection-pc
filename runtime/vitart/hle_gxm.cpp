@@ -5,6 +5,9 @@
 #include "vitart.h"
 
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <deque>
 #include <map>
 #include <memory>
@@ -83,6 +86,43 @@ static void report_frame() {
     }
 }
 
+// ============================================================ captura (diagnóstico)
+// VITART_DUMP_FRAME=N e VITART_DUMP_DIR=dir: no N-ésimo quadro enviado, grava os descritores de
+// textura usados nos desenhos (textures.txt) e a memória do jogo, para decodificar fora.
+static uint32_t g_dump_frame = 0;
+static std::string g_dump_dir;
+static std::atomic<uint32_t> g_submitted{ 0 };
+static std::map<std::string, uint32_t> g_dump_textures; // descritor de 16 bytes -> desenhos
+static std::mutex g_dump_mutex;
+
+static void dump_init() {
+    if (const char *f = std::getenv("VITART_DUMP_FRAME")) g_dump_frame = (uint32_t)std::atoi(f);
+    if (const char *d = std::getenv("VITART_DUMP_DIR")) g_dump_dir = d;
+    if (g_dump_frame && g_dump_dir.empty()) g_dump_dir = "dump";
+}
+static bool dumping() { return g_dump_frame && g_submitted.load() + 1 == g_dump_frame; }
+static void dump_texture(uint32_t t) {
+    if (!t || !dumping()) return;
+    const std::lock_guard<std::mutex> lock(g_dump_mutex);
+    g_dump_textures[std::string(ptr<char>(t), 16)]++;
+}
+static void dump_write(uint32_t fb) {
+    std::filesystem::create_directories(g_dump_dir);
+    {
+        std::ofstream f(g_dump_dir + "/textures.txt");
+        const std::lock_guard<std::mutex> lock(g_dump_mutex);
+        for (auto &[d, n] : g_dump_textures) {
+            const uint32_t *w = reinterpret_cast<const uint32_t *>(d.data());
+            char line[96];
+            std::snprintf(line, sizeof line, "%08x %08x %08x %08x %u\n", w[0], w[1], w[2], w[3], n);
+            f << line;
+        }
+    }
+    dump_regions(g_dump_dir, 0x83000000u, 0xB0000000u);
+    logf("vitart: captura do quadro %u em %s: %zu texturas, framebuffer 0x%08x", g_dump_frame, g_dump_dir.c_str(),
+        g_dump_textures.size(), fb);
+}
+
 // =============================================================== inicialização
 struct DisplayEntry {
     std::vector<uint8_t> data;
@@ -121,6 +161,7 @@ VT_HLE(sceGxmInitialize) {
     g_display_cb = rd32(p + 8);
     g_display_data_size = rd32(p + 12);
     g_dq_buffer = new_object(g_display_data_size ? g_display_data_size : 16, "gxm:display-data");
+    dump_init();
     spawn_host_thread("SceGxmDisplayQueue", display_thread);
     logf("vitart: sceGxmInitialize: callback 0x%08x, dados %u bytes, até %u pendentes, parameter buffer 0x%x",
         g_display_cb, g_display_data_size, g_display_max_pending, rd32(p + 16));
@@ -476,6 +517,8 @@ VT_HLE(sceGxmEndScene) {
 }
 VT_HLE(sceGxmDisplayQueueAddEntry) {
     // (oldBuffer, newBuffer, const void *callbackData)
+    if (dumping()) dump_write(arg(ctx, 1));
+    g_submitted++;
     DisplayEntry e;
     if (arg(ctx, 2) && g_display_data_size)
         e.data.assign(ptr<uint8_t>(arg(ctx, 2)), ptr<uint8_t>(arg(ctx, 2)) + g_display_data_size);
@@ -504,6 +547,8 @@ VT_HLE(sceGxmDraw) {
     auto c = context_of(arg(ctx, 0));
     if (!c) return ret(ctx, GXM_ERROR_INVALID_POINTER);
     g_draws++;
+    if (dumping())
+        for (uint32_t t : c->textures) dump_texture(t);
     if (c->in_scene && c->scene.draws.size() < 100000)
         c->scene.draws.push_back(DrawCall{ arg(ctx, 1), arg(ctx, 2), arg(ctx, 3), arg(ctx, 4), c->vprog, c->fprog });
     ret(ctx, SCE_OK);
