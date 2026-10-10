@@ -58,7 +58,8 @@ Medição: `tools/usse_translate_all.py <captura>` traduz todos os programas e p
 | + vmad2, vmov | 869 |
 | + predicados (vtst), kill | 2.299 |
 | + vpck f32/f16 | 2.306 |
-| + vbw | **2.437 de 4.922 (49,5%)**, 0 inválidos |
+| + vbw | 2.437 |
+| + vldst (storage buffer), i32mad, vpck f32→u16, spec/smlsi | **3.111 de 4.922 (63%)**, 0 inválidos |
 
 Fatos medidos no caminho:
 - Os ossos do skinning são matrizes 4x4 em vetor-linha (16 palavras por `vldst`), misturadas como
