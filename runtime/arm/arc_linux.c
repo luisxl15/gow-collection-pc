@@ -47,3 +47,9 @@ int arc_platform_initial_state(arc_ctx *ctx) {
 }
 
 int main(void) { return arc_run(); }
+
+/* Nos testes, um retorno para outro lugar que não o chamador é erro: os guests não usam longjmp. */
+void arc_ret_mismatch(arc_ctx *ctx, uint32_t expected) {
+  fprintf(stderr, "arc: return to %08x, expected %08x\n", ctx->r[15], expected);
+  arc_platform_exit(134);
+}

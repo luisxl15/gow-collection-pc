@@ -133,7 +133,10 @@ def instr(rng) -> str:
     if k == 24:
         sz = rng.choice([8, 16, 32, 64])
         lanes = (16 if kind == "q" else 8) // (sz // 8)
-        return f"vext.{sz} {R(rng)}, {R(rng)}, {R(rng)}, #{rng.randrange(lanes)}"
+        imm = rng.randrange(lanes)
+        if sz == 64 and kind != "q":   # o clang recusa vext.64 em D; é o mesmo que vext.8 com #imm*8
+            sz, imm = 8, imm * 8
+        return f"vext.{sz} {R(rng)}, {R(rng)}, {R(rng)}, #{imm}"
     if k == 25:
         n = rng.randint(1, 4)
         base = rng.randrange(0, 32 - n + 1)

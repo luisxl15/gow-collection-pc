@@ -12,6 +12,7 @@ typedef struct arc_ctx {
   uint64_t d[32];      /* VFP/NEON D registers; S(2k) = low half of D(k), S(2k+1) = high half */
   uint32_t fpscr;
   uint32_t tpidruro;
+  uint32_t tpidrurw;   /* TLS de usuário gravável (mcr/mrc p15,0,rX,c13,c0,2) */
   uint32_t apsr_rest; /* APSR bits other than NZCV (Q, GE); Q is not yet modelled */
 } arc_ctx;
 
@@ -119,6 +120,9 @@ uint32_t arc_f2u32(double v, unsigned rmode);
 uint32_t arc_f2s16(double v, unsigned rmode); /* result sign-extended to 32 bits */
 uint32_t arc_f2u16(double v, unsigned rmode);
 uint32_t arc_vcmp_flags(double a, double b);
+/* VCVTB/VCVTT: meia precisão <-> simples, com FPSCR (AHP bit 26, DN 25, FZ 24, RMode 23:22). */
+uint32_t arc_f16_to_f32(uint32_t h, uint32_t fpscr);
+uint32_t arc_f32_to_f16(uint32_t f, uint32_t fpscr);
 
 /* ---- NEON ---- */
 static inline uint32_t ARC_L8(uint32_t a) { return ARC_LBU(a); }
@@ -166,6 +170,9 @@ uint64_t arc_nshl(uint64_t x, int8_t sh, int n, int is_signed, int rounding, int
 
 /* ---- services ---- */
 void arc_dispatch(arc_ctx *ctx, uint32_t target, uint32_t from);
+/* Um chamado voltou para ctx->r[15] != `expected` (longjmp do guest, troca de contexto): o runtime
+ * precisa desempilhar o C e continuar em r[15]. Cada plataforma decide como (fatal nos testes). */
+__attribute__((noreturn)) void arc_ret_mismatch(arc_ctx *ctx, uint32_t expected);
 void arc_svc(arc_ctx *ctx, uint32_t imm, uint32_t pc);
 void arc_import(arc_ctx *ctx, uint32_t nid, uint32_t pc);
 __attribute__((noreturn)) void arc_trap(arc_ctx *ctx, uint32_t pc);

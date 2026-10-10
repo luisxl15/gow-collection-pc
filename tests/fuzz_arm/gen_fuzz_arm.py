@@ -83,6 +83,9 @@ def misc(rng, thumb: bool, cond: str = "", allow_mem: bool = True) -> str:
     d, a, b, c = reg(rng), reg(rng), reg(rng), reg(rng)
     k = rng.randrange(12)
     if k == 0:
+        if rng.random() < 0.5:   # parte alta com sinal: o clang usa em ((int64)a*b)>>32
+            op = rng.choice(["smmul", "smmulr", "smmla", "smmlar", "smmls", "smmlsr"])
+            return f"{op}{cond} {d}, {a}, {b}" + (f", {c}" if op.startswith(("smmla", "smmls")) else "")
         return f"mul{cond} {d}, {a}, {b}"
     if k == 1:
         return f"{rng.choice(['mla', 'mls'])}{cond} {d}, {a}, {b}, {c}"
@@ -140,7 +143,9 @@ def mem(rng, thumb: bool, cond: str = "") -> str:
 
 
 def multi(rng, thumb: bool) -> str:
-    regs = sorted(rng.sample([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], rng.randint(1, 4)))
+    # Thumb-2 LDM/STM.W com um só registrador é UNPREDICTABLE (o GNU as o reescreve como LDR/STR;
+    # o clang não, e o Unicorn rejeita): em Thumb, no mínimo dois registradores.
+    regs = sorted(rng.sample([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], rng.randint(2 if thumb else 1, 4)))
     lst = ", ".join(f"r{r}" for r in regs)
     off = rng.randrange(64, 128) // 4 * 4
     op = rng.choice(["ldmia", "stmia", "ldmdb", "stmdb"])

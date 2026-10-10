@@ -202,8 +202,14 @@ class FnEmitter:
             name, lib, nid = stub
             return [f"SYNC_OUT arc_import(ctx, {nid:#010x}u, {i.addr:#010x}u); SYNC_IN /* {name} */"]
         if f is None:
-            return [f"SYNC_OUT arc_dispatch(ctx, {u32(target_key)}, {i.addr:#010x}u); SYNC_IN"]
-        return [f"SYNC_OUT {fname(f)}(ctx); SYNC_IN"]
+            return [f"SYNC_OUT arc_dispatch(ctx, {u32(target_key)}, {i.addr:#010x}u); {self.ret_check(i)} SYNC_IN"]
+        return [f"SYNC_OUT {fname(f)}(ctx); {self.ret_check(i)} SYNC_IN"]
+
+    def ret_check(self, i: Insn) -> str:
+        """Depois de uma chamada: o chamado gravou em r[15] para onde o guest voltaria. Se não for o
+        endereço seguinte à chamada (longjmp, troca de contexto), o runtime desempilha o C."""
+        exp = u32(i.next | self.thumb_bit)
+        return f"if (__builtin_expect(ctx->r[15] != {exp}, 0)) arc_ret_mismatch(ctx, {exp});"
 
     def goto_or_tail(self, target: int, i: Insn) -> str:
         key = target | self.thumb_bit
@@ -226,7 +232,7 @@ class FnEmitter:
         """Branch to a computed address. Thumb ALU writes to PC (mov/add pc) do not
         interwork (BranchWritePC): the target stays Thumb whatever bit 0 says."""
         if is_return_like:
-            return ["{ SYNC_OUT return; }"]
+            return [f"{{ ctx->r[15] = {target}; SYNC_OUT return; }}"]
         if not interworking and self.f.thumb:
             target = f"(({target}) | 1u)"
         lines = [f"{{ uint32_t jt = {target};"]
@@ -285,11 +291,11 @@ class FnEmitter:
         if n == "blx":
             t = self.new_tmp()
             return [f"{{ uint32_t {t} = {self.r(i, R(0))};"] + self.link(i) + \
-                [f"SYNC_OUT arc_dispatch(ctx, {t}, {i.addr:#010x}u); SYNC_IN }}"]
+                [f"SYNC_OUT arc_dispatch(ctx, {t}, {i.addr:#010x}u); {self.ret_check(i)} SYNC_IN }}"]
         if n == "bx":
             rn = R(0)
             if rn == 14:
-                return ["{ SYNC_OUT return; }"]
+                return [f"{{ ctx->r[15] = {self.r(i, 14)}; SYNC_OUT return; }}"]
             return self.indirect(self.r(i, rn), i, False)
         if n in ("tbb", "tbh"):
             m = ops[0].mem
@@ -385,6 +391,19 @@ class FnEmitter:
                 self.flag_w("fn", "fz")
                 lines.append("  fn = (uint32_t)(p >> 63); fz = p == 0;")
             return lines + ["}"]
+        if n in ("smmul", "smmulr", "smmla", "smmlar", "smmls", "smmlsr"):
+            # Parte alta do produto com sinal de 64 bits (aritmética mod 2^64, sem UB):
+            # SMMUL: (Rn*Rm)>>32; SMMLA: ((Ra<<32) + Rn*Rm)>>32; SMMLS: ((Ra<<32) - Rn*Rm)>>32; 'r' soma 2^31.
+            a, b = self.r(i, R(1)), self.r(i, R(2))
+            prod = f"(uint64_t)((int64_t)(int32_t){a} * (int32_t){b})"
+            base = n.rstrip("r") if n != "smmulr" else "smmul"
+            if base == "smmul":
+                expr = prod
+            else:
+                acc = f"((uint64_t){self.r(i, R(3))} << 32)"
+                expr = f"{acc} + {prod}" if base == "smmla" else f"{acc} - {prod}"
+            rnd = " + 0x80000000ull" if n.endswith("r") else ""
+            return [f"{self.w(R(0))} = (uint32_t)(({expr}{rnd}) >> 32);"]
         if n in ("sdiv", "udiv"):
             a, b = self.r(i, R(1)), self.r(i, R(2))
             fn_ = "ARC_SDIV" if n == "sdiv" else "ARC_UDIV"
@@ -436,6 +455,24 @@ class FnEmitter:
             t = self.new_tmp()
             return [f"{{ uint32_t {t} = {val}; fn = {t} >> 31; fz = ({t} >> 30) & 1u; fc = ({t} >> 29) & 1u;"
                     f" fv = ({t} >> 28) & 1u; ctx->apsr_rest = (ctx->apsr_rest & ~0x08000000u) | ({t} & 0x08000000u); }}"]
+
+        # ---- coprocessador 15: registradores de thread (TLS) ----
+        if n == "mrc":
+            # Mesmos campos em ARM e Thumb (T1: hw1<<16 | hw2): opc1 23:21, CRn 19:16, Rt 15:12,
+            # coproc 11:8, opc2 7:5, CRm 3:0.
+            raw = i.raw
+            word = (int.from_bytes(raw[0:2], "little") << 16 | int.from_bytes(raw[2:4], "little")) if i.thumb                 else int.from_bytes(raw, "little")
+            opc1, crn, rt, cp, opc2, crm = (word >> 21) & 7, (word >> 16) & 15, (word >> 12) & 15,                 (word >> 8) & 15, (word >> 5) & 7, word & 15
+            if (cp, opc1, crn, crm, opc2) == (15, 0, 13, 0, 3) and rt != 15:   # TPIDRURO
+                return [f"{self.w(rt)} = ctx->tpidruro;"]
+            if (cp, opc1, crn, crm, opc2) == (15, 0, 13, 0, 2) and rt != 15:   # TPIDRURW
+                return [f"{self.w(rt)} = ctx->tpidrurw;"]
+        if n == "mcr":
+            raw = i.raw
+            word = (int.from_bytes(raw[0:2], "little") << 16 | int.from_bytes(raw[2:4], "little")) if i.thumb                 else int.from_bytes(raw, "little")
+            opc1, crn, rt, cp, opc2, crm = (word >> 21) & 7, (word >> 16) & 15, (word >> 12) & 15,                 (word >> 8) & 15, (word >> 5) & 7, word & 15
+            if (cp, opc1, crn, crm, opc2) == (15, 0, 13, 0, 2) and rt != 15:   # TPIDRURW (usuário pode escrever)
+                return [f"ctx->tpidrurw = {self.r(i, rt)};"]
 
         # ---- VFP ----
         if n.startswith("v") or n in ("fconsts", "fconstd", "fmstat"):
@@ -712,6 +749,18 @@ class FnEmitter:
             return [f"{{ {ty} x = {self.vget(kind, a)}, y = {other}; ctx->fpscr = (ctx->fpscr & 0x0fffffffu) | arc_vcmp_flags((double)x, (double)y); }}"]
         if n in ("vcvt", "vcvtr"):
             return self.vcvt(i)
+        if n in ("vcvtb", "vcvtt"):
+            # Meia precisão na metade de baixo (b) ou de cima (t) de um registrador S.
+            m = re.search(r"\.(f16|f32)\.(f16|f32)", mn)
+            if m and len(ops) == 2:
+                _, d = self.vreg(i, ops[0])
+                _, sreg = self.vreg(i, ops[1])
+                sh = 16 if n == "vcvtt" else 0
+                if (m[1], m[2]) == ("f32", "f16"):
+                    return [f"ARC_SSB(ctx, {d}, arc_f16_to_f32((ARC_GSB(ctx, {sreg}) >> {sh}) & 0xffffu, ctx->fpscr));"]
+                if (m[1], m[2]) == ("f16", "f32"):
+                    return [f"ARC_SSB(ctx, {d}, (ARC_GSB(ctx, {d}) & ~(0xffffu << {sh})) | "
+                            f"(arc_f32_to_f16(ARC_GSB(ctx, {sreg}), ctx->fpscr) << {sh}));"]
         raise EmitError(f"{i.addr:#x}: no VFP translation for '{mn} {cs.op_str}' ({n})")
 
     def vmov(self, i: Insn) -> list[str]:
@@ -852,7 +901,8 @@ def emit_function(prog: Program, f: Function, trace: bool = False) -> tuple[str,
     if trace:  # every register is synced at every instruction, so all of them are "used"
         em.used.update(f"r{k}" for k in range(13))
         em.used.update(("sp", "lr", "fn", "fz", "fc", "fv"))
-    for a in sorted(f.insns):
+    order = sorted(f.insns)
+    for pos, a in enumerate(order):
         i = f.insns[a]
         body.append(f"L_{a:08x}:; /* {i.cs.mnemonic} {i.cs.op_str} */")
         if trace:
@@ -867,7 +917,11 @@ def emit_function(prog: Program, f: Function, trace: bool = False) -> tuple[str,
             errors.append(f"{a:#x}: internal error {type(e).__name__}: {e} in '{i.cs.mnemonic} {i.cs.op_str}'")
             body.append(f"    arc_unimpl(ctx, {a:#010x}u);")
         nxt = i.next
-        if nxt not in f.insns and not _ends_flow(i):
+        if nxt in f.insns and not _ends_flow(i) and (pos + 1 == len(order) or order[pos + 1] != nxt):
+            # A próxima instrução emitida não é a seguinte real: há uma decodificação sobreposta
+            # (alvo de tabela/ponteiro no meio de uma instrução). Sem este goto o C cairia nela.
+            body.append(f"    goto L_{nxt:08x};")
+        elif nxt not in f.insns and not _ends_flow(i):
             # fall-through into code that belongs to another function (or past the end)
             key = nxt | (1 if f.thumb else 0)
             target = prog.functions.get(key)

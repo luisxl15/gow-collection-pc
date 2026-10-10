@@ -101,9 +101,11 @@ def from_vita_module(mod) -> GuestImage:
         img.symbols.setdefault(mod.module_start, "module_start")
     if mod.module_stop:
         img.symbols.setdefault(mod.module_stop, "module_stop")
-    # ABS32/TARGET1 relocations whose target lies in code are exact code-pointer evidence.
+    # Relocações cujo alvo cai no segmento RX são evidência exata de ponteiro. Mas no Vita o .rodata
+    # mora no mesmo segmento RX: um alvo par é quase sempre dado (string, tabela). Só aceitamos alvos
+    # com o bit Thumb, de ABS32/TARGET1 e de pares MOVW/MOVT (entradas de thread, callbacks).
     for r in mod.relocs:
-        if r.code in (2, 38) and img.is_code(r.target):
+        if r.code in (2, 38, 47, 43) and r.target & 1 and img.is_code(r.target):
             img.code_ptrs.add(r.target)
     for imp in mod.imports:
         if imp.kind == "func":

@@ -8,14 +8,17 @@ HLE status for a function NID, derived from the Vita3K source tree:
 """
 from __future__ import annotations
 
+import os
 import re
 from functools import lru_cache
 from pathlib import Path
 
 import yaml
 
-DEFAULT_HEADERS = Path("/home/user/deps/vita-headers/db")
-DEFAULT_VITA3K = Path("/home/user/deps/vita3k-preqt/vita3k")
+# Configuráveis por ambiente; o padrão é o checkout em ../_deps ao lado do repositório.
+_DEPS = Path(__file__).resolve().parents[3] / "_deps"
+DEFAULT_HEADERS = Path(os.environ.get("VITA_HEADERS_DB", _DEPS / "vita-headers" / "db"))
+DEFAULT_VITA3K = Path(os.environ.get("VITA3K_SRC", _DEPS / "vita3k-src")) / "vita3k"
 
 
 @lru_cache(maxsize=None)
@@ -52,13 +55,13 @@ def vita3k_hle(root: str = str(DEFAULT_VITA3K)) -> dict:
     """Map NID -> (name, status) from Vita3K sources."""
     rootp = Path(root)
     nid_names: dict[int, str] = {}
-    for m in re.finditer(r"^\s*NID\((\w+),\s*(0x[0-9A-Fa-f]+)\)", (rootp / "nids/include/nids/nids.inc").read_text(),
+    for m in re.finditer(r"^\s*NID\((\w+),\s*(0x[0-9A-Fa-f]+)\)", (rootp / "nids/include/nids/nids.inc").read_text(encoding="utf-8"),
                          re.M):  # anchored: commented-out "//NID(...)" lines must not count
         nid_names.setdefault(int(m[2], 16), m[1])
     status: dict[str, str] = {}
     export_re = re.compile(r"^EXPORT\([^,]+,\s*(\w+)")
     for src in (rootp / "modules").glob("**/*.cpp"):
-        lines = src.read_text(errors="replace").splitlines()
+        lines = src.read_text(encoding="utf-8", errors="replace").splitlines()
         i = 0
         while i < len(lines):
             m = export_re.match(lines[i])

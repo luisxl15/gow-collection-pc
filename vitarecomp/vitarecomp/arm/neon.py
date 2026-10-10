@@ -21,6 +21,11 @@ CT = {"i8": "uint8_t", "s8": "int8_t", "u8": "uint8_t", "p8": "uint8_t", "8": "u
       "i64": "uint64_t", "s64": "int64_t", "u64": "uint64_t", "64": "uint64_t"}
 
 
+
+def is_core(name: str) -> bool:
+    """Registrador de núcleo, inclusive pelos apelidos que o capstone usa (sb=r9, sl=r10, fp=r11, ip=r12)."""
+    return (name[0] == "r" and name[1:].isdigit()) or name in ("sb", "sl", "fp", "ip", "sp", "lr", "pc")
+
 class NeonError(Exception):
     pass
 
@@ -190,14 +195,14 @@ class Neon:
             self.store(D, d, nd)
             return
         names = [self.cs.reg_name(o.reg) for o in ops]
-        if names[0][0] == "r":  # vmov.32 r0, d0[1]
+        if is_core(names[0]):  # vmov.32 r0, d0[1]
             d, _, idx = self.reg(ops[1])
             ty = CT.get(self.dt, "uint32_t")
             V = self.load(d, 1)
             ext = f"(uint32_t)(int32_t)(({ty} *){V})[{idx}]" if ty.startswith("int") else f"(uint32_t)(({ty} *){V})[{idx}]"
             self.lines.append(f"{self.em.w(self.em.regnum(self.i, ops[0]))} = {ext};")
             return
-        if names[1][0] == "r" and ops[0].vector_index != -1:  # vmov.8 d0[3], r1
+        if is_core(names[1]) and ops[0].vector_index != -1:  # vmov.8 d0[3], r1
             d, _, idx = self.reg(ops[0])
             ty = unsigned(self.dt or "32")
             V = self.load(d, 1)
@@ -240,7 +245,7 @@ class Neon:
         ty = unsigned(self.dt)
         D = self.load(d, nd)
         src = self.ops[1]
-        if self.cs.reg_name(src.reg)[0] == "r":
+        if is_core(self.cs.reg_name(src.reg)):
             val = f"({ty}){self.em.r(self.i, self.em.regnum(self.i, src))}"
         else:
             s, _, idx = self.reg(src)

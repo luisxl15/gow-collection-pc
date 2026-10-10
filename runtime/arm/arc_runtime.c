@@ -255,3 +255,63 @@ int arc_run(void) {
   arc_platform_log("arc: entry returned\n");
   return (int)ctx->r[0];
 }
+
+/* ---- meia precisão (VCVTB/VCVTT), pseudocódigo FPConvert do ARMv7 ----
+ * FPSCR: AHP = bit 26 (formato alternativo: sem Inf/NaN, expoente 31 é normal), DN = 25,
+ * FZ = 24 (zera entradas de precisão simples denormais), RMode = 23:22 (0 RN, 1 RP, 2 RM, 3 RZ). */
+uint32_t arc_f16_to_f32(uint32_t h, uint32_t fpscr) {
+  uint32_t sign = (h & 0x8000u) << 16, e = (h >> 10) & 0x1f, m = h & 0x3ff;
+  int ahp = (fpscr >> 26) & 1, dn = (fpscr >> 25) & 1;
+  if (e == 0x1f && !ahp) {
+    if (m == 0) return sign | 0x7f800000u;
+    if (dn) return 0x7fc00000u;
+    return sign | 0x7fc00000u | (m << 13); /* sNaN vira qNaN, carga preservada */
+  }
+  if (e == 0) {
+    if (m == 0) return sign;
+    int sh = 0; /* denormal de meia precisão: sempre normal em simples */
+    while (!(m & 0x400)) { m <<= 1; sh++; }
+    return sign | ((uint32_t)(127 - 15 + 1 - sh) << 23) | ((m & 0x3ff) << 13);
+  }
+  return sign | ((e + 127 - 15) << 23) | (m << 13);
+}
+
+uint32_t arc_f32_to_f16(uint32_t f, uint32_t fpscr) {
+  uint32_t sign = (f >> 16) & 0x8000u, e = (f >> 23) & 0xff, m = f & 0x7fffff;
+  int ahp = (fpscr >> 26) & 1, dn = (fpscr >> 25) & 1, fz = (fpscr >> 24) & 1, rmode = (fpscr >> 22) & 3;
+  if (e == 0xff) {
+    if (m) { /* NaN */
+      if (ahp) return sign; /* FPZero(sign): o oráculo confirma -0 para NaN negativo */
+      if (dn) return 0x7e00u;
+      return sign | 0x7e00u | (m >> 13);
+    }
+    return ahp ? (sign | 0x7fffu) : (sign | 0x7c00u);
+  }
+  if (e == 0 && (m == 0 || fz)) return sign;
+  uint32_t mant;
+  int exp;
+  if (e == 0) { /* denormal de simples: normaliza */
+    mant = m; exp = -126;
+    while (!(mant & 0x800000u)) { mant <<= 1; exp--; }
+  } else {
+    mant = m | 0x800000u; exp = (int)e - 127;
+  }
+  int shift = exp >= -14 ? 13 : 13 + (-14 - exp);
+  if (shift > 31) shift = 31;
+  uint32_t q = mant >> shift, rem = mant & ((1u << shift) - 1), half = 1u << (shift - 1);
+  int inc = 0;
+  switch (rmode) {
+    case 0: inc = rem > half || (rem == half && (q & 1)); break;
+    case 1: inc = rem && !sign; break;
+    case 2: inc = rem && sign; break;
+    default: break;
+  }
+  q += inc;
+  uint32_t r = exp >= -14 ? ((uint32_t)(exp + 15) << 10) + (q - 0x400u) : q; /* o vai-um sobe no expoente */
+  if (ahp) return sign | (r > 0x7fffu ? 0x7fffu : r);
+  if (r >= 0x7c00u) { /* estouro: conforme o modo de arredondamento */
+    int to_inf = rmode == 0 || (rmode == 1 && !sign) || (rmode == 2 && sign);
+    return sign | (to_inf ? 0x7c00u : 0x7bffu);
+  }
+  return sign | r;
+}

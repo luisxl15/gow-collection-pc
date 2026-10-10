@@ -1,6 +1,8 @@
 """vitarecomp CLI.
 
   python -m vitarecomp inspect <eboot.bin|module.elf> [-o report.json]
+  python -m vitarecomp keys-import <Vita3K>/vita3k/packages/src/sce_utils.cpp
+  python -m vitarecomp decrypt <app.self> --rif work.bin -o app.elf
 
 Prints a module summary: segments, entry points, relocation statistics,
 imports grouped by library with names and Vita3K HLE status, and exports.
@@ -105,6 +107,33 @@ def recomp(path: Path, out: Path, linux: bool, trace: bool = False) -> int:
     return 0
 
 
+def keys_import(src: Path, out: Path | None) -> int:
+    from . import selfdec
+    keys = selfdec.import_keys(src)
+    dst = out or selfdec.default_keys_path()
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(json.dumps(keys, indent=1) + "\n")
+    print(f"{len(keys)} chaves -> {dst}")
+    return 0
+
+
+def decrypt(path: Path, rif: Path | None, out: Path) -> int:
+    import hashlib
+    from . import selfdec
+    data = path.read_bytes()
+    klic = selfdec.klic_from_rif(rif.read_bytes()) if rif else None
+    try:
+        elf, h = selfdec.decrypt_to_elf(data, klic)
+    except selfdec.SelfError as e:
+        print(f"vitarecomp: error: {e}", file=sys.stderr)
+        return 1
+    out.write_bytes(elf)
+    print(f"{path.name}: self_type={h['self_type']} key_rev={h['key_rev']} sys_version={h['sys_version']:#x} "
+          f"auth_id={h['auth_id']:#x} npdrm_type={h['npdrm_type']} content_id={h['content_id']}")
+    print(f"  ELF {len(elf)} bytes sha256={hashlib.sha256(elf).hexdigest()} -> {out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="vitarecomp")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -116,7 +145,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-o", "--out", type=Path, required=True)
     p.add_argument("--linux", action="store_true", help="input is a Linux ARM ELF (test guests)")
     p.add_argument("--trace-insn", action="store_true", help="log full CPU state before every instruction")
+    p = sub.add_parser("keys-import", help="importar as chaves de SELF da fonte do Vita3K")
+    p.add_argument("src", type=Path)
+    p.add_argument("-o", "--out", type=Path)
+    p = sub.add_parser("decrypt", help="decifrar um SELF (NPDRM com --rif) para ELF")
+    p.add_argument("path", type=Path)
+    p.add_argument("--rif", type=Path)
+    p.add_argument("-o", "--out", type=Path, required=True)
     args = ap.parse_args(argv)
+    if args.cmd == "keys-import":
+        return keys_import(args.src, args.out)
+    if args.cmd == "decrypt":
+        return decrypt(args.path, args.rif, args.out)
     if args.cmd == "recomp":
         return recomp(args.path, args.out, args.linux, args.trace_insn)
     if args.cmd == "inspect":

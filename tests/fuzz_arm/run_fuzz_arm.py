@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Differential fuzzing of the ARM translator: qemu-arm vs vitarecomp output (x86-64).
 
-usage: run_fuzz_arm.py [--start N] [--count N] [--isa thumb|arm] [-j N]
+On hosts without qemu-arm/arm-linux-gnueabihf-gcc (Windows), the reference is Unicorn
+(tests/oracle_unicorn.py), the guest is built with clang + ld.lld + compiler-rt builtins
+(ARM_BUILTINS, default: the Android NDK's), and the recompiled C with clang + arc_win.c.
+
+usage: run_fuzz_arm.py [--start N] [--count N] [--isa thumb|arm|neon] [-j N]
 Programs the assembler rejects (random operand combos) are skipped and counted.
 """
 from __future__ import annotations
@@ -20,11 +24,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 from gen_fuzz_arm import generate  # noqa: E402
 from gen_fuzz_neon import generate as generate_neon  # noqa: E402
 
-PY = "/home/user/deps/rea-py/bin/python"
+PY = os.environ.get("REA_PWNTOOLS_PYTHON", sys.executable)
 RT = ROOT / "runtime/arm"
 APSR_MASK = 0xF0000000           # Q/GE not modelled yet
 FPSCR_MASK = 0xF7C00000          # NZCV + mode bits; cumulative exception flags not modelled
-
+HAVE_QEMU = shutil.which("qemu-arm") is not None and shutil.which("arm-linux-gnueabihf-gcc") is not None
+CLANG = shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe"
+EXE = ".exe" if os.name == "nt" else ""
 
 NEON = False
 
@@ -47,30 +53,62 @@ def label(k: int) -> str:
                                                     if k < 46 else f"buf+{(k - 46) * 4}")
 
 
+def _ndk_builtins() -> str:
+    env = os.environ.get("ARM_BUILTINS")
+    if env:
+        return env
+    ndk = Path(os.environ.get("LOCALAPPDATA", "")) / "Android/Sdk/ndk"
+    found = sorted(ndk.glob("*/toolchains/llvm/prebuilt/*/lib/clang/*/lib/linux/libclang_rt.builtins-arm-android.a"))
+    return str(found[-1]) if found else ""
+
+
+def build_guest(out: Path, src: Path, isa: str, opt: str | None = None) -> int:
+    opt = opt or os.environ.get("GUEST_OPT", "-O2")
+    if HAVE_QEMU:
+        env = {**os.environ, "GUEST_ISA": "arm" if isa == "arm" else "thumb", "GUEST_OPT": opt}
+        return subprocess.run([str(ROOT / "scripts/build-guest-arm.sh"), str(out), str(src)],
+                              capture_output=True, env=env).returncode
+    mode = "-marm" if isa == "arm" else "-mthumb"
+    return subprocess.run([CLANG, "--target=armv7a-linux-gnueabihf", mode, "-mcpu=cortex-a9", "-mfpu=neon-fp16",
+                           "-mfloat-abi=hard", "-ffreestanding", "-fno-builtin", "-fno-stack-protector",
+                           "-fno-math-errno", "-fno-pic", "-nostdlib", "-static", opt,
+                           "-fuse-ld=lld", f"-Wl,-T,{ROOT / 'guest/guest_arm.ld'}", "-Wl,--build-id=none",
+                           "-o", str(out), str(ROOT / "guest/crt0_arm.S"), str(ROOT / "guest/glibc.c"), str(src),
+                           _ndk_builtins()], capture_output=True).returncode
+
+
+def run_reference(elf: Path):
+    cmd = ["qemu-arm", str(elf)] if HAVE_QEMU else [sys.executable, "-P", str(ROOT / "tests/oracle_unicorn.py"), str(elf)]
+    return subprocess.run(cmd, capture_output=True, timeout=120)
+
+
+def build_recompiled(out: Path, gen: Path):
+    cc = ["gcc"] if HAVE_QEMU else [CLANG]
+    plat = RT / ("arc_linux.c" if HAVE_QEMU else "arc_win.c")
+    return subprocess.run(cc + ["-O1", "-w", "-fwrapv", "-fno-strict-aliasing", "-ffp-contract=off", "-fno-math-errno",
+                                f"-I{RT}", "-o", str(out), *map(str, gen.glob("*.c")), str(RT / "arc_runtime.c"),
+                                str(plat)], capture_output=True)
+
+
 def run(seed: int, isa: str):
     work = ROOT / "build" / "fuzz_arm" / f"{isa}{seed}"
     work.mkdir(parents=True, exist_ok=True)
     (work / "f.S").write_text(generate_neon(seed) if isa == "neon" else generate(seed, isa == "thumb"))
-    env = {**os.environ, "GUEST_ISA": "arm" if isa == "arm" else "thumb"}
-    p = subprocess.run([str(ROOT / "scripts/build-guest-arm.sh"), str(work / "f.elf"), str(work / "f.S")],
-                       capture_output=True, env=env)
-    if p.returncode:
+    if build_guest(work / "f.elf", work / "f.S", isa):
         shutil.rmtree(work)
         return seed, "skip"
-    ref = subprocess.run(["qemu-arm", str(work / "f.elf")], capture_output=True, timeout=30)
+    ref = run_reference(work / "f.elf")
     if ref.returncode != 0:  # the random program itself faulted on the reference
         shutil.rmtree(work)
         return seed, "skip"
-    p = subprocess.run([PY, "-m", "vitarecomp", "recomp", "--linux", str(work / "f.elf"), "-o", str(work / "gen")],
+    p = subprocess.run([PY, "-P", "-m", "vitarecomp", "recomp", "--linux", str(work / "f.elf"), "-o", str(work / "gen")],
                        capture_output=True, env={**os.environ, "PYTHONPATH": str(ROOT / "vitarecomp")})
     if p.returncode:
         return seed, "recomp failed: " + p.stderr.decode()[-300:]
-    p = subprocess.run(["gcc", "-O1", "-w", "-fwrapv", "-fno-strict-aliasing", "-ffp-contract=off", "-fno-math-errno",
-                        f"-I{RT}", "-o", str(work / "rc"), *map(str, (work / "gen").glob("*.c")),
-                        str(RT / "arc_runtime.c"), str(RT / "arc_linux.c")], capture_output=True)
+    p = build_recompiled(work / f"rc{EXE}", work / "gen")
     if p.returncode:
         return seed, "C build failed: " + p.stderr.decode()[-300:]
-    got = subprocess.run([str(work / "rc")], capture_output=True, timeout=30)
+    got = subprocess.run([str(work / f"rc{EXE}")], capture_output=True, timeout=60)
     a, b = normalize(ref.stdout), normalize(got.stdout)
     if a != b or ref.returncode != got.returncode:
         if len(a) == len(b):
@@ -100,7 +138,9 @@ def main() -> int:
     for s, r in fails[:20]:
         print(f"seed {s}: {r}")
     ran = len(res) - skipped
-    print(f"{args.isa}: {ran - len(fails)}/{ran} programs matched qemu-arm ({skipped} skipped: rejected by assembler or faulting on qemu)")
+    oracle = "qemu-arm" if HAVE_QEMU else "unicorn"
+    print(f"{args.isa}: {ran - len(fails)}/{ran} programs matched {oracle} "
+          f"({skipped} skipped: rejected by assembler or faulting on the reference)")
     return 1 if fails else 0
 
 

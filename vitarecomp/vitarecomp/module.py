@@ -377,3 +377,11 @@ def _parse_module_info(mod: Module, info: int, seg: Segment) -> None:
         for k in range(ntls):
             mod.imports.append(Import(lib, lib_nid, mod.u32(tnids + 4 * k), mod.u32(tents + 4 * k), "tls"))
         a += size
+
+    # sceModuleInfo guarda module_start/stop SEM o bit Thumb; o export do mesmo endereço o tem
+    # (no God of War: info=0x810983cc, export=0x810983cd, e o código só decodifica em Thumb).
+    by_addr = {e.addr & ~1: e.addr for e in mod.exports if e.kind == "func"}
+    if mod.module_start is not None:
+        mod.module_start = by_addr.get(mod.module_start, mod.module_start)
+    if mod.module_stop is not None:
+        mod.module_stop = by_addr.get(mod.module_stop, mod.module_stop)

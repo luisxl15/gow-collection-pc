@@ -158,14 +158,152 @@ def writes_pc(i: Insn) -> bool:
     return bool(ops) and ops[0].type == A.ARM_OP_REG and reg_num(i.cs, ops[0].reg) == 15
 
 
-def _switch_bound(fn_insns: list[Insn], idx_reg: int) -> int | None:
-    """Look back for `cmp idx, #N` guarding a tbb/tbh; return entry count N+1."""
-    for i in reversed(fn_insns[-6:]):
-        ops = i.cs.operands
-        if i.name == "cmp" and len(ops) == 2 and ops[0].type == A.ARM_OP_REG \
-                and reg_num(i.cs, ops[0].reg) == idx_reg and ops[1].type == A.ARM_OP_IMM:
-            return (ops[1].imm & 0xFFFFFFFF) + 1
+def _prev_fall(i: Insn, by_addr: dict[int, Insn]) -> Insn | None:
+    """Instrução imediatamente anterior que CAI em `i` (não é desvio incondicional nem retorno)."""
+    for size in (2, 4):
+        p = by_addr.get(i.addr - size)
+        if p is not None and p.next == i.addr:
+            if p.name == "b" and p.cs.cc == COND_AL and not _in_it(p) or _is_return(p):
+                return None
+            return p
     return None
+
+
+def _const_reg(reg: int, at: Insn, by_addr: dict[int, Insn]) -> int | None:
+    """Valor constante de `reg` imediatamente antes de `at`, se montado logo antes por
+    movw/movs/mov #lo (+ movt #hi) no mesmo trecho contíguo."""
+    lo = hi = None
+    cur = at
+    for _ in range(6):
+        cur = _prev_fall(cur, by_addr)
+        if cur is None:
+            return None
+        ops = cur.cs.operands
+        if not ops or ops[0].type != A.ARM_OP_REG or reg_num(cur.cs, ops[0].reg) != reg:
+            continue
+        if cur.name == "movt" and hi is None and ops[-1].type == A.ARM_OP_IMM:
+            hi = ops[-1].imm & 0xFFFF
+            continue
+        if cur.name in ("movw", "mov") and len(ops) == 2 and ops[1].type == A.ARM_OP_IMM:
+            v = ops[1].imm & 0xFFFFFFFF
+            return ((hi << 16) | (v & 0xFFFF)) if hi is not None else v
+        return None   # outra escrita em reg: não é constante
+    return None
+
+
+def _affine_src(i: Insn, by_addr: dict[int, Insn]) -> tuple[int, int] | None:
+    """(rm, k) quando `i` faz rd = rm - k com k constante: mov rd, rm; adds/subs rd, rm, #k;
+    adds rd, rm, rK com rK constante montado logo antes (movw/movt)."""
+    ops = i.cs.operands
+    if i.name == "mov" and len(ops) == 2 and ops[1].type == A.ARM_OP_REG and ops[1].shift.type == 0:
+        return reg_num(i.cs, ops[1].reg), 0
+    if i.name in ("add", "sub") and len(ops) == 3 and ops[1].type == A.ARM_OP_REG:
+        if ops[2].type == A.ARM_OP_IMM:
+            k = ops[2].imm & 0xFFFFFFFF
+        elif ops[2].type == A.ARM_OP_REG and ops[2].shift.type == 0:
+            k = _const_reg(reg_num(i.cs, ops[2].reg), i, by_addr)
+            if k is None:
+                return None
+        else:
+            return None
+        return reg_num(i.cs, ops[1].reg), (k if i.name == "sub" else -k) & 0xFFFFFFFF
+    return None
+
+
+def _writes_reg(i: Insn, r: int) -> bool:
+    ops = i.cs.operands
+    if i.name in ("cmp", "cmn", "tst", "teq", "str", "strb", "strh", "strd", "push", "stm", "stmdb",
+                  "b", "bl", "blx", "bx", "cbz", "cbnz", "it", "vstr", "vldr", "vstmia", "vpush"):
+        return False
+    return bool(ops) and ops[0].type == A.ARM_OP_REG and reg_num(i.cs, ops[0].reg) == r
+
+
+# Desvio NÃO tomado que garante idx <= N (hi/gt) ou idx < N (hs/ge) após `cmp idx, N`;
+# e desvio TOMADO que garante o mesmo (ls/le e lo/lt).
+_GUARD_FALL = {A.ARM_CC_HI: 1, A.ARM_CC_GT: 1, A.ARM_CC_HS: 0, A.ARM_CC_GE: 0}
+_GUARD_TAKEN = {A.ARM_CC_LS: 1, A.ARM_CC_LE: 1, A.ARM_CC_LO: 0, A.ARM_CC_LT: 0}
+
+
+def _cmp_bound(c: Insn, reg: int, delta: int, extra: int, by_addr: dict[int, Insn]) -> int | None:
+    ops = c.cs.operands
+    if c.name != "cmp" or len(ops) != 2 or ops[0].type != A.ARM_OP_REG or reg_num(c.cs, ops[0].reg) != reg:
+        return None
+    if ops[1].type == A.ARM_OP_IMM:
+        n = ops[1].imm & 0xFFFFFFFF
+    elif ops[1].type == A.ARM_OP_REG and ops[1].shift.type == 0:
+        n = _const_reg(reg_num(c.cs, ops[1].reg), c, by_addr)
+        if n is None:
+            return None
+    else:
+        return None
+    count = ((n - delta) & 0xFFFFFFFF) + extra
+    return count if 0 < count <= 4096 else None
+
+
+def _switch_bound(before: list[Insn], idx_reg: int, all_insns: dict[int, Insn] | None = None) -> int | None:
+    """Prova um limite superior para o índice de um tbb/tbh, andando para trás pelo caminho que
+    chega nele. Aceita duas formas de guarda:
+      cmp idx, N ; b{hi,gt,hs,ge} default ; ... ; tbb      (cai no tbb quando idx <= N)
+      cmp idx, N ; b{ls,le,lo,lt} bloco   ...  bloco: tbb  (salta para o tbb quando idx <= N)
+    N pode ser imediato ou constante montada por movw/movt. Acompanha cópias e deslocamentos
+    constantes do índice (`subs r0,r1,#0xf0`, `adds r1,r0,rK`). Sem guarda provada devolve None:
+    um limite pequeno demais cortaria casos reais, e o chamador recorre ao layout da tabela."""
+    by_addr = {i.addr: i for i in before}
+    if all_insns:
+        by_addr.update(all_insns)
+    reg, delta = idx_reg, 0          # idx = reg - delta (mod 2^32)
+    cur = before[-1]
+    after = None
+    for _ in range(32):
+        prev = _prev_fall(cur, by_addr)
+        if prev is None:
+            # Início de bloco: procure o único desvio condicional de guarda que salta para cá.
+            jumps = [x for x in by_addr.values() if x.name == "b" and x.cs.operands
+                     and x.cs.operands[-1].type == A.ARM_OP_IMM
+                     and x.cs.operands[-1].imm & 0xFFFFFFFF == cur.addr and x.addr != cur.addr]
+            if len(jumps) != 1:
+                return None
+            j = jumps[0]
+            if j.cs.cc == COND_AL:
+                after, cur = j, j
+                continue
+            if j.cs.cc not in _GUARD_TAKEN:
+                return None
+            c = _prev_fall(j, by_addr)
+            return _cmp_bound(c, reg, delta, _GUARD_TAKEN[j.cs.cc], by_addr) if c else None
+        i = prev
+        if i.name == "cmp":
+            if after is not None and after.name == "b" and after.cs.cc in _GUARD_FALL:
+                n = _cmp_bound(i, reg, delta, _GUARD_FALL[after.cs.cc], by_addr)
+                if n is not None:
+                    return n
+            # cmp que não é guarda de limite superior: segue procurando atrás dele
+        elif _writes_reg(i, reg):
+            src = _affine_src(i, by_addr)
+            if src is None:
+                return None   # índice recalculado antes da guarda: o limite não vale
+            reg, delta = src[0], (delta + src[1]) & 0xFFFFFFFF
+        after, cur = i, i
+    return None
+
+
+def _table_by_layout(img: GuestImage, base: int, n: str, limit: int = 1024) -> list[int]:
+    """Tabela de tbb/tbh sem guarda: o compilador a põe logo após a instrução, e o código dos
+    casos começa depois dela, então a tabela acaba onde começa o menor alvo."""
+    size = 1 if n == "tbb" else 2
+    targets: list[int] = []
+    lowest = None
+    k = 0
+    while k < limit and (lowest is None or base + k * size < lowest):
+        off = img.u8(base + k) if n == "tbb" else img.u16(base + 2 * k)
+        t = base + 2 * off
+        # Alvo dentro da própria tabela = byte de preenchimento (tbb com nº ímpar de casos) ou fim.
+        if not img.is_code(t | 1) or t < base + (k + 1) * size:
+            break
+        targets.append(t)
+        lowest = t if lowest is None else min(lowest, t)
+        k += 1
+    return targets
 
 
 @dataclass
@@ -176,8 +314,17 @@ class Program:
 
 
 def analyze(img: GuestImage, max_funcs: int = 200000) -> Program:
+    """Duas passadas: a primeira descobre todas as entradas (alvos de BL, ponteiros); a segunda
+    explora cada função já sabendo onde começam as outras, para que o fluxo sequencial pare na
+    fronteira em vez de absorver a função seguinte. Ambas compartilham o cache do decodificador."""
     dec = Decoder(img)
-    entries: dict[int, str] = {}
+    first = _analyze_pass(img, max_funcs, dec, None)
+    seed = {k: f.name for k, f in first.functions.items()}
+    return _analyze_pass(img, max_funcs, dec, seed)
+
+
+def _analyze_pass(img: GuestImage, max_funcs: int, dec: "Decoder", seed: dict[int, str] | None) -> Program:
+    entries: dict[int, str] = dict(seed or {})
 
     def add_entry(a: int, name: str | None = None):
         if not img.is_code(a) or (a & ~1) in img.imports:
@@ -195,7 +342,7 @@ def analyze(img: GuestImage, max_funcs: int = 200000) -> Program:
 
     functions: dict[int, Function] = {}
     warnings: list[str] = []
-    pending = list(entries)
+    pending = sorted(entries)
     while pending:
         key = pending.pop()
         if key in functions:
@@ -211,6 +358,11 @@ def analyze(img: GuestImage, max_funcs: int = 200000) -> Program:
         while work:
             a = work.pop()
             while a not in f.insns:
+                if a != f.entry and (a | (1 if thumb else 0)) in entries:
+                    # Fluxo sequencial chegou à entrada de outra função (p. ex. depois de um bl para
+                    # função que não retorna): é fronteira, não continuação. Sem isto cada função
+                    # absorvia todas as seguintes (duplicação quadrática no gow2).
+                    break
                 if not img.is_code(a | (1 if thumb else 0)):
                     warnings.append(f"{f.name}: flow leaves code at {a:#x}")
                     break
@@ -228,8 +380,10 @@ def analyze(img: GuestImage, max_funcs: int = 200000) -> Program:
                     tkey = tgt | (1 if tthumb else 0)
                     if (tgt & ~1) not in img.imports:
                         add_entry(tkey)
-                        if tkey not in functions:
+                        if tkey in entries and tkey not in functions:
                             pending.append(tkey)
+                        elif tkey not in entries:
+                            warnings.append(f"{f.name}: {n} at {i.addr:#x} targets non-code {tgt:#x}")
                     a = i.next
                     continue
                 if n in ("b", "cbz", "cbnz"):
@@ -247,16 +401,22 @@ def analyze(img: GuestImage, max_funcs: int = 200000) -> Program:
                 if n in ("tbb", "tbh"):
                     mem = ops[0].mem
                     idx = reg_num(i.cs, mem.index)
-                    count = _switch_bound(order, idx)
+                    before = sorted((x for x in f.insns.values() if x.addr < i.addr), key=lambda x: x.addr)
+                    count = _switch_bound(before + [i], idx, f.insns)
                     base = i.next  # PC for Thumb reads as addr+4; tbb/tbh are 4 bytes
                     if count is None:
-                        warnings.append(f"{f.name}: unbounded {n} at {i.addr:#x}")
-                        f.indirect_jumps.append(i.addr)
-                        break
-                    targets = []
-                    for k in range(count):
-                        off = img.u8(base + k) if n == "tbb" else img.u16(base + 2 * k)
-                        targets.append(base + 2 * off)
+                        targets = _table_by_layout(img, base, n)
+                        if not targets:
+                            warnings.append(f"{f.name}: unbounded {n} at {i.addr:#x}")
+                            f.indirect_jumps.append(i.addr)
+                            break
+                        warnings.append(f"{f.name}: {n} at {i.addr:#x} bounded by table layout "
+                                        f"({len(targets)} entries)")
+                    else:
+                        targets = []
+                        for k in range(count):
+                            off = img.u8(base + k) if n == "tbb" else img.u16(base + 2 * k)
+                            targets.append(base + 2 * off)
                     f.tables[i.addr] = targets
                     for t in targets:
                         f.labels.add(t)
@@ -278,7 +438,19 @@ def analyze(img: GuestImage, max_funcs: int = 200000) -> Program:
                 a = i.next
         # Computed jumps that we could not resolve: sweep the whole function body
         # linearly so every instruction becomes a possible landing site.
-        if any(not _is_return(f.insns[a]) and f.insns[a].name != "bx" for a in f.indirect_jumps if a in f.insns):
+        # `bx rX` costuma ser retorno/chamada por ponteiro, MAS é salto interno quando rX vem do próprio
+        # pc (`add ip, pc, #k; sub ip, ip, r3, lsl #2; bx ip` na __udivsi3 do compiler-rt).
+        pc_regs = {reg_num(x.cs, x.cs.operands[0].reg) for x in f.insns.values()
+                   if x.name in ("add", "sub", "adr") and x.cs.operands and x.cs.operands[0].type == A.ARM_OP_REG
+                   and (x.name == "adr" or any(o.type == A.ARM_OP_REG and reg_num(x.cs, o.reg) == 15
+                                               for o in x.cs.operands[1:]))}
+        def _internal(j: Insn) -> bool:
+            if _is_return(j):
+                return False
+            if j.name == "bx":
+                return bool(j.cs.operands) and reg_num(j.cs, j.cs.operands[0].reg) in pc_regs
+            return True
+        if any(_internal(f.insns[a]) for a in f.indirect_jumps if a in f.insns):
             end = img.sizes.get(key)
             end = f.entry + end if end else min((k & ~1 for k in entries if (k & ~1) > f.entry), default=None)
             if end is None:
