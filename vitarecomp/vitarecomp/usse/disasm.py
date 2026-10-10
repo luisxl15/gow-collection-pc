@@ -139,6 +139,26 @@ def lower(ins, second=False):
                     base = s1
                 picks.append(O.Operand(base.bank, base.num, (ch, ch, ch, ch)))
         return ("vpck_%s_%s" % (sf, df), d, mask, picks)
+    if ins.op == "vbw":
+        # Operações de bits em uma palavra de 32 bits (bitwise_partial = 16 bits: ainda não).
+        op = {(2, 0): "and", (2, 1): "or", (3, 0): "xor", (3, 1): "xor", (4, 0): "shl", (5, 0): "shr", (5, 1): "asr"}.get(
+            (f["op1"], f["op2"]))
+        if op is None or f["bitwise_partial"] or f["repeat_count"]:
+            return None
+        d = O.dest(f["dest_n"], f["dest_bank"], f["dest_ext"], False, 7, second)
+        s1 = O.src12(f["src1_n"], f["src1_bank"], f["src1_ext"], False, 7, second)
+        s2 = O.src12(f["src2_n"], f["src2_bank"], f["src2_ext"], False, 7, second)
+        if f["src2_ext"] and s2.bank == O.IMM:
+            v = f["src2_n"] | f["src2_sel"] << 7 | f["src2_exth"] << 14
+            r = f["src2_rot"]
+            if r:
+                v = ((v << r) | (v >> (32 - r))) & 0xFFFFFFFF
+            if f["src2_invert"]:
+                v = ~v & 0xFFFFFFFF
+            s2 = O.Operand(O.IMM, v)
+        elif f["src2_rot"] or f["src2_invert"]:
+            return None
+        return ("vbw_" + op, d, 1, [s1, s2])
     if ins.op == "kill":
         return ("kill", O.Operand(O.PRED, 0), 0, [])
     if ins.op in ("nop", "phas"):

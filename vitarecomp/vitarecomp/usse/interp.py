@@ -88,6 +88,19 @@ class Machine:
         if mn == "kill":
             self.killed = True
             return
+        if mn.startswith("vbw_"):
+            def word(op):
+                if op.bank == O.IMM:
+                    return op.num
+                base = 4 * op.num if op.bank == O.FPI else op.num
+                return int(self.r[op.bank][base:base + 1].view(np.uint32)[0])
+            a, b = word(srcs[0]), word(srcs[1])
+            op = mn[4:]
+            res = {"and": a & b, "or": a | b, "xor": a ^ b, "shl": (a << (b & 31)) & 0xFFFFFFFF, "shr": a >> (b & 31),
+                   "asr": (a - (1 << 32) if a >> 31 else a) >> (b & 31) & 0xFFFFFFFF}[op]
+            base = 4 * d.num if d.bank == O.FPI else d.num
+            self.r[d.bank][base:base + 1].view(np.uint32)[0] = res
+            return
         if mn.startswith("vpck_"):
             _, sf, df = mn.split("_")
             vals = [self.read(op, 1, sf == "f16")[0] for op in srcs]

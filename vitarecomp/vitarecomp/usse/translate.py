@@ -143,6 +143,21 @@ class Translator:
             vals = [self.read(op, 1, sf == "f16")[0] for op in srcs]
             self.write(d, m, vals, df == "f16")
             return
+        if mn.startswith("vbw_"):
+            b, u32 = self.b, self.b.u32()
+
+            def word(op):
+                if op.bank == O.IMM:
+                    return b.const(u32, op.num)
+                if op.bank not in BANK_VAR:
+                    raise Unsupported("banco %s" % op.bank)
+                base = 4 * op.num if op.bank == O.FPI else op.num
+                return b.emit(S.OpBitcast, u32, self.regs.read(BANK_VAR[op.bank], base))
+            a, x = word(srcs[0]), word(srcs[1])
+            code = {"and": 199, "or": 197, "xor": 198, "shl": 196, "shr": 194, "asr": 195}[mn[4:]]
+            r = b.emit(code, u32, a, x)
+            self.write(d, 1, [b.emit(S.OpBitcast, self.f32, r)])
+            return
         if mn == "kill":
             if not self.p.fragment:
                 raise Unsupported("kill fora de fragment shader")
