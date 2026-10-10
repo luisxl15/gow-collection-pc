@@ -121,6 +121,10 @@ Portanto a semântica traduzida do shader de skinning está correta. A diferenç
 aplicar esse deslocamento ao ligar a memória; falta descobrir a regra geral (conferir em outros programas
 e buffers).
 
+Generalização medida (100 vértices por desenho):
+- os desenhos 3, 5, 9 e 13 vão de 0 para 33 na tela com −4;
+- o desenho 46 (outra família de shader) fica em 0 nos dois casos: é o próximo caso a investigar.
+
 O próximo marco não é cobertura, é **fidelidade**:
 1. ligar a E/S de verdade (contêineres de SA, endereços de buffer, literais, varyings e as leituras de
    textura não dependentes nos PA);
