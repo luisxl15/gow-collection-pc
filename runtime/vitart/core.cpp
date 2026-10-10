@@ -91,6 +91,10 @@ bool region_of(uint32_t addr, uint32_t *start, uint32_t *size, std::string *what
     return true;
 }
 
+// Função do guest que contém um endereço de código do host (para diagnóstico de falhas).
+static std::string describe_host_pc(const void *pc);
+static void dump_thread_regs();
+
 static LONG CALLBACK on_fault(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
     if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2)
@@ -102,6 +106,8 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS *ep) {
     if (!region_of(ga, nullptr, nullptr, nullptr)) {
         logf("vitart: acesso a endereço do guest não mapeado 0x%08x (%s, rip host %p)", ga,
             er->ExceptionInformation[0] == 1 ? "escrita" : "leitura", er->ExceptionAddress);
+        logf("    em %s", describe_host_pc(er->ExceptionAddress).c_str());
+        dump_thread_regs();
         return EXCEPTION_CONTINUE_SEARCH;
     }
     const uint64_t page = (uint64_t)ga & ~0xFFFFull;
@@ -117,12 +123,16 @@ static void mem_init() {
     AddVectoredExceptionHandler(1, on_fault);
 }
 
-// Faixas dos alocadores (o Vita dá endereços dessa ordem; nenhum módulo do plano cai nelas).
+// Faixas dos alocadores. Todas com o bit 30 zerado, como a memória do usuário no Vita
+// (0x8xxxxxxx): o God of War guarda uma flag no bit 30 de ponteiros e a apaga ao usá-los.
+// Nenhum módulo do plano cai nelas (gow1 0x81000000, libc 0x82000000, libfios2 0x82100000).
 struct Bump {
     uint32_t cur, end;
     std::mutex m;
 };
-static Bump g_pools[3] = { { 0x40000000u, 0x50000000u, {} }, { 0x60000000u, 0x70000000u, {} }, { 0x70000000u, 0x78000000u, {} } };
+static Bump g_pools[3] = { { 0xB0000000u, 0xC0000000u, {} }, { 0x83000000u, 0xA0000000u, {} }, { 0xA0000000u, 0xB0000000u, {} } };
+
+static const uint32_t g_pool_start[3] = { 0xB0000000u, 0x83000000u, 0xA0000000u };
 
 uint32_t galloc(Pool pool, uint32_t size, uint32_t align, const char *what) {
     Bump &b = g_pools[static_cast<int>(pool)];
@@ -131,9 +141,25 @@ uint32_t galloc(Pool pool, uint32_t size, uint32_t align, const char *what) {
     {
         const std::lock_guard<std::mutex> lock(b.m);
         a = (b.cur + align - 1) & ~(align - 1);
-        if ((uint64_t)a + size > b.end)
+        if ((uint64_t)a + size > b.end) {
+            // Diagnóstico: quem ocupa a faixa esgotada.
+            std::map<std::string, std::pair<unsigned, uint64_t>> by_what;
+            {
+                const std::lock_guard<std::mutex> rl(g_regions_mutex);
+                for (auto &[st, r] : g_regions)
+                    if (st >= g_pool_start[static_cast<int>(pool)] && st < b.end) {
+                        auto &e = by_what[r.what];
+                        e.first++;
+                        e.second += r.size;
+                    }
+            }
+            logf("vitart: faixa %d esgotada pedindo 0x%x bytes para %s; ocupação:", static_cast<int>(pool), size, what);
+            for (auto &[w, e] : by_what)
+                if (e.first > 16 || e.second > 0x100000)
+                    logf("    %-32s %6u blocos, %llu KiB", w.c_str(), e.first, (unsigned long long)(e.second >> 10));
             return 0;
-        b.cur = a + ((size + 0xFFF) & ~0xFFFu);
+        }
+        b.cur = a + (size >= 0x1000 ? ((size + 0xFFF) & ~0xFFFu) : ((size + 15) & ~15u));
     }
     map_region(a, size ? size : 1, what);
     return a;
@@ -304,6 +330,39 @@ static void load_module(const std::string &path) {
     g_modules.push_back(m);
 }
 
+static std::string describe_host_pc(const void *pc) {
+    const uintptr_t a = reinterpret_cast<uintptr_t>(pc);
+    for (const Module &m : g_modules) {
+        HMODULE h = nullptr;
+        if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCSTR>(pc), &h) || h != m.lib)
+            continue;
+        // A função traduzida mais próxima abaixo do pc (as funções ficam contíguas no .text).
+        uintptr_t best = 0;
+        uint32_t key = 0;
+        for (unsigned i = 0; i < m.nfuncs; i++) {
+            const uintptr_t f = reinterpret_cast<uintptr_t>(m.funcs[i].fn);
+            if (f <= a && f > best) { best = f; key = m.funcs[i].key; }
+        }
+        char buf[160];
+        std::snprintf(buf, sizeof buf, "%s, função do guest 0x%08x + 0x%llx no host", m.info->name, key,
+            (unsigned long long)(a - best));
+        return buf;
+    }
+    return "código fora dos módulos do guest (runtime/HLE)";
+}
+
+static void dump_thread_regs() {
+    Thread *t = t_current;
+    if (!t)
+        return;
+    const arc_ctx &c = t->ctx;
+    logf("    thread %d (%s): r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x", t->id, t->name.c_str(),
+        c.r[0], c.r[1], c.r[2], c.r[3], c.r[4], c.r[5], c.r[6], c.r[7]);
+    logf("        r8=%08x r9=%08x r10=%08x r11=%08x r12=%08x sp=%08x lr=%08x pc=%08x", c.r[8], c.r[9], c.r[10], c.r[11],
+        c.r[12], c.r[13], c.r[14], c.r[15]);
+}
+
 static void link_imports() {
     std::map<std::pair<uint32_t, uint32_t>, uint32_t> exports;
     for (const Module &m : g_modules)
@@ -432,6 +491,20 @@ int start_thread(Thread *t, uint32_t arglen, uint32_t argp) {
     }
     std::thread(thread_main, t, arglen, copy).detach();
     return 0;
+}
+
+Thread *spawn_host_thread(const char *name, std::function<void(Thread *)> body) {
+    Thread *t = create_thread(name, 0, 0x10000100, 0x10000);
+    if (!t)
+        fatal("sem memória para a thread %s", name);
+    std::thread([t, body = std::move(body)] {
+        t_current = t;
+        t->state = 1;
+        t->ctx.r[14] = 0xFFFFFFF1u;
+        body(t);
+        t->state = 2;
+    }).detach();
+    return t;
 }
 
 void exit_current_thread(int status) {

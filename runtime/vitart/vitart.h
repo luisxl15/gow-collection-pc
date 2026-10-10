@@ -12,6 +12,7 @@
 #include <csetjmp>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <initializer_list>
 #include <mutex>
 #include <string>
@@ -66,6 +67,9 @@ Thread *find_thread(int id);
 int start_thread(Thread *t, uint32_t arglen, uint32_t argp);
 [[noreturn]] void exit_current_thread(int status);
 int wait_thread_end(Thread *t, uint32_t timeout_us, int *status);
+// Thread do guest cujo corpo é código do host (fila de exibição, áudio): tem pilha e TLS no guest
+// para poder chamar callbacks do jogo com call_guest.
+Thread *spawn_host_thread(const char *name, std::function<void(Thread *)> body);
 
 // Chama código do guest no contexto da thread atual: r0-r3 = args, devolve r0.
 uint32_t call_guest(arc_ctx *ctx, uint32_t addr, std::initializer_list<uint32_t> args);
