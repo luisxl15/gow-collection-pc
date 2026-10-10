@@ -131,7 +131,14 @@ class Machine:
             self.r[d.bank][base:base + 1].view(np.uint32)[0] = res
             return
         if mn.startswith("vpck_"):
-            _, sf, df = mn.split("_")
+            parts = mn.split("_")
+            sf, df = parts[1], parts[2]
+            if len(parts) == 4:  # repetido: multiplicadores 1 no destino e 2 nas fontes (float)
+                for r in range(int(parts[3][3:]) + 1):
+                    picks = [O.shifted(op, self.rep.offset(getattr(op, "src_index", 1), r, op.bank, 2)) for op in srcs]
+                    dst = O.shifted(d, self.rep.offset(3, r, d.bank, 1))
+                    self.write(dst, m, [self.read(op, 1, sf == "f16")[0] for op in picks], df == "f16")
+                return
             vals = [self.read(op, 1, sf == "f16")[0] for op in srcs]
             if df == "u16":
                 k = 0

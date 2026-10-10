@@ -121,7 +121,9 @@ def lower(ins, second=False):
             fmts = {6: "f32", 3: "u16"}  # f32 -> u16 (conversão sem escala)
             if f["scale"]:
                 return None
-        if f["src_fmt"] not in fmts or f["dest_fmt"] not in fmts or f["repeat_count"]:
+        if f["src_fmt"] not in fmts or f["dest_fmt"] not in fmts:
+            return None
+        if f["repeat_count"] and fmts.get(f["dest_fmt"]) == "u16":
             return None
         sf, df = fmts[f["src_fmt"]], fmts[f["dest_fmt"]]
         d = O.dest(f["dest_n"], f["dest_bank_sel"], f["dest_bank_ext"], False, 7, second)
@@ -147,8 +149,13 @@ def lower(ins, second=False):
                     base, ch = (s1, ch) if ch < 2 else (s2, ch - 2)
                 else:
                     base = s1
-                picks.append(O.Operand(base.bank, base.num, (ch, ch, ch, ch)))
-        return ("vpck_%s_%s" % (sf, df), d, mask, picks)
+                pk = O.Operand(base.bank, base.num, (ch, ch, ch, ch))
+                pk.src_index = 2 if base is s2 else 1  # para os incrementos de repetição
+                picks.append(pk)
+        mn = "vpck_%s_%s" % (sf, df)
+        if f["repeat_count"]:
+            mn += "_rep%d" % f["repeat_count"]
+        return (mn, d, mask, picks)
     if ins.op == "vbw":
         # Operações de bits em uma palavra de 32 bits (bitwise_partial = 16 bits: ainda não).
         op = {(2, 0): "and", (2, 1): "or", (3, 0): "xor", (3, 1): "xor", (4, 0): "shl", (5, 0): "shr", (5, 1): "asr"}.get(
