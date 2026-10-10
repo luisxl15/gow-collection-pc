@@ -92,7 +92,14 @@ errado.
 - os desenhos 3, 5 e 9 deram as mesmas amostras, o que indica saída lida no lugar errado (a posição pode não
   estar em OUTPUT 0..3; ver as varyings do GXP) ou atributos ligados errado.
 
-Esse é o próximo bug a caçar.
+Diagnóstico até aqui (desenho 3, programa 0x860f27b0):
+- as amostras iguais são legítimas: os desenhos 3 e 5 têm o mesmo primeiro vértice nos dados capturados;
+- a saída de um vértice é OUTPUT = (−784, −6943, −375, 1066): x/w e w são plausíveis, mas y/w ≈ −6,5;
+- os contêineres são (14: base 0, 56 palavras) e (19: base 56, 10 palavras), há um uniform buffer com
+  `ldst_base_value = 220` bytes e 9 literais.
+
+Próximo a conferir: o endereço dos ossos (220 bytes contra o recurso de `g_Transforms` deste programa),
+o passo do `i32mad` e a ordem das metades nos índices `u16`.
 
 O próximo marco não é cobertura, é **fidelidade**:
 1. ligar a E/S de verdade (contêineres de SA, endereços de buffer, literais, varyings e as leituras de
