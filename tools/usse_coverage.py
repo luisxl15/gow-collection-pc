@@ -56,5 +56,32 @@ def main():
         print("  %-10s %8d" % (op, n))
 
 
-if __name__ == "__main__":
+if __name__ == "__main__" and "--lower" not in sys.argv:
     main()
+
+
+def lowering_coverage(progs):
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vitarecomp"))
+    from vitarecomp.usse.disasm import lower
+    total = done = full = 0
+    for p in progs.values():
+        ok = True
+        for i in p.primary:
+            total += 1
+            if lower(i) is not None:
+                done += 1
+            else:
+                ok = False
+        for i in p.secondary:
+            total += 1
+            if lower(i, True) is not None:
+                done += 1
+            else:
+                ok = False
+        full += ok
+    print("rebaixamento: %d de %d instruções (%.1f%%); programas inteiros: %d de %d" % (
+        done, total, 100.0 * done / total, full, len(progs)))
+
+
+if __name__ == "__main__" and "--lower" in sys.argv:
+    lowering_coverage(programs(sys.argv[1]))

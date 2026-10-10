@@ -45,6 +45,16 @@ def lower(ins, second=False):
         s2.swizzle = O.vec34_swizzle(f["src2_swiz"], False, 2)
         s2.abs = f["src2_mod"] == 1
         return (V32_OPS[f["op2"]] + ("" if is32 else ".f16"), d, f["dest_mask"], [s1, s2])
+    if ins.op == "vcomp":
+        d = O.dest(f["dest_n"], f["dest_bank"], f["dest_bank_ext"], bits=8, second=second)
+        s1 = O.modifier(O.src12(f["src1_n"], f["src1_bank"], f["src1_bank_ext"], bits=8, second=second), f["src1_mod"])
+        c = f["src_comp"]
+        s1.swizzle = (c, c, c, c)  # um componente, replicado na máscara de destino
+        if f["src_type"] != 0 or f["dest_type"] != 0:
+            return None  # só F32 por enquanto
+        return (["vrcp", "vrsq", "vlog", "vexp"][f["op2"]], d, f["write_mask"], [s1])
+    if ins.op in ("nop", "phas"):
+        return (ins.op, None, 0, [])
     return None
 
 
@@ -53,6 +63,8 @@ def text(ins, second=False):
     if low is None:
         return "%04d %-8s %s" % (ins.pc, ins.op, " ".join("%s=%d" % kv for kv in sorted(ins.f.items())))
     mn, d, m, srcs = low
+    if d is None:
+        return "%04d %s" % (ins.pc, mn)
     smask = 0xF if mn.startswith("vdp") else m
     return "%04d %-8s %s.%s = %s" % (ins.pc, mn, d.text(0xF).split(".")[0], mask_text(m),
                                     ", ".join(s.text(smask) for s in srcs))
