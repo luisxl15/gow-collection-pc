@@ -110,12 +110,16 @@ instruções. Hipóteses a testar:
 
 O teste é ler com +4 e ver se as posições caem na tela.
 
-**Resultado:** +4 não resolve (`USSE_MEM_SHIFT=4` dá w ≈ 477 e x ≈ −1400, ainda fora da tela), e a hipótese
-"base deslocada de uma palavra" foi descartada. Próximo a examinar:
-- o conteúdo real de `g_Transforms` no buffer capturado (compará-lo com o que o rasterizador de prova usa e
-  que funcionou);
-- a ordem das metades `u16` dos índices;
-- o fato de `posAndWeight.w` = 0 nos primeiros vértices.
+**Resultado (medido):**
+- +4 não resolve (w ≈ 477, x ≈ −1400);
+- **−4 resolve**: com a memória do `vldst` = 4 bytes zerados + o uniform buffer capturado
+  (`USSE_MEM_SHIFT=-4`), **33 de 100 vértices** do modelo com skinning caem na tela, com w ≈ 1083 coerente.
+  Sem o deslocamento eram 0. É a mesma proporção do rasterizador de prova validado (cerca de 48%).
+
+Portanto a semântica traduzida do shader de skinning está correta. A diferença está em como o endereço
+`ldst_base_value` se relaciona com o início do buffer que o jogo recebe. O runtime e o tradutor precisam
+aplicar esse deslocamento ao ligar a memória; falta descobrir a regra geral (conferir em outros programas
+e buffers).
 
 O próximo marco não é cobertura, é **fidelidade**:
 1. ligar a E/S de verdade (contêineres de SA, endereços de buffer, literais, varyings e as leituras de
