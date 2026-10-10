@@ -77,6 +77,11 @@ class Program:
     secondary: list
     params: list
     default_uniform_words: int
+    sa_count: int = 0
+    pa_count: int = 0
+    containers: list = None      # (índice, ?, base_sa_offset, tamanho em f32)
+    uniform_buffers: list = None  # (buffer onde reside, ldst_base_offset, ldst_base_value)
+    literals: list = None         # (deslocamento em SA, valor)
 
     @staticmethod
     def parse(blob):
@@ -100,4 +105,12 @@ class Program:
             name = blob[p + noff:blob.index(b"\0", p + noff)].decode("latin-1")
             params.append(dict(name=name, category=b4 & 15, type=b4 >> 4, components=b5 & 15, container=b5 >> 4,
                                semantic=sem, array=arr, resource=res))
-        return Program(blob, bool(flags & 1), primary, secondary, params, u32(0x64))
+        prog = Program(blob, bool(flags & 1), primary, secondary, params, u32(0x64))
+        # Tabelas de entrada (deslocamentos relativos ao próprio campo).
+        rel = lambda field: field + u32(field)
+        prog.sa_count = struct.unpack_from("<H", blob, 0x32)[0]
+        prog.pa_count = struct.unpack_from("<H", blob, 0x30)[0]
+        prog.containers = [struct.unpack_from("<HHHH", blob, rel(0x94) + 8 * i) for i in range(u32(0x90))]
+        prog.uniform_buffers = [struct.unpack_from("<HHi", blob, rel(0x7C) + 8 * i) for i in range(u32(0x78))]
+        prog.literals = [struct.unpack_from("<If", blob, rel(0x74) + 8 * i) for i in range(u32(0x70))]
+        return prog

@@ -421,9 +421,26 @@ class Translator:
             for c in range(4):
                 if res + c < 256:
                     self.regs.write("pa", res + c, b.emit(S.OpCompositeExtract, self.f32, val, c))
-        for w in range(min(512, max(p.default_uniform_words, 1))):
-            ptr = b.chain(S.SCStorageBuffer, self.f32, ub, b.const(self.i32, 0), b.const(self.i32, w))
-            self.regs.write("sa", w, b.load(self.f32, ptr))
+        # Entradas em SA pelas tabelas do GXP: contêiner 14 = default uniform buffer copiado a partir
+        # de base_sa_offset; infos de uniform buffer põem em SA (base do contêiner 19 + ldst_base_offset)
+        # o endereço em bytes do buffer na memória do vldst (o default fica em 0) + ldst_base_value;
+        # literais vão para o contêiner 16 (ou 19).
+        cont = {ci: (base, size) for ci, _, base, size in (p.containers or [])}
+        if 14 in cont:
+            base, size = cont[14]
+            for w in range(min(size, 512 - base)):
+                ptr = b.chain(S.SCStorageBuffer, self.f32, ub, b.const(self.i32, 0), b.const(self.i32, w))
+                self.regs.write("sa", base + w, b.load(self.f32, ptr))
+        data_base = cont.get(19, (0, 0))[0]
+        for reside, ldst_off, ldst_val in (p.uniform_buffers or []):
+            n = data_base + ldst_off
+            if n < 512:
+                addr = b.const(b.u32(), ldst_val & 0xFFFFFFFF)  # buffer 0 = default no deslocamento 0
+                self.regs.write("sa", n, b.emit(S.OpBitcast, self.f32, addr))
+        lit_base = cont.get(16, cont.get(19, (0, 0)))[0]
+        for off, val in (p.literals or []):
+            if lit_base + off < 512:
+                self.regs.write("sa", lit_base + off, self.const(val))
         for ins in p.secondary:
             self.instr(ins, True)
         for ins in p.primary:
