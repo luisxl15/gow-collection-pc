@@ -61,7 +61,8 @@ Medição: `tools/usse_translate_all.py <captura>` traduz todos os programas e p
 | + vbw | 2.437 |
 | + vldst (storage buffer), i32mad, vpck f32→u16, spec/smlsi | 3.111 |
 | + repetição SLMSI (vmov, vpck, vbw) | 3.824 |
-| + vdual | **4.785 de 4.922 (97,2%)**, 0 inválidos |
+| + vdual | 4.785 |
+| + vdp repetido (EXTERNAL) | **4.897 de 4.922 (99,5%)**, 0 inválidos |
 
 Fatos medidos no caminho:
 - Os ossos do skinning são matrizes 4x4 em vetor-linha (16 palavras por `vldst`), misturadas como
@@ -81,8 +82,7 @@ Fatos medidos no caminho:
 - `vlog`/`vexp` estão em base 2, o que ainda precisa ser validado.
 - A semântica ainda não foi comparada com execução real.
 
-Falta, por programa (primeira instrução não coberta): `vdp` repetido 112, `smp` 15 (texturas dependentes),
-`br` 10. As instruções repetidas sem modelo são recusadas de propósito: traduzi-las daria SPIR-V válido e
+Falta, por programa (primeira instrução não coberta): `smp` 15 (texturas dependentes) e `br` 10. As instruções repetidas sem modelo são recusadas de propósito: traduzi-las daria SPIR-V válido e
 errado.
 
 O próximo marco não é cobertura, é **fidelidade**:
