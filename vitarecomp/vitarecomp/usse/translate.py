@@ -109,6 +109,16 @@ class Translator:
 
         def rd(op, mk):
             return self.read(op, mk, half)
+        if mn == "vmov":
+            self.write(d, m, rd(srcs[0], m), half)
+            return
+        if mn.startswith("vmovc_"):
+            c, a, x = (rd(s_, m) for s_ in srcs)
+            op = {"eq": 180, "ne": 182, "lt": 184, "le": 188}[mn[6:]]  # OpFOrd*
+            boolt = b._type("bool", 20)
+            res = [b.emit(169, self.f32, b.emit(op, boolt, t, self.const(0)), p, q) for t, p, q in zip(c, a, x)]
+            self.write(d, m, res, half)
+            return
         if mn.startswith("vmad"):
             a, x, c = (rd(s, m) for s in srcs)
             res = [self.ext(GLSL_FMA, p, q, r) for p, q, r in zip(a, x, c)]

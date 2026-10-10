@@ -116,3 +116,18 @@ def gpi(n, swizzle):
 def modifier(op, mod):
     op.neg, op.abs = bool(mod & 1), bool(mod & 2)
     return op
+
+
+def write_mask(bank, mask, f16):
+    """Máscara de escrita das instruções de 64 bits (vmad2, vmov): F32 fora de FPINTERNAL escreve
+    2 componentes; F16 expande cada bit par para um par de metades."""
+    if bank == FPI or (f16 and bank not in (PA, SA, OUT, FPI, TEMP)):
+        return mask
+    if f16:
+        return (0b11 if mask & 1 else 0) | (0b1100 if mask & 4 else 0)
+    return mask & 0b11
+
+
+VMAD2_SRC0 = [_sw(s) for s in "xxxx yyyy zzzz wwww xyzw yzxw xyww zwxy".split()]
+VMAD2_SRC1 = [_sw(s) for s in "xxxx yyyy zzzz wwww xyzw xyyz yyww wyzw".split()]
+VMAD2_SRC2 = [_sw(s) for s in "xxxx yyyy zzzz wwww xyzw xzww xxyz xyzz".split()]

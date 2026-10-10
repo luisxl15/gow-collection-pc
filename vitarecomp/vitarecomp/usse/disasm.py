@@ -53,6 +53,42 @@ def lower(ins, second=False):
         if f["src_type"] != 0 or f["dest_type"] != 0:
             return None  # só F32 por enquanto
         return (["vrcp", "vrsq", "vlog", "vexp"][f["op2"]], d, f["write_mask"], [s1])
+    if ins.op == "vmad2":
+        f16 = bool(f["dat_fmt"])
+        d = O.dest(f["dest_n"], f["dest_bank"], 0, second=second)
+        s0 = O.src0(f["src0_n"], f["src0_bank"], 0, second=second)
+        s1 = O.modifier(O.src12(f["src1_n"], f["src1_bank"], f["src1_bank_ext"], second=second), f["src1_mod"])
+        s2 = O.modifier(O.src12(f["src2_n"], f["src2_bank"], f["src2_bank_ext"], second=second), f["src2_mod"])
+        s0.swizzle = O.VMAD2_SRC0[f["src0_swiz_bits01"] | f["src0_swiz_bits2"] << 2]
+        s1.swizzle = O.VMAD2_SRC1[f["src1_swiz_bits01"] | f["src1_swiz_bit2"] << 2]
+        s2.swizzle = O.VMAD2_SRC2[f["src2_swiz"]]
+        s0.abs = bool(f["src0_abs"])
+        return ("vmad" + (".f16" if f16 else ""), d, O.write_mask(d.bank, f["dest_mask"], f16), [s0, s1, s2])
+    if ins.op == "vmov":
+        # move_data_type: 0 i8, 1 i16, 2 i32, 3 c10, 4 f16, 5 f32, 6 u8, 7 u16, 8 u32
+        t = f["move_data_type"]
+        if t not in (2, 4, 5, 8) or f["move_type"] == 2 or f["repeat_count"]:
+            return None
+        double = t in (4, 5)
+        bits = 7 if double else 6
+        d = O.dest(f["dest_n"], f["dest_bank_sel"], f["dest_bank_ext"], double, bits, second)
+        s1 = O.src12(f["src1_n"], f["src1_bank_sel"], f["src1_bank_ext"], double, bits, second)
+        mask = O.write_mask(d.bank, f["dest_mask"], t == 4) if double else 1
+        if double:
+            s1.swizzle = O.vec34_swizzle(f["src0_swiz"], False, 2)
+        suffix = ".f16" if t == 4 else ""
+        if f["move_type"] == 0:
+            return ("vmov" + suffix, d, mask, [s1])
+        if t not in (4, 5):
+            return None  # comparação inteira: ainda não
+        s0 = O.src0(f["src0_n"], f["src0_bank_sel"], f["end_or_src0_bank_ext"], double, bits, second)
+        s2 = O.src12(f["src2_n"], f["src2_bank_sel"], f["src2_bank_ext"], double, bits, second)
+        if f["src0_comp_sel"]:
+            s0.swizzle = s1.swizzle
+        s2.swizzle = s1.swizzle
+        cmp = ["eq", "ne", "lt", "le"][f["test_bit_2"] << 1 | f["test_bit_1"]]
+        # resultado = src1 se (src0 cmp 0) senão src2
+        return ("vmovc_" + cmp + suffix, d, mask, [s0, s1, s2])
     if ins.op in ("nop", "phas"):
         return (ins.op, None, 0, [])
     return None

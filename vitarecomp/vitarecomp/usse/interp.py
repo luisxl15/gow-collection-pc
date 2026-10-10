@@ -80,6 +80,14 @@ class Machine:
 
         def rd(op, mk):
             return self.read(op, mk, half)
+        if mn == "vmov":
+            self.write(d, m, rd(srcs[0], m), half)
+            return
+        if mn.startswith("vmovc_"):
+            c, a, b = (rd(s_, m) for s_ in srcs)
+            test = {"eq": lambda v: v == 0, "ne": lambda v: v != 0, "lt": lambda v: v < 0, "le": lambda v: v <= 0}[mn[6:]]
+            self.write(d, m, [x if test(t) else y for t, x, y in zip(c, a, b)], half)
+            return
         if mn.startswith("vmad"):
             a, b, c = (rd(s, m) for s in srcs)
             res = [x * y + z for x, y, z in zip(a, b, c)]
