@@ -25,6 +25,7 @@ class Machine:
                   ((O.TEMP, 256), (O.PA, 256), (O.SA, 512), (O.OUT, 128), (O.FPI, 64), (O.GLOBAL, 256))}
         self.pred = [False] * 4
         self.killed = False
+        self.memory = None  # bytes: memória vista pelo vldst (endereço = deslocamento em bytes)
 
     def _half(self, bank, w, h, val=None):
         halves = self.r[bank][w:w + 1].view(np.float16)  # [baixa, alta]
@@ -88,6 +89,30 @@ class Machine:
         if mn == "kill":
             self.killed = True
             return
+        if mn.startswith("i32mad_"):
+            signed = mn.endswith("_s")
+
+            def part(op):
+                if op.bank == O.IMM:
+                    return op.num
+                w = int(self.r[op.bank][op.num:op.num + 1].view(np.uint32)[0])
+                h = op.swizzle[0]
+                if h == 9:
+                    return w - (1 << 32) if signed and w >> 31 else w
+                v = (w >> (16 * h)) & 0xFFFF
+                return v - 0x10000 if signed and v >> 15 else v
+            res = (part(srcs[0]) * part(srcs[1]) + part(srcs[2])) & 0xFFFFFFFF
+            self.r[d.bank][d.num:d.num + 1].view(np.uint32)[0] = res
+            return
+        if mn == "vldst":
+            def word(op):
+                if op.bank == O.IMM:
+                    return op.num
+                return int(self.r[op.bank][op.num:op.num + 1].view(np.uint32)[0])
+            addr = (word(srcs[0]) + word(srcs[1]) + word(srcs[2])) & 0xFFFFFFFF
+            vals = np.frombuffer(self.memory, np.float32, m, addr) if self.memory is not None else np.zeros(m, np.float32)
+            self.r[d.bank][d.num:d.num + m] = vals
+            return
         if mn.startswith("vbw_"):
             def word(op):
                 if op.bank == O.IMM:
@@ -104,6 +129,14 @@ class Machine:
         if mn.startswith("vpck_"):
             _, sf, df = mn.split("_")
             vals = [self.read(op, 1, sf == "f16")[0] for op in srcs]
+            if df == "u16":
+                k = 0
+                for i in range(4):
+                    if m >> i & 1:
+                        h = self.r[d.bank][d.num + i // 2:d.num + i // 2 + 1].view(np.uint16)
+                        h[i % 2] = int(max(0.0, min(65535.0, vals[k])))
+                        k += 1
+                return
             self.write(d, m, vals, df == "f16")
             return
         if mn.startswith("vtst_"):

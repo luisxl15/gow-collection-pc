@@ -14,6 +14,8 @@ def mask_text(m):
 def lower(ins, second=False):
     """Devolve (mnemônico, destino, máscara, [fontes]) ou None se a classe ainda não é rebaixada."""
     f = ins.f
+    if ins.op in ("vmad", "vdp", "vcomp") and f.get("repeat_count"):
+        return None  # repetição ainda não modelada (resultado seria válido mas errado)
     if ins.op == "vmad":
         kind = 2 if f["opcode2"] else 1
         d = O.dest(f["dest_n"], f["dest_bank"], f["dest_use_bank_ext"], second=second)
@@ -111,6 +113,10 @@ def lower(ins, second=False):
         # Só formatos de ponto flutuante (f32/f16) por enquanto; cada componente vira uma fonte de
         # canal único em srcs (a escolha entre src1/src2 já resolvida).
         fmts = {5: "f16", 6: "f32"}
+        if f["src_fmt"] == 6 and f["dest_fmt"] == 3:
+            fmts = {6: "f32", 3: "u16"}  # f32 -> u16 (conversão sem escala)
+            if f["scale"]:
+                return None
         if f["src_fmt"] not in fmts or f["dest_fmt"] not in fmts or f["repeat_count"]:
             return None
         sf, df = fmts[f["src_fmt"]], fmts[f["dest_fmt"]]
@@ -159,9 +165,34 @@ def lower(ins, second=False):
         elif f["src2_rot"] or f["src2_invert"]:
             return None
         return ("vbw_" + op, d, 1, [s1, s2])
+    if ins.op == "i32mad":
+        # dest(32) = meia16(src0) * meia16(src1) + src2 (32 bits, ou 16 se src2_type != 2)
+        if f["repeat_count"] or f["is_sat"]:
+            return None
+        d = O.dest(f["dest_n"], f["dest_bank"], f["dest_bank_ext"], False, 7, second)
+        s0 = O.src0(f["src0_n"], f["src0_bank"], 0, False, 7, second)
+        s1 = O.src12(f["src1_n"], f["src1_bank"], f["src1_bank_ext"], False, 7, second)
+        s2 = O.src12(f["src2_n"], f["src2_bank"], f["src2_bank_ext"], False, 7, second)
+        s0.swizzle = (f["src0_high"],) * 4
+        s1.swizzle = (f["src1_high"],) * 4
+        s2.swizzle = (9 if f["src2_type"] == 2 else f["src2_high"],) * 4  # 9 = palavra inteira
+        return ("i32mad_" + ("s" if f["is_signed"] else "u"), d, 1, [s0, s1, s2])
+    if ins.op == "vldst":
+        # Carga de memória: endereço = src0 + src1 + src2 (bytes); mask_count + 1 palavras F32.
+        if f["op1"] != 1 or f["data_type"] != 0:
+            return None
+        s0 = O.src0(f["src0_n"], f["src0_bank"], f["src0_bank_ext"], False, 7, second)
+        s1 = O.src12(f["src1_n"], f["src1_bank"], f["src1_bank_ext"], False, 7, second)
+        s2 = O.src12(f["src2_n"], f["src2_bank"], f["src2_bank_ext"], False, 7, second)
+        if s1.bank == O.IMM:
+            s1.num *= 4
+        bank = O.SA if second else (O.PA if f["dest_bank_primattr"] else O.TEMP)
+        d = O.Operand(bank, f["dest_n"])
+        return ("vldst", d, f["mask_count"] + 1, [s0, s1, s2])
     if ins.op == "kill":
         return ("kill", O.Operand(O.PRED, 0), 0, [])
-    if ins.op in ("nop", "phas"):
+    if ins.op in ("nop", "phas", "spec", "smlsi"):
+        # spec: sincronização; smlsi: incrementos de repetição (recusamos instruções repetidas)
         return (ins.op, None, 0, [])
     return None
 

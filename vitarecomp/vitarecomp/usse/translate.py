@@ -124,6 +124,20 @@ class Translator:
         finally:
             self.cur_pred = None
 
+    def memory(self):
+        """Storage buffer (set 0, binding 1) com a memória que o vldst lê, em palavras de 32 bits."""
+        if getattr(self, "_mem", None) is None:
+            b = self.b
+            rta = b.runtime_array(b.u32(), 4)
+            st = b.struct("mem", rta)
+            b.decorate(st, S.DecBlock)
+            b.member_decorate(st, 0, S.DecOffset, 0)
+            self._mem = b.variable(st, S.SCStorageBuffer, "memory")
+            b.decorate(self._mem, S.DecDescriptorSet, 0)
+            b.decorate(self._mem, S.DecBinding, 1)
+            b.decorate(self._mem, S.DecNonWritable)
+        return self._mem
+
     def kill(self):
         """Descarte do fragmento: desvio para um bloco com OpKill (sob o predicado, se houver)."""
         b = self.b
@@ -141,7 +155,71 @@ class Translator:
         if mn.startswith("vpck_"):
             _, sf, df = mn.split("_")
             vals = [self.read(op, 1, sf == "f16")[0] for op in srcs]
+            if df == "u16":
+                b, u32 = self.b, self.b.u32()
+                k = 0
+                for i in range(4):
+                    if m >> i & 1:
+                        if d.bank not in BANK_VAR:
+                            raise Unsupported("destino %s" % d.bank)
+                        n = d.num + i // 2
+                        v = b.emit(109, u32, vals[k])  # OpConvertFToU
+                        v = b.emit(199, u32, v, b.const(u32, 0xFFFF))
+                        w = b.emit(S.OpBitcast, u32, self.regs.read(BANK_VAR[d.bank], n))
+                        keep = b.emit(199, u32, w, b.const(u32, 0xFFFF0000 if i % 2 == 0 else 0x0000FFFF))
+                        if i % 2:
+                            v = b.emit(196, u32, v, b.const(u32, 16))
+                        nw = b.emit(S.OpBitcast, self.f32, b.emit(197, u32, keep, v))
+                        if self.cur_pred is not None:
+                            nw = b.emit(169, self.f32, self.cur_pred, nw, self.regs.read(BANK_VAR[d.bank], n))
+                        self.regs.write(BANK_VAR[d.bank], n, nw)
+                        k += 1
+                return
             self.write(d, m, vals, df == "f16")
+            return
+        if mn.startswith("i32mad_"):
+            b, u32 = self.b, self.b.u32()
+            signed = mn.endswith("_s")
+
+            def part(op):
+                if op.bank == O.IMM:
+                    return b.const(u32, op.num)
+                if op.bank not in BANK_VAR:
+                    raise Unsupported("banco %s" % op.bank)
+                w = b.emit(S.OpBitcast, u32, self.regs.read(BANK_VAR[op.bank], op.num))
+                h = op.swizzle[0]
+                if h == 9:
+                    return w
+                if signed:  # extensão de sinal da metade escolhida
+                    t = b.emit(196, u32, w, b.const(u32, 16 - 16 * h))  # ShiftLeftLogical
+                    return b.emit(195, u32, t, b.const(u32, 16))         # ShiftRightArithmetic
+                t = b.emit(194, u32, w, b.const(u32, 16 * h))           # ShiftRightLogical
+                return b.emit(199, u32, t, b.const(u32, 0xFFFF))         # BitwiseAnd
+            r = b.emit(S.OpIAdd, u32, b.emit(S.OpIMul, u32, part(srcs[0]), part(srcs[1])), part(srcs[2]))
+            self.write(d, 1, [b.emit(S.OpBitcast, self.f32, r)])
+            return
+        if mn == "vldst":
+            b, u32 = self.b, self.b.u32()
+
+            def word(op):
+                if op.bank == O.IMM:
+                    return b.const(u32, op.num)
+                if op.bank not in BANK_VAR:
+                    raise Unsupported("banco %s" % op.bank)
+                return b.emit(S.OpBitcast, u32, self.regs.read(BANK_VAR[op.bank], op.num))
+            addr = b.emit(S.OpIAdd, u32, b.emit(S.OpIAdd, u32, word(srcs[0]), word(srcs[1])), word(srcs[2]))
+            idx = b.emit(194, u32, addr, b.const(u32, 2))  # bytes -> palavras
+            vals = []
+            for k in range(m):
+                i = b.emit(S.OpIAdd, u32, idx, b.const(u32, k))
+                w = b.load(u32, b.chain(S.SCStorageBuffer, u32, self.memory(), b.const(self.i32, 0), i))
+                vals.append(b.emit(S.OpBitcast, self.f32, w))
+            for k, v in enumerate(vals):
+                if d.bank not in BANK_VAR or d.num + k >= S.RegisterFile.SIZES[BANK_VAR[d.bank]]:
+                    raise Unsupported("destino de vldst")
+                old = self.regs.read(BANK_VAR[d.bank], d.num + k) if self.cur_pred is not None else None
+                self.regs.write(BANK_VAR[d.bank], d.num + k,
+                                v if old is None else b.emit(169, self.f32, self.cur_pred, v, old))
             return
         if mn.startswith("vbw_"):
             b, u32 = self.b, self.b.u32()
