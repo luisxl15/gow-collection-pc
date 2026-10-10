@@ -160,7 +160,7 @@ def lower(ins, second=False):
         # Operações de bits em uma palavra de 32 bits (bitwise_partial = 16 bits: ainda não).
         op = {(2, 0): "and", (2, 1): "or", (3, 0): "xor", (3, 1): "xor", (4, 0): "shl", (5, 0): "shr", (5, 1): "asr"}.get(
             (f["op1"], f["op2"]))
-        if op is None or f["bitwise_partial"] or f["repeat_count"]:
+        if op is None or f["bitwise_partial"]:
             return None
         d = O.dest(f["dest_n"], f["dest_bank"], f["dest_ext"], False, 7, second)
         s1 = O.src12(f["src1_n"], f["src1_bank"], f["src1_ext"], False, 7, second)
@@ -175,7 +175,7 @@ def lower(ins, second=False):
             s2 = O.Operand(O.IMM, v)
         elif f["src2_rot"] or f["src2_invert"]:
             return None
-        return ("vbw_" + op, d, 1, [s1, s2])
+        return ("vbw_" + op + ("_rep%d" % f["repeat_count"] if f["repeat_count"] else ""), d, 1, [s1, s2])
     if ins.op == "i32mad":
         # dest(32) = meia16(src0) * meia16(src1) + src2 (32 bits, ou 16 se src2_type != 2)
         if f["repeat_count"] or f["is_sat"]:

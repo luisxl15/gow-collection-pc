@@ -232,6 +232,12 @@ class Translator:
                 self.regs.write(BANK_VAR[d.bank], d.num + k,
                                 v if old is None else b.emit(169, self.f32, self.cur_pred, v, old))
             return
+        if mn.startswith("vbw_") and mn.count("_") == 2:
+            parts = mn.split("_")
+            for r in range(int(parts[2][3:]) + 1):
+                sh = lambda op, i: op if op.bank == O.IMM else O.shifted(op, self.rep.offset(i, r, op.bank, 1))
+                self._instr("vbw_" + parts[1], O.shifted(d, self.rep.offset(3, r, d.bank, 1)), 1, [sh(srcs[0], 1), sh(srcs[1], 2)])
+            return
         if mn.startswith("vbw_"):
             b, u32 = self.b, self.b.u32()
 

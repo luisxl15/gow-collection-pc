@@ -72,6 +72,18 @@ class Machine:
                     self.r[d.bank][base + i] = vals[k % len(vals)]
                 k += 1
 
+    def step_vbw(self, op, d, s1, s2):
+        def word(o):
+            if o.bank == O.IMM:
+                return o.num
+            base = 4 * o.num if o.bank == O.FPI else o.num
+            return int(self.r[o.bank][base:base + 1].view(np.uint32)[0])
+        a, b = word(s1), word(s2)
+        res = {"and": a & b, "or": a | b, "xor": a ^ b, "shl": (a << (b & 31)) & 0xFFFFFFFF, "shr": a >> (b & 31),
+               "asr": ((a - (1 << 32) if a >> 31 else a) >> (b & 31)) & 0xFFFFFFFF}[op]
+        base = 4 * d.num if d.bank == O.FPI else d.num
+        self.r[d.bank][base:base + 1].view(np.uint32)[0] = res
+
     def step(self, ins, second=False):
         if ins.op == "smlsi":
             self.rep.smlsi(ins.f)
@@ -123,6 +135,15 @@ class Machine:
                     return op.num
                 base = 4 * op.num if op.bank == O.FPI else op.num
                 return int(self.r[op.bank][base:base + 1].view(np.uint32)[0])
+            parts = mn.split("_")
+            if len(parts) == 3:  # repetido: multiplicador 1 em todos os operandos
+                for r in range(int(parts[2][3:]) + 1):
+                    sh = lambda op, i: op if op.bank == O.IMM else O.shifted(op, self.rep.offset(i, r, op.bank, 1))
+                    self.step_vbw(parts[1], O.shifted(d, self.rep.offset(3, r, d.bank, 1)), sh(srcs[0], 1), sh(srcs[1], 2))
+                return
+            self.step_vbw(parts[1], d, srcs[0], srcs[1])
+            return
+        if mn == "__never__":
             a, b = word(srcs[0]), word(srcs[1])
             op = mn[4:]
             res = {"and": a & b, "or": a | b, "xor": a ^ b, "shl": (a << (b & 31)) & 0xFFFFFFFF, "shr": a >> (b & 31),
