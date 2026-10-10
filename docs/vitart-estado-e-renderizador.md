@@ -98,8 +98,17 @@ Diagnóstico até aqui (desenho 3, programa 0x860f27b0):
 - os contêineres são (14: base 0, 56 palavras) e (19: base 56, 10 palavras), há um uniform buffer com
   `ldst_base_value = 220` bytes e 9 literais.
 
-Próximo a conferir: o endereço dos ossos (220 bytes contra o recurso de `g_Transforms` deste programa),
-o passo do `i32mad` e a ordem das metades nos índices `u16`.
+- O endereço do osso é `PA7.baixo × SA65 + SA56`, com SA65 = literal 0x40 = 64 bytes (osso 4x4, o que confirma o
+  modelo) e SA56 = `ldst_base_value` = 220.
+- `g_Transforms` neste programa começa na palavra 56 (224 bytes). O osso k é lido em 220 + 64k, uma palavra
+  antes do esperado, qualquer que seja k.
+
+**Pista principal:** o erro está na base do buffer ou no significado de `ldst_base_value`, não na semântica das
+instruções. Hipóteses a testar:
+- o buffer real começa 4 bytes antes do que o jogo recebe de `sceGxmReserveVertexDefaultUniformBuffer`;
+- `ldst_base_value` é relativo a outra base.
+
+O teste é ler com +4 e ver se as posições caem na tela.
 
 O próximo marco não é cobertura, é **fidelidade**:
 1. ligar a E/S de verdade (contêineres de SA, endereços de buffer, literais, varyings e as leituras de
