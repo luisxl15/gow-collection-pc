@@ -84,6 +84,34 @@ class Machine:
         base = 4 * d.num if d.bank == O.FPI else d.num
         self.r[d.bank][base:base + 1].view(np.uint32)[0] = res
 
+    def dual_op(self, op):
+        h = op["half"]
+        a = [self.read(s_, op["smask"], h and s_.bank != O.FPI) for s_ in op["srcs"]]
+        n = op["name"]
+        if n in ("vmad", "fmad"):
+            return [x * y + z for x, y, z in zip(*a)]
+        if n in ("vmul", "fmul"):
+            return [x * y for x, y in zip(*a)]
+        if n in ("vadd", "fadd"):
+            return [x + y for x, y in zip(*a)]
+        if n == "vmov":
+            return a[0]
+        if n == "vdp":
+            return [sum(x * y for x, y in zip(*a))]
+        if n == "vssq":
+            return [sum(x * x for x in a[0])]
+        if n == "frcp":
+            return [1.0 / a[0][0] if a[0][0] else math.inf]
+        if n == "frsq":
+            return [1.0 / math.sqrt(a[0][0]) if a[0][0] > 0 else math.inf]
+        if n == "fexp":
+            return [2.0 ** a[0][0]]
+        if n == "flog":
+            return [math.log2(a[0][0]) if a[0][0] > 0 else -math.inf]
+        if n == "fsubflr":
+            return [a[0][0] - math.floor(a[1][0])]
+        raise NotImplementedError(n)
+
     def step(self, ins, second=False):
         if ins.op == "smlsi":
             self.rep.smlsi(ins.f)
@@ -102,6 +130,11 @@ class Machine:
 
         def rd(op, mk):
             return self.read(op, mk, half)
+        if mn == "vdual":
+            results = [self.dual_op(op) for op in srcs]
+            for op, res in zip(srcs, results):
+                self.write(op["dest"], op["mask"], res, op["half"] and op["dest"].bank != O.FPI)
+            return
         if mn == "kill":
             self.killed = True
             return

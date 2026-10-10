@@ -155,7 +155,43 @@ class Translator:
         b.body += b.inst(248, kill_lbl) + b.inst(252)     # OpLabel; OpKill
         b.body += b.inst(248, merge_lbl)
 
+    def dual_op(self, op):
+        b, h = self.b, op["half"]
+        a = [self.read(s_, op["smask"], h and s_.bank != O.FPI) for s_ in op["srcs"]]
+        n = op["name"]
+        F = self.f32
+        if n in ("vmad", "fmad"):
+            return [b.emit(S.OpFAdd, F, b.emit(S.OpFMul, F, x, y), z) for x, y, z in zip(*a)]
+        if n in ("vmul", "fmul"):
+            return [b.emit(S.OpFMul, F, x, y) for x, y in zip(*a)]
+        if n in ("vadd", "fadd"):
+            return [b.emit(S.OpFAdd, F, x, y) for x, y in zip(*a)]
+        if n == "vmov":
+            return a[0]
+        if n in ("vdp", "vssq"):
+            xs, ys = (a[0], a[1]) if n == "vdp" else (a[0], a[0])
+            acc = b.emit(S.OpFMul, F, xs[0], ys[0])
+            for x, y in zip(xs[1:], ys[1:]):
+                acc = self.ext(GLSL_FMA, x, y, acc)
+            return [acc]
+        if n == "frcp":
+            return [b.emit(S.OpFDiv, F, self.const(1), a[0][0])]
+        if n == "frsq":
+            return [self.ext(GLSL_INVSQRT, a[0][0])]
+        if n == "fexp":
+            return [self.ext(GLSL_EXP2, a[0][0])]
+        if n == "flog":
+            return [self.ext(GLSL_LOG2, a[0][0])]
+        if n == "fsubflr":
+            return [b.emit(S.OpFSub, F, a[0][0], self.ext(GLSL_FLOOR, a[1][0]))]
+        raise Unsupported(n)
+
     def _instr(self, mn, d, m, srcs):
+        if mn == "vdual":
+            results = [self.dual_op(op) for op in srcs]  # as duas leem antes de escrever
+            for op, res in zip(srcs, results):
+                self.write(op["dest"], op["mask"], res, op["half"] and op["dest"].bank != O.FPI)
+            return
         if mn.startswith("vpck_"):
             parts = mn.split("_")
             sf, df = parts[1], parts[2]

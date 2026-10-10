@@ -142,7 +142,10 @@ _SHORT = {0: None, 1: (0, False), 2: (1, False), 3: (0, True)}
 
 def predicate(ins):
     v = ins.f.get("pred", 0)
-    if ins.op == "vmad2":
+    if ins.op == "vdual":
+        v = ins.f.get("sv_pred", 0)
+        table = {0: None, 1: (0, False), 2: (0, True)}
+    elif ins.op == "vmad2":
         table = {0: None, 1: (0, False), 2: (1, False), 3: (2, False)}
     elif ins.op == "kill":
         # o inverso do predicado curto: 1 = !P0, 2 = !P1, 3 = P0
@@ -184,3 +187,10 @@ class RepeatState:
 def shifted(op, n):
     """Cópia do operando deslocada n registradores (de 32 bits)."""
     return Operand(op.bank, op.num + n, op.swizzle, op.neg, op.abs, op.gpi)
+
+
+
+def dual_swizzle(code, ext, vec4):
+    if vec4:
+        return (DUAL_V4_EXT if ext else DUAL_V4_STD)[code]
+    return (DUAL_V3_EXT if ext else DUAL_V3_STD)[code]

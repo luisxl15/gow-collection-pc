@@ -200,6 +200,8 @@ def lower(ins, second=False):
         bank = O.SA if second else (O.PA if f["dest_bank_primattr"] else O.TEMP)
         d = O.Operand(bank, f["dest_n"])
         return ("vldst", d, f["mask_count"] + 1, [s0, s1, s2])
+    if ins.op == "vdual":
+        return lower_vdual(f, second)
     if ins.op == "kill":
         return ("kill", O.Operand(O.PRED, 0), 0, [])
     if ins.op == "smlsi":
@@ -220,3 +222,85 @@ def text(ins, second=False):
     smask = 0xF if mn.startswith("vdp") else m
     return "%04d %-8s %s.%s = %s" % (ins.pc, mn, d.text(0xF).split(".")[0], mask_text(m),
                                     ", ".join(s.text(smask) for s in srcs))
+
+
+# ----------------------------------------------------------------------- vdual
+# (nome, nº de fontes, carga vetorial, escrita vetorial)
+DUAL_OPS = [("vmad", 3, True, True), ("vdp", 2, True, False), ("vssq", 1, True, False), ("vmul", 2, True, True),
+            ("vadd", 2, True, True), ("vmov", 1, True, True), ("frsq", 1, False, False), ("frcp", 1, False, False),
+            ("fmad", 3, False, False), ("fadd", 2, False, False), ("fmul", 2, False, False),
+            ("fsubflr", 2, False, False), ("fexp", 1, False, False), ("flog", 1, False, False), None, None]
+U, I0, I1, I2 = "u", "i0", "i1", "i2"
+OP1_LAYOUT = {1: {0: [U], 1: [I0], 2: [I1], 3: [I2]},
+              2: {0: [U, I1], 1: [I0, U], 2: [I0, I1]},
+              3: {0: [U, I1, I2], 1: [I0, U, I2], 2: [I0, I1, U], 3: [I0, I1, I2]}}
+OP2_LAYOUT = {1: {1: {0: [I0], 1: [U], 2: [U], 3: [U]},
+                  2: {0: [I0, I1], 1: [U, I1], 2: [I0, U], 3: [I1, U]},
+                  3: {0: [I0, I1, I2], 1: [U, I1, I2], 2: [I0, U, I2], 3: [I0, U, I1]}},
+              2: {1: {0: [I0], 1: [I1], 2: [U]},
+                  2: {0: [I0, I2], 1: [I1, I2], 2: [I2, U]}},
+              3: {1: {0: [I0], 1: [I1], 2: [I2], 3: [U]}}}
+
+
+def lower_vdual(f, second):
+    """Duas operações numa instrução; devolve ("vdual", destino fictício, 0, [op1, op2]) com cada op
+    como dict(name, srcs, dest, mask, smask, half). As duas leem antes de qualquer escrita."""
+    cct = f["comp_count_type"]
+    f16 = bool(f["type_f16"])
+    i1 = (int(not cct and f["dual_op1_ext_vec3_or_has_w_vec4"]) << 3) | f["dual_op1"]
+    i2 = f["dual_op2_ext"] << 3 | f["dual_op2"]
+    if DUAL_OPS[i1] is None or DUAL_OPS[i2] is None or i2 == 0:
+        return None
+    n1, c1, vl1, vs1 = DUAL_OPS[i1]
+    n2, c2, vl2, vs2 = DUAL_OPS[i2]
+    try:
+        lay1 = OP1_LAYOUT[c1][f["src_config"]]
+        lay2 = OP2_LAYOUT[c1][c2][f["src_config"]]
+    except KeyError:
+        return None
+    ustore = f["prim_ustore"]
+    uvec = (ustore and vs1) or (not ustore and vs2)
+    udest = O.dest(f["prim_dest_num"], f["prim_dest_bank"], 0, uvec, 8 if uvec else 7, second)
+    idest = O.Operand(O.FPI, f["prim_dest_num_gpi_case"])
+    fixed = f["write_mask_non_gpi"] | (int(cct and f["dual_op1_ext_vec3_or_has_w_vec4"]) << 3)
+
+    def mask_for(vstore, internal):
+        if internal:
+            return 0b1111 if cct else 0b0111
+        if vstore:
+            return 0b1111 if f16 else 0b0011
+        return 0b0011 if f16 else 0b0001
+
+    d1, d2 = (udest, idest) if ustore else (idest, udest)
+    m1 = mask_for(vs1, d1.bank == O.FPI) if ustore else fixed
+    m2 = fixed if ustore else mask_for(vs2, d2.bank == O.FPI)
+
+    def srcs(layout, vload):
+        out = []
+        for sid in layout:
+            if sid == U:
+                op = O.src12(f["unified_store_slot_num"], f["unified_store_slot_bank"], 0, vload, 8 if vload else 7, second)
+                op.swizzle = O.dual_swizzle(f["unified_store_swizz"], c1 < 2 and f["gpi2_slot_num_bit_1"], cct)
+                op.abs = bool(c1 < 2 and f["gpi2_slot_num_bit_0_or_unified_store_abs"])
+                op.neg = bool(f["unified_store_neg"])
+            elif sid == I0:
+                op = O.Operand(O.FPI, f["gpi0_slot_num"], O.dual_swizzle(f["gpi0_swizz"], False, cct))
+            elif sid == I1:
+                op = O.Operand(O.FPI, f["gpi1_slot_num"], O.dual_swizzle(f["gpi1_swizz"], f["gpi1_swizz_ext"], cct))
+                op.neg = bool(f["gpi1_neg"])
+            else:
+                num = (f["gpi2_slot_num_bit_1"] << 1 | f["gpi2_slot_num_bit_0_or_unified_store_abs"]) if c1 >= 2 else 2
+                op = O.Operand(O.FPI, num)
+            out.append(op)
+        return out
+
+    def smask(name, vload, dmask):
+        if not vload:
+            return 1
+        if name in ("vdp", "vssq"):
+            return 0b1111 >> int(not cct)
+        return dmask
+
+    op1 = dict(name=n1, srcs=srcs(lay1, vl1), dest=d1, mask=m1, smask=smask(n1, vl1, m1), half=f16)
+    op2 = dict(name=n2, srcs=srcs(lay2, vl2), dest=d2, mask=m2, smask=smask(n2, vl2, m2), half=f16)
+    return ("vdual", O.Operand(O.PRED, 0), 0, [op1, op2])
