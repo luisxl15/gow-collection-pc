@@ -186,6 +186,15 @@ class Translator:
             return [b.emit(S.OpFSub, F, a[0][0], self.ext(GLSL_FLOOR, a[1][0]))]
         raise Unsupported(n)
 
+    def _vdp_once(self, mn, d, m, srcs, rd):
+        n = 3 if mn == "vdp3" else 4
+        full = (1 << n) - 1
+        a, x = rd(srcs[0], full), rd(srcs[1], full)
+        acc = self.b.emit(S.OpFMul, self.f32, a[0], x[0])
+        for p_, q in zip(a[1:], x[1:]):
+            acc = self.ext(GLSL_FMA, p_, q, acc)
+        self.write(d, m, [acc])
+
     def _instr(self, mn, d, m, srcs):
         if mn == "vdual":
             results = [self.dual_op(op) for op in srcs]  # as duas leem antes de escrever
@@ -337,6 +346,15 @@ class Translator:
             boolt = b._type("bool", 20)
             res = [b.emit(169, self.f32, b.emit(op, boolt, t, self.const(0)), p, q) for t, p, q in zip(c, a, x)]
             self.write(d, m, res, half)
+            return
+        if "_ext" in mn and mn.startswith("vdp"):
+            base_mn, n_rep = mn.split("_ext")
+            mask = m
+            for r in range(int(n_rep) + 1):
+                s1 = srcs[0] if srcs[0].bank == O.FPI else O.shifted(srcs[0], 4 * r)
+                s1.swizzle, s1.neg, s1.abs = srcs[0].swizzle, srcs[0].neg, srcs[0].abs
+                self._vdp_once(base_mn, d, mask, [s1, srcs[1]], rd)
+                mask = ((mask << 1) | (mask >> 3)) & 0xF
             return
         if mn.startswith("vmad"):
             a, x, c = (rd(s, m) for s in srcs)

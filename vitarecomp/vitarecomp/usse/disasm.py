@@ -15,7 +15,12 @@ def lower(ins, second=False):
     """Devolve (mnemônico, destino, máscara, [fontes]) ou None se a classe ainda não é rebaixada."""
     f = ins.f
     if ins.op in ("vmad", "vdp", "vcomp") and f.get("repeat_count"):
-        return None  # repetição ainda não modelada (resultado seria válido mas errado)
+        # Único caso modelado: vdp no modo EXTERNAL (fonte não-GPI avança 4 por repetição, o GPI
+        # fica, a máscara de escrita gira). O resto seria SPIR-V válido e errado: recusado.
+        if not (ins.op == "vdp" and f["repeat_mode"] == 0):
+            return None
+        low = lower_vdp(ins, f, second)
+        return (low[0] + "_ext%d" % f["repeat_count"],) + low[1:]
     if ins.op == "vmad":
         kind = 2 if f["opcode2"] else 1
         d = O.dest(f["dest_n"], f["dest_bank"], f["dest_use_bank_ext"], second=second)
@@ -29,6 +34,8 @@ def lower(ins, second=False):
         # fma(gpi0, src1, gpi1)
         return ("vmad%d" % (kind + 2), d, f["write_mask"], [g0, s1, g1])
     if ins.op == "vdp":
+        return lower_vdp(ins, f, second)
+    if ins.op == "__vdp_old__":
         kind = 2 if f["opcode2"] else 1
         d = O.dest(f["dest_n"], f["dest_bank"], f["dest_use_bank_ext"], second=second)
         s1 = O.src12(f["src1_n"], f["src1_bank"], f["src1_bank_ext"], second=second)
@@ -304,3 +311,15 @@ def lower_vdual(f, second):
     op1 = dict(name=n1, srcs=srcs(lay1, vl1), dest=d1, mask=m1, smask=smask(n1, vl1, m1), half=f16)
     op2 = dict(name=n2, srcs=srcs(lay2, vl2), dest=d2, mask=m2, smask=smask(n2, vl2, m2), half=f16)
     return ("vdual", O.Operand(O.PRED, 0), 0, [op1, op2])
+
+
+def lower_vdp(ins, f, second):
+    kind = 2 if f["opcode2"] else 1
+    d = O.dest(f["dest_n"], f["dest_bank"], f["dest_use_bank_ext"], second=second)
+    s1 = O.src12(f["src1_n"], f["src1_bank"], f["src1_bank_ext"], second=second)
+    tb = [O.X, O.Y, O.Z, O.W, O.C0, O.C1, O.C2, O.CH]
+    s1.swizzle = tuple(tb[f[k]] for k in ("src1_swiz_x", "src1_swiz_y", "src1_swiz_z", "src1_swiz_w"))
+    s1.neg, s1.abs = bool(f["src1_neg"]), bool(f["src1_abs"])
+    g0 = O.gpi(f["gpi0_n"], O.vec34_swizzle(f["gpi0_swiz"], False, kind))
+    g0.abs = bool(f["gpi0_abs"])
+    return ("vdp%d" % (kind + 2), d, f["write_mask"], [s1, g0])
