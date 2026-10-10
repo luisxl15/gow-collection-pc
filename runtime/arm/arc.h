@@ -14,6 +14,7 @@ extern const unsigned arc_func_count;
 extern const arc_segment arc_segments[];
 extern const unsigned arc_segment_count;
 extern const uint32_t arc_entry;
+extern const arc_module_info arc_module;
 
 /* ---- guest memory: flat 4 GiB window, unaligned-safe little-endian accesses ---- */
 #define ARC_P(a) (arc_mem + (uint32_t)(a))

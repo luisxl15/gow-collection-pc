@@ -38,5 +38,6 @@ ARC_EXPORT const arc_func_entry *arc_get_table(unsigned *count);
 ARC_EXPORT const char *arc_get_module_name(void);
 /* Segmentos da imagem usada na tradução: o host compara o de código com o que carregou. */
 ARC_EXPORT const arc_segment *arc_get_segments(unsigned *count);
+ARC_EXPORT const arc_module_info *arc_get_module(void);
 
 #endif

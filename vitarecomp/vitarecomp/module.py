@@ -37,6 +37,7 @@ class Segment:
     filesz: int
     flags: int
     data: bytearray
+    link_vaddr: int = 0   # p_vaddr do ELF; difere de vaddr quando o módulo é relocado para outra base
 
     @property
     def executable(self) -> bool:
@@ -129,7 +130,9 @@ def _elf_from_self(data: bytes) -> tuple[bytes, list[tuple[int, int, int, int]],
     return elf_off, phdr_off, secinfo_off, header_len
 
 
-def load(data: bytes, name: str = "module") -> Module:
+def load(data: bytes, name: str = "module", load_base: int | None = None) -> Module:
+    """Carrega o módulo. Com `load_base`, um ET_SCE_RELEXEC é relocado para que o primeiro segmento
+    comece em `base` (os demais mantêm a distância relativa); sem, fica no endereço de link."""
     is_self = data[:4] == b"SCE\0"
     if is_self:
         elf_off, phdr_off, secinfo_off, header_len = _elf_from_self(data)
@@ -169,11 +172,15 @@ def load(data: bytes, name: str = "module") -> Module:
     segments: list[Segment] = []
     relas: list[bytes] = []
     exidx = None
+    loads = [ph[2] for ph in phdrs if ph[0] == PT_LOAD and ph[5]]
+    if load_base is not None and e_type != ET_SCE_RELEXEC:
+        raise ModuleError("só módulos relocáveis (ET_SCE_RELEXEC) podem mudar de base")
+    shift = 0 if load_base is None or not loads else load_base - min(loads)
     for i, (p_type, _off, vaddr, _pa, filesz, memsz, flags, _align) in enumerate(phdrs):
         if p_type == PT_LOAD and memsz:
             buf = bytearray(seg_bytes(i))
             buf.extend(b"\0" * (memsz - len(buf)))
-            segments.append(Segment(i, vaddr, memsz, filesz, flags, buf))
+            segments.append(Segment(i, (vaddr + shift) & 0xFFFFFFFF, memsz, filesz, flags, buf, vaddr))
         elif p_type == PT_SCE_RELA:
             relas.append(seg_bytes(i))
         elif p_type == PT_ARM_EXIDX:
@@ -193,6 +200,52 @@ def load(data: bytes, name: str = "module") -> Module:
     return mod
 
 
+def _reloc_patch(mod: "Module", code: int, p: int, s: int, a: int) -> None:
+    """Aplica uma relocação ARM (código `code`, símbolo s, adendo a) no endereço p do módulo."""
+    seg = mod.seg_of(p)
+    if seg is None:
+        raise ModuleError(f"relocation patches unmapped address {p:#x}")
+    off = p - seg.vaddr
+    cur = struct.unpack_from("<I", seg.data, off)[0]
+    v = (s + a) & 0xFFFFFFFF
+    if code in (0, 40, 255):
+        return
+    if code in (2, 38):
+        new = v
+    elif code == 8:
+        seg.data[off] = v & 0xFF
+        mod.relocs.append(Reloc(p, code, v))
+        return
+    elif code in (3, 41):
+        new = (v - p) & 0xFFFFFFFF
+    elif code == 42:
+        new = (v - p) & 0x7FFFFFFF
+    elif code in (28, 29):
+        new = (cur & 0xFF000000) | (((v - p) >> 2) & 0xFFFFFF)
+    elif code == 10:
+        d = (v - p) & 0xFFFFFFFF
+        hi, lo = cur & 0xFFFF, cur >> 16
+        sign = (d >> 24) & 1
+        hi = (hi & ~0x7FF) | ((d >> 12) & 0x3FF) | (sign << 10)
+        j1 = sign ^ ((~d >> 23) & 1)
+        j2 = sign ^ ((~d >> 22) & 1)
+        lo = (lo & ~0x2FFF) | ((d >> 1) & 0x7FF) | (j2 << 11) | (j1 << 13)
+        new = hi | (lo << 16)
+    elif code in (43, 44):
+        imm = v & 0xFFFF if code == 43 else v >> 16
+        new = (cur & ~0x000F0FFF) | (imm & 0xFFF) | ((imm >> 12) << 16)
+    elif code in (47, 48):
+        imm = v & 0xFFFF if code == 47 else v >> 16
+        hi, lo = cur & 0xFFFF, cur >> 16
+        hi = (hi & ~0x040F) | ((imm >> 12) & 0xF) | (((imm >> 11) & 1) << 10)
+        lo = (lo & ~0x70FF) | (imm & 0xFF) | (((imm >> 8) & 7) << 12)
+        new = hi | (lo << 16)
+    else:
+        return  # Vita3K ignores unknown codes too
+    struct.pack_into("<I", seg.data, off, new & 0xFFFFFFFF)
+    mod.relocs.append(Reloc(p, code, v))
+
+
 def _apply_relocs(mod: Module, blob: bytes, segs: dict[int, Segment]) -> None:
     def base(i: int) -> int:
         if i == 0xF:
@@ -202,54 +255,13 @@ def _apply_relocs(mod: Module, blob: bytes, segs: dict[int, Segment]) -> None:
         return segs[i].vaddr
 
     def patch(code: int, p: int, s: int, a: int) -> None:
-        seg = mod.seg_of(p)
-        if seg is None:
-            raise ModuleError(f"relocation patches unmapped address {p:#x}")
-        off = p - seg.vaddr
-        cur = struct.unpack_from("<I", seg.data, off)[0]
-        v = (s + a) & 0xFFFFFFFF
-        if code in (0, 40, 255):
-            return
-        if code in (2, 38):
-            new = v
-        elif code == 8:
-            seg.data[off] = v & 0xFF
-            mod.relocs.append(Reloc(p, code, v))
-            return
-        elif code in (3, 41):
-            new = (v - p) & 0xFFFFFFFF
-        elif code == 42:
-            new = (v - p) & 0x7FFFFFFF
-        elif code in (28, 29):
-            new = (cur & 0xFF000000) | (((v - p) >> 2) & 0xFFFFFF)
-        elif code == 10:
-            d = (v - p) & 0xFFFFFFFF
-            hi, lo = cur & 0xFFFF, cur >> 16
-            sign = (d >> 24) & 1
-            hi = (hi & ~0x7FF) | ((d >> 12) & 0x3FF) | (sign << 10)
-            j1 = sign ^ ((~d >> 23) & 1)
-            j2 = sign ^ ((~d >> 22) & 1)
-            lo = (lo & ~0x2FFF) | ((d >> 1) & 0x7FF) | (j2 << 11) | (j1 << 13)
-            new = hi | (lo << 16)
-        elif code in (43, 44):
-            imm = v & 0xFFFF if code == 43 else v >> 16
-            new = (cur & ~0x000F0FFF) | (imm & 0xFFF) | ((imm >> 12) << 16)
-        elif code in (47, 48):
-            imm = v & 0xFFFF if code == 47 else v >> 16
-            hi, lo = cur & 0xFFFF, cur >> 16
-            hi = (hi & ~0x040F) | ((imm >> 12) & 0xF) | (((imm >> 11) & 1) << 10)
-            lo = (lo & ~0x70FF) | (imm & 0xFF) | (((imm >> 8) & 7) << 12)
-            new = hi | (lo << 16)
-        else:
-            return  # Vita3K ignores unknown codes too
-        struct.pack_into("<I", seg.data, off, new & 0xFFFFFFFF)
-        mod.relocs.append(Reloc(p, code, v))
+        _reloc_patch(mod, code, p, s, a)
 
     def orig_target(p: int) -> tuple[int, int]:
-        val = mod.u32(p)
+        val = mod.u32(p)   # ainda é o valor do link: localiza o segmento pelo endereço de link
         for s in segs.values():
-            if s.vaddr <= val < s.vaddr + s.memsz:
-                return s.vaddr, val - s.vaddr
+            if s.link_vaddr <= val < s.link_vaddr + s.memsz:
+                return s.vaddr, val - s.link_vaddr
         raise ModuleError(f"format 6-9 relocation at {p:#x}: value {val:#x} not in any segment")
 
     g_addr = g_off = g_patchseg = g_s = g_a = g_t = g_t2 = 0
@@ -385,3 +397,33 @@ def _parse_module_info(mod: Module, info: int, seg: Segment) -> None:
         mod.module_start = by_addr.get(mod.module_start, mod.module_start)
     if mod.module_stop is not None:
         mod.module_stop = by_addr.get(mod.module_stop, mod.module_stop)
+
+
+def apply_var_imports(mod: Module, resolve) -> list[dict]:
+    """Aplica as relocações das importações de variável (VarImportsHeader + entradas formato 1/2
+    "Alt", como no Vita3K). `resolve(lib_nid, nid)` devolve o endereço da variável. No Vita elas
+    remendam pares MOVW/MOVT no código, então precisam estar resolvidas ANTES da tradução."""
+    by_index = {s.index: s for s in mod.segments}
+    out = []
+    for imp in mod.imports:
+        if imp.kind != "var":
+            continue
+        addr = resolve(imp.library_nid, imp.nid)
+        size = (mod.u32(imp.stub_addr) >> 4) & 0xFFFFFF
+        pos, end, n = imp.stub_addr + 4, imp.stub_addr + size, 0
+        while pos < end:
+            w = mod.u32(pos)
+            fmt, seg, code = w & 0xF, (w >> 4) & 0xF, (w >> 8) & 0xFF
+            if fmt == 1:
+                a, off = (w >> 16) & 0xFFFF, mod.u32(pos + 4)
+                pos += 8
+            elif fmt == 2:
+                off, a = mod.u32(pos + 4), mod.u32(pos + 8)
+                pos += 12
+            else:
+                raise ModuleError(f"var import {imp.nid:#x}: formato de relocação {fmt} inesperado")
+            if seg in by_index:
+                _reloc_patch(mod, code, by_index[seg].vaddr + off, addr, a)
+                n += 1
+        out.append(dict(lib_nid=imp.library_nid, nid=imp.nid, addr=addr, sites=n))
+    return out

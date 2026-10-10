@@ -28,6 +28,7 @@ class GuestImage:
     code_ptrs: set[int] = field(default_factory=set)        # addresses (bit0 = Thumb) seen as pointers
     imports: dict[int, tuple[str, int, int]] = field(default_factory=dict)  # stub addr -> (name, lib_nid, nid)
     kind: str = "linux"
+    module: object = None       # vitarecomp.module.Module quando kind == "vita"
 
     def seg_of(self, a: int) -> Seg | None:
         return next((s for s in self.segments if s.addr <= a < s.addr + s.memsz), None)
@@ -93,7 +94,7 @@ def from_linux_elf(data: bytes) -> GuestImage:
 def from_vita_module(mod) -> GuestImage:
     """Build a GuestImage from vitarecomp.module.Module (relocated at link-time base)."""
     segs = [Seg(s.vaddr, bytes(s.data[:s.filesz]), s.memsz, s.executable, bool(s.flags & 2)) for s in mod.segments]
-    img = GuestImage(segs, mod.module_start or 0, kind="vita")
+    img = GuestImage(segs, mod.module_start or 0, kind="vita", module=mod)
     for e in mod.exports:
         if e.kind == "func":
             img.symbols[e.addr] = e.name or f"export_{e.nid:08x}"

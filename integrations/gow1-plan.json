@@ -1,0 +1,9 @@
+{
+  "_comentario": "Plano de link do God of War 1 (Vita) para o runtime próprio. gow1 fica no endereço de link; as bibliotecas que vêm com o jogo ficam acima.",
+  "modules": [
+    {"name": "gow1",     "elf": "../gow-dump/elf/gow1.elf",     "base": "0x81000000"},
+    {"name": "libc",     "elf": "../gow-dump/elf/libc.elf",     "base": "0x82000000"},
+    {"name": "libfios2", "elf": "../gow-dump/elf/libfios2.elf", "base": "0x82100000"}
+  ],
+  "hle_var_base": "0x80F00000"
+}

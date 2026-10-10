@@ -23,7 +23,8 @@ const arc_func_entry *arc_get_table(unsigned *count) {
   return arc_func_table;
 }
 
-const char *arc_get_module_name(void) { return ARC_MODULE_NAME; }
+const char *arc_get_module_name(void) { return arc_module.name ? arc_module.name : ARC_MODULE_NAME; }
+const arc_module_info *arc_get_module(void) { return &arc_module; }
 
 const arc_segment *arc_get_segments(unsigned *count) {
   *count = arc_segment_count;

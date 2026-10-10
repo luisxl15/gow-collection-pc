@@ -32,4 +32,29 @@ typedef struct {
   const uint8_t *data;
 } arc_segment;
 
+/* Metadados do módulo do Vita traduzido: o runtime liga imports a exports de outros módulos
+ * (ou a implementações próprias por NID) sem precisar do ELF original. */
+typedef struct {
+  uint32_t stub;       /* func: endereço do stub chamado por BL; var: tabela de relocação da variável */
+  uint32_t lib_nid, nid;
+  uint32_t kind;       /* 0 func, 1 var, 2 tls */
+  const char *lib, *name;
+} arc_import_entry;
+typedef struct {
+  uint32_t lib_nid, nid, addr;
+  uint32_t kind;       /* 0 func, 1 var, 2 tls */
+  const char *lib, *name;
+} arc_export_entry;
+typedef struct {
+  const char *name;
+  uint32_t module_start, module_stop;   /* com bit Thumb; 0 se ausente */
+  uint32_t tls_addr, tls_filesz, tls_memsz;
+  uint32_t process_param;               /* sceProcessParam do executável principal; 0 se ausente */
+  uint32_t link_base, load_base;
+  const arc_import_entry *imports;
+  unsigned import_count;
+  const arc_export_entry *exports;
+  unsigned export_count;
+} arc_module_info;
+
 #endif
