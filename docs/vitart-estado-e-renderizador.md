@@ -125,6 +125,12 @@ Generalização medida (100 vértices por desenho):
 - os desenhos 3, 5, 9 e 13 vão de 0 para 33 na tela com −4;
 - o desenho 46 (outra família de shader) fica em 0 nos dois casos: é o próximo caso a investigar.
 
+Padrão observado nos dois programas: `ldst_base_value` = deslocamento de `g_Transforms` − 4 bytes:
+- 0x860f27b0: recurso 56 → 224 bytes, base 220;
+- 0x860b7460: recurso 32 → 128 bytes, base 124.
+
+A regra exata (por que −4 funciona no primeiro e nada no segundo) é o ponto de partida da próxima sessão.
+
 O próximo marco não é cobertura, é **fidelidade**:
 1. ligar a E/S de verdade (contêineres de SA, endereços de buffer, literais, varyings e as leituras de
    textura não dependentes nos PA);
