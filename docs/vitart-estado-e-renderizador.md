@@ -85,6 +85,15 @@ Fatos medidos no caminho:
 Falta, por programa (primeira instrução não coberta): `smp` 15 (texturas dependentes) e `br` 10. As instruções repetidas sem modelo são recusadas de propósito: traduzi-las daria SPIR-V válido e
 errado.
 
+**Primeiro teste de fidelidade** (`tools/usse_interp_draw.py dump900 3 150`):
+- o shader de skinning real roda inteiro no interpretador, com as entradas montadas pelas tabelas do GXP,
+  e **sem nenhum erro de instrução**;
+- mas o resultado ainda está errado: x (0..466) e w (≈1066) são plausíveis, y (≈1530) sai da tela;
+- os desenhos 3, 5 e 9 deram as mesmas amostras, o que indica saída lida no lugar errado (a posição pode não
+  estar em OUTPUT 0..3; ver as varyings do GXP) ou atributos ligados errado.
+
+Esse é o próximo bug a caçar.
+
 O próximo marco não é cobertura, é **fidelidade**:
 1. ligar a E/S de verdade (contêineres de SA, endereços de buffer, literais, varyings e as leituras de
    textura não dependentes nos PA);
