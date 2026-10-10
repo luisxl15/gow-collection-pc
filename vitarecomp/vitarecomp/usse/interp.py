@@ -24,7 +24,13 @@ class Machine:
         self.r = {b: np.zeros(n, np.float32) for b, n in
                   ((O.TEMP, 256), (O.PA, 256), (O.SA, 512), (O.OUT, 128), (O.FPI, 64), (O.GLOBAL, 256))}
 
-    def read(self, op, mask):
+    def _half(self, bank, w, h, val=None):
+        halves = self.r[bank][w:w + 1].view(np.float16)  # [baixa, alta]
+        if val is None:
+            return float(halves[h])
+        halves[h] = val
+
+    def read(self, op, mask, half=False):
         out = []
         for i in range(4):
             if not mask >> i & 1:
@@ -40,7 +46,10 @@ class Machine:
                 v = float(op.num)
             else:
                 base = 4 * op.num if op.bank == O.FPI else op.num
-                v = float(self.r[op.bank][base + ch])
+                if half and op.bank != O.FPI:
+                    v = self._half(op.bank, base + ch // 2, ch % 2)
+                else:
+                    v = float(self.r[op.bank][base + ch])
             if op.abs:
                 v = abs(v)
             if op.neg:
@@ -48,12 +57,15 @@ class Machine:
             out.append(v)
         return out
 
-    def write(self, d, mask, vals):
+    def write(self, d, mask, vals, half=False):
         base = 4 * d.num if d.bank == O.FPI else d.num
         k = 0
         for i in range(4):
             if mask >> i & 1:
-                self.r[d.bank][base + i] = vals[k % len(vals)]
+                if half and d.bank != O.FPI:
+                    self._half(d.bank, base + i // 2, i % 2, vals[k % len(vals)])
+                else:
+                    self.r[d.bank][base + i] = vals[k % len(vals)]
                 k += 1
 
     def step(self, ins, second=False):
@@ -63,18 +75,21 @@ class Machine:
         mn, d, m, srcs = low
         if d is None:
             return
-        if mn.endswith(".f16"):
-            raise NotImplementedError(mn)  # meias palavras empacotadas: ainda não modelado
+        half = mn.endswith(".f16")
+        mn = mn.split(".")[0]
+
+        def rd(op, mk):
+            return self.read(op, mk, half)
         if mn.startswith("vmad"):
-            a, b, c = (self.read(s, m) for s in srcs)
+            a, b, c = (rd(s, m) for s in srcs)
             res = [x * y + z for x, y, z in zip(a, b, c)]
         elif mn.startswith("vdp"):
             n = 3 if mn == "vdp3" else 4
             full = (1 << n) - 1
-            a, b = self.read(srcs[0], full), self.read(srcs[1], full)
+            a, b = rd(srcs[0], full), rd(srcs[1], full)
             res = [sum(x * y for x, y in zip(a, b))]
         elif mn in ("vrcp", "vrsq", "vlog", "vexp"):
-            x = self.read(srcs[0], 1)[0]
+            x = rd(srcs[0], 1)[0]
             res = [{"vrcp": lambda v: 1.0 / v if v else math.inf,
                     "vrsq": lambda v: 1.0 / math.sqrt(v) if v > 0 else math.inf,
                     "vlog": lambda v: math.log2(v) if v > 0 else -math.inf,  # base 2: a validar
@@ -82,13 +97,13 @@ class Machine:
         else:
             base = mn.split(".")[0]
             if base == "vdp":
-                a, b = self.read(srcs[0], 0xF), self.read(srcs[1], 0xF)
+                a, b = rd(srcs[0], 0xF), rd(srcs[1], 0xF)
                 res = [sum(x * y for x, y in zip(a, b))]
             else:
-                a, b = self.read(srcs[0], m), self.read(srcs[1], m)
+                a, b = rd(srcs[0], m), rd(srcs[1], m)
                 fn = {"vmul": lambda x, y: x * y, "vadd": lambda x, y: x + y, "vmin": min, "vmax": max,
                       "vfrc": lambda x, y: x - math.floor(x)}.get(base)
                 if fn is None:
                     raise NotImplementedError(mn)
                 res = [fn(x, y) for x, y in zip(a, b)]
-        self.write(d, m, res)
+        self.write(d, m, res, half)
