@@ -80,10 +80,13 @@ Fatos medidos no caminho:
 - A semântica ainda não foi comparada com execução real.
 
 Falta, por programa (primeira instrução não coberta):
-- `vldst` 1.172: leitura de memória (uniform buffers e ossos), que pede storage buffer com o endereço
-  vindo de SA;
-- `vpck` 1.164: repetição no modo SLMSI e `f32→u16`;
-- depois `vmov` inteiro condicional, `spec`, `vdual`, `br` e `smp` (texturas dependentes).
+- `vdual` 761;
+- `vmov` 701 (repetição e inteiro condicional);
+- `vpck` 328 (repetição no modo SLMSI);
+- `br` 10, `vdp` 8 (repetido), `smp` 3 (texturas dependentes).
+
+As instruções repetidas são recusadas de propósito: traduzi-las sem o modelo SLMSI daria SPIR-V válido e
+errado.
 
 ## Próximos passos (em ordem)
 
