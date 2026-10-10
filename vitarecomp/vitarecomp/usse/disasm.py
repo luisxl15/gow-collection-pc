@@ -89,6 +89,26 @@ def lower(ins, second=False):
         cmp = ["eq", "ne", "lt", "le"][f["test_bit_2"] << 1 | f["test_bit_1"]]
         # resultado = src1 se (src0 cmp 0) senão src2
         return ("vmovc_" + cmp + suffix, d, mask, [s0, s1, s2])
+    if ins.op == "vtst":
+        # Teste: compara (src1 - src2) ou alu(src1, src2) com zero, num canal; grava o predicado.
+        if f["alu_sel"] != 0 or f["chan_cc"] >= 4 or f["rpt_count"]:
+            return None
+        alu = {2: "add", 9: "min", 10: "max", 13: "mul", 14: "sub"}.get(f["alu_op"])
+        if alu is None:
+            return None
+        s1 = O.src12(f["src1_n"], f["src1_bank"], f["src1_ext"], True, 8, second)
+        s2 = O.src12(f["src2_n"], f["src2_bank"], f["src2_ext"], True, 8, second)
+        s1.neg = bool(f["src1_neg"])
+        if f["src2_vscomp"]:
+            s2.swizzle = (O.X, O.X, O.X, O.X)
+        eq = f["zero_test"] == 1
+        if f["sign_test"] == 3:
+            return None
+        cmp = [["ne", "lt", "gt"], ["eq", "le", "ge"]][eq][f["sign_test"]]
+        d = O.Operand(O.PRED, f["pdst_n"])
+        return ("vtst_%s_%s%s" % (alu, cmp, "" if f["prec"] else ".f16"), d, 1 << f["chan_cc"], [s1, s2])
+    if ins.op == "kill":
+        return ("kill", O.Operand(O.PRED, 0), 0, [])
     if ins.op in ("nop", "phas"):
         return (ins.op, None, 0, [])
     return None

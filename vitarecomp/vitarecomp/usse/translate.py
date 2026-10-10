@@ -32,6 +32,9 @@ class Translator:
         self.v2 = b.vec(self.f32, 2)
         S.RegisterFile.SIZES = {"pa": 256, "sa": 512, "temp": 256, "out": 128, "fpi": 64}
         self.regs = S.RegisterFile(b)
+        self.boolt = b._type("bool", 20)
+        self.preds = b.variable(b.array(self.f32, 4), S.SCPrivate, "pred")
+        self.cur_pred = None  # (id do bool) enquanto a instrução atual é predicada
 
     def const(self, v):
         return self.b.const(self.f32, float(v))
@@ -90,10 +93,15 @@ class Translator:
         k = 0
         for i in range(4):
             if mask >> i & 1:
+                val = vals[k % len(vals)]
+                if self.cur_pred is not None:
+                    old = self.read_half(BANK_VAR[d.bank], base, i) if half and d.bank != O.FPI else \
+                        self.regs.read(BANK_VAR[d.bank], base + i)
+                    val = self.b.emit(169, self.f32, self.cur_pred, val, old)  # OpSelect
                 if half and d.bank != O.FPI:
-                    self.write_half(BANK_VAR[d.bank], base + i // 2, i % 2, vals[k % len(vals)])
+                    self.write_half(BANK_VAR[d.bank], base + i // 2, i % 2, val)
                 else:
-                    self.regs.write(BANK_VAR[d.bank], base + i, vals[k % len(vals)])
+                    self.regs.write(BANK_VAR[d.bank], base + i, val)
                 k += 1
 
     def instr(self, ins, second):
@@ -103,12 +111,66 @@ class Translator:
         mn, d, m, srcs = low
         if d is None:
             return
+        try:
+            pr = O.predicate(ins)
+        except ValueError as e:
+            raise Unsupported(str(e))
+        self.cur_pred = None
+        if pr is not None:
+            pv = self.b.load(self.f32, self.b.chain(S.SCPrivate, self.f32, self.preds, self.b.const(self.i32, pr[0])))
+            self.cur_pred = self.b.emit(182 if not pr[1] else 180, self.boolt, pv, self.const(0))  # != 0 / == 0
+        try:
+            self._instr(mn, d, m, srcs)
+        finally:
+            self.cur_pred = None
+
+    def kill(self):
+        """Descarte do fragmento: desvio para um bloco com OpKill (sob o predicado, se houver)."""
+        b = self.b
+        if self.cur_pred is None:
+            cond = b.emit(180, self.boolt, self.const(0), self.const(0))  # sempre verdadeiro
+        else:
+            cond = self.cur_pred
+        kill_lbl, merge_lbl = b.id(), b.id()
+        b.body += b.inst(247, merge_lbl, 0)              # OpSelectionMerge
+        b.body += b.inst(250, cond, kill_lbl, merge_lbl)  # OpBranchConditional
+        b.body += b.inst(248, kill_lbl) + b.inst(252)     # OpLabel; OpKill
+        b.body += b.inst(248, merge_lbl)
+
+    def _instr(self, mn, d, m, srcs):
+        if mn == "kill":
+            if not self.p.fragment:
+                raise Unsupported("kill fora de fragment shader")
+            self.kill()
+            return
         half = mn.endswith(".f16")
         mn = mn.split(".")[0]
         b = self.b
 
         def rd(op, mk):
             return self.read(op, mk, half)
+        if mn.startswith("vtst_"):
+            _, alu, cmp = mn.split(".")[0].split("_")
+            c = m.bit_length() - 1
+            a, x = rd(srcs[0], 1 << c)[0], rd(srcs[1], 1 << c)[0]
+            if alu == "sub":
+                lhs, rhs = a, x
+            else:
+                rhs = self.const(0)
+                if alu == "add":
+                    lhs = b.emit(S.OpFAdd, self.f32, a, x)
+                elif alu == "mul":
+                    lhs = b.emit(S.OpFMul, self.f32, a, x)
+                else:
+                    lhs = self.ext(GLSL_FMIN if alu == "min" else GLSL_FMAX, a, x)
+            op = {"ne": 182, "eq": 180, "lt": 184, "le": 188, "gt": 186, "ge": 190}[cmp]
+            bit = b.emit(op, self.boolt, lhs, rhs)
+            val = b.emit(169, self.f32, bit, self.const(1), self.const(0))
+            if self.cur_pred is not None:
+                old = b.load(self.f32, b.chain(S.SCPrivate, self.f32, self.preds, b.const(self.i32, d.num)))
+                val = b.emit(169, self.f32, self.cur_pred, val, old)
+            b.store(b.chain(S.SCPrivate, self.f32, self.preds, b.const(self.i32, d.num)), val)
+            return
         if mn == "vmov":
             self.write(d, m, rd(srcs[0], m), half)
             return

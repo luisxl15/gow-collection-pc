@@ -23,6 +23,8 @@ class Machine:
     def __init__(self):
         self.r = {b: np.zeros(n, np.float32) for b, n in
                   ((O.TEMP, 256), (O.PA, 256), (O.SA, 512), (O.OUT, 128), (O.FPI, 64), (O.GLOBAL, 256))}
+        self.pred = [False] * 4
+        self.killed = False
 
     def _half(self, bank, w, h, val=None):
         halves = self.r[bank][w:w + 1].view(np.float16)  # [baixa, alta]
@@ -75,11 +77,29 @@ class Machine:
         mn, d, m, srcs = low
         if d is None:
             return
+        pr = O.predicate(ins)
+        if pr is not None and self.pred[pr[0]] == pr[1]:
+            return  # predicado falso: a instrução não executa
         half = mn.endswith(".f16")
         mn = mn.split(".")[0]
 
         def rd(op, mk):
             return self.read(op, mk, half)
+        if mn == "kill":
+            self.killed = True
+            return
+        if mn.startswith("vtst_"):
+            _, alu, cmp = mn.split("_")
+            c = m.bit_length() - 1
+            a, b = rd(srcs[0], 1 << c), rd(srcs[1], 1 << c)
+            if alu == "sub":
+                lhs, rhs = a[0], b[0]
+            else:
+                lhs = {"add": a[0] + b[0], "mul": a[0] * b[0], "min": min(a[0], b[0]), "max": max(a[0], b[0])}[alu]
+                rhs = 0.0
+            self.pred[d.num] = {"ne": lhs != rhs, "eq": lhs == rhs, "lt": lhs < rhs, "le": lhs <= rhs,
+                                "gt": lhs > rhs, "ge": lhs >= rhs}[cmp]
+            return
         if mn == "vmov":
             self.write(d, m, rd(srcs[0], m), half)
             return

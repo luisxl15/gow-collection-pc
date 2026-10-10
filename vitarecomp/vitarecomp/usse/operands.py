@@ -131,3 +131,28 @@ def write_mask(bank, mask, f16):
 VMAD2_SRC0 = [_sw(s) for s in "xxxx yyyy zzzz wwww xyzw yzxw xyww zwxy".split()]
 VMAD2_SRC1 = [_sw(s) for s in "xxxx yyyy zzzz wwww xyzw xyyz yyww wyzw".split()]
 VMAD2_SRC2 = [_sw(s) for s in "xxxx yyyy zzzz wwww xyzw xzww xxyz xyzz".split()]
+
+
+# Predicado de execução: (número do registrador P, negado) ou None. "PN" (por componente) e NEGP2
+# ainda não são suportados e levantam ValueError.
+_EXT = {0: None, 1: (0, False), 2: (1, False), 3: (2, False), 4: (3, False), 5: (0, True), 6: (1, True)}
+_EXT_VEC = {0: None, 1: (0, False), 2: (1, False), 3: (2, False), 4: (0, True), 5: (1, True)}
+_SHORT = {0: None, 1: (0, False), 2: (1, False), 3: (0, True)}
+
+
+def predicate(ins):
+    v = ins.f.get("pred", 0)
+    if ins.op == "vmad2":
+        table = {0: None, 1: (0, False), 2: (1, False), 3: (2, False)}
+    elif ins.op == "kill":
+        # o inverso do predicado curto: 1 = !P0, 2 = !P1, 3 = P0
+        table = {0: None, 1: (0, True), 2: (1, True), 3: (0, False)}
+    elif ins.op in ("v32nmad", "v16nmad", "vmad", "vdp"):
+        table = _EXT_VEC
+    elif ins.op in ("sop2", "sop2m", "sop3", "i8mad", "i16mad", "i32mad"):
+        table = _SHORT
+    else:
+        table = _EXT
+    if v not in table:
+        raise ValueError("predicado %d não suportado em %s" % (v, ins.op))
+    return table[v]
