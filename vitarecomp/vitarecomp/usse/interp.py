@@ -88,6 +88,11 @@ class Machine:
         if mn == "kill":
             self.killed = True
             return
+        if mn.startswith("vpck_"):
+            _, sf, df = mn.split("_")
+            vals = [self.read(op, 1, sf == "f16")[0] for op in srcs]
+            self.write(d, m, vals, df == "f16")
+            return
         if mn.startswith("vtst_"):
             _, alu, cmp = mn.split("_")
             c = m.bit_length() - 1

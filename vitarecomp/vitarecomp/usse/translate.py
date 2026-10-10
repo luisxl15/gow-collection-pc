@@ -138,6 +138,11 @@ class Translator:
         b.body += b.inst(248, merge_lbl)
 
     def _instr(self, mn, d, m, srcs):
+        if mn.startswith("vpck_"):
+            _, sf, df = mn.split("_")
+            vals = [self.read(op, 1, sf == "f16")[0] for op in srcs]
+            self.write(d, m, vals, df == "f16")
+            return
         if mn == "kill":
             if not self.p.fragment:
                 raise Unsupported("kill fora de fragment shader")

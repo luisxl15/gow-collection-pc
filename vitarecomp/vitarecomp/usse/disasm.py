@@ -107,6 +107,38 @@ def lower(ins, second=False):
         cmp = [["ne", "lt", "gt"], ["eq", "le", "ge"]][eq][f["sign_test"]]
         d = O.Operand(O.PRED, f["pdst_n"])
         return ("vtst_%s_%s%s" % (alu, cmp, "" if f["prec"] else ".f16"), d, 1 << f["chan_cc"], [s1, s2])
+    if ins.op == "vpck":
+        # Só formatos de ponto flutuante (f32/f16) por enquanto; cada componente vira uma fonte de
+        # canal único em srcs (a escolha entre src1/src2 já resolvida).
+        fmts = {5: "f16", 6: "f32"}
+        if f["src_fmt"] not in fmts or f["dest_fmt"] not in fmts or f["repeat_count"]:
+            return None
+        sf, df = fmts[f["src_fmt"]], fmts[f["dest_fmt"]]
+        d = O.dest(f["dest_n"], f["dest_bank_sel"], f["dest_bank_ext"], False, 7, second)
+        s1 = O.src12(f["src1_n"], f["src1_bank_sel"], f["src1_bank_ext"], True, 7, second)
+        s2 = O.src12(f["src2_n"], f["src2_bank_sel"], f["src2_bank_ext"], True, 7, second)
+        if sf == "f32":
+            c0 = f["comp_sel_0_bit0"] | (f["comp0_sel_bit1"] & 1) << 1
+        else:
+            c0 = f["comp_sel_0_bit0"] | (f["src2_n"] & 1) << 1
+        sw = (c0, f["comp_sel_1"], f["comp_sel_2"], f["comp_sel_3"])
+        mask = f["dest_mask"]
+        n = bin(mask).count("1")
+        use_src2 = False
+        if sf == "f32" and s2.bank != O.IMM:
+            same = s1.num == s2.num and s1.bank == s2.bank
+            contiguous = mask in (1, 3, 7, 15)
+            use_src2 = sw[:n] != (0, 1, 2, 3)[:n] or not same or not contiguous
+        picks = []
+        for i in range(4):
+            if mask >> i & 1:
+                ch = sw[i]
+                if use_src2:
+                    base, ch = (s1, ch) if ch < 2 else (s2, ch - 2)
+                else:
+                    base = s1
+                picks.append(O.Operand(base.bank, base.num, (ch, ch, ch, ch)))
+        return ("vpck_%s_%s" % (sf, df), d, mask, picks)
     if ins.op == "kill":
         return ("kill", O.Operand(O.PRED, 0), 0, [])
     if ins.op in ("nop", "phas"):
