@@ -43,6 +43,9 @@ struct Context {
     uint32_t vprog = 0, fprog = 0;
     uint32_t streams[16] = {};
     uint32_t textures[16] = {};
+    uint32_t vuniform = 0, funiform = 0; // último default uniform buffer reservado
+    uint32_t viewport_r[6] = {}, viewport_s[6] = {}; // argumentos crus (ABI de float ainda a confirmar)
+    uint32_t depth_func = 7, depth_write = 1, cull = 0, two_sided = 0;
     bool in_scene = false;
     Scene scene;
 };
@@ -94,6 +97,7 @@ static std::string g_dump_dir;
 static std::atomic<uint32_t> g_submitted{ 0 };
 static std::map<std::string, uint32_t> g_dump_textures; // descritor de 16 bytes -> desenhos
 static std::mutex g_dump_mutex;
+static FILE *g_draws_json = nullptr, *g_draws_bin = nullptr;
 
 static void dump_init() {
     if (const char *f = std::getenv("VITART_DUMP_FRAME")) g_dump_frame = (uint32_t)std::atoi(f);
@@ -118,9 +122,84 @@ static void dump_write(uint32_t fb) {
             f << line;
         }
     }
-    dump_regions(g_dump_dir, 0x83000000u, 0xB0000000u);
+    dump_regions(g_dump_dir, 0x81000000u, 0xB0000000u);
+    {
+        const std::lock_guard<std::mutex> lock(g_dump_mutex);
+        if (g_draws_json) { fclose(g_draws_json); fclose(g_draws_bin); g_draws_json = g_draws_bin = nullptr; }
+    }
     logf("vitart: captura do quadro %u em %s: %zu texturas, framebuffer 0x%08x", g_dump_frame, g_dump_dir.c_str(),
         g_dump_textures.size(), fb);
+}
+
+// Captura completa dos desenhos do quadro (draws.jsonl + draws.bin) para rasterizar fora.
+static uint64_t g_draws_bin_pos = 0;
+static uint32_t blob(const void *p, uint32_t n) {
+    const uint32_t off = (uint32_t)g_draws_bin_pos;
+    fwrite(p, 1, n, g_draws_bin);
+    g_draws_bin_pos += n;
+    return off;
+}
+static void dump_draw(Context &c, uint32_t prim, uint32_t itype, uint32_t idata, uint32_t icount) {
+    std::shared_ptr<VertexProgram> vp;
+    std::shared_ptr<FragmentProgram> fp;
+    {
+        const std::lock_guard<std::mutex> lock(g_gxm_mutex);
+        auto v = g_vprogs.find(c.vprog);
+        auto f = g_fprogs.find(c.fprog);
+        if (v != g_vprogs.end()) vp = v->second;
+        if (f != g_fprogs.end()) fp = f->second;
+    }
+    const std::lock_guard<std::mutex> lock(g_dump_mutex);
+    if (!g_draws_json) {
+        std::filesystem::create_directories(g_dump_dir);
+        g_draws_json = fopen((g_dump_dir + "/draws.jsonl").c_str(), "w");
+        g_draws_bin = fopen((g_dump_dir + "/draws.bin").c_str(), "wb");
+    }
+    if (!vp || !g_draws_json) return;
+    const uint32_t isz = (itype & 0x01000000u) ? 4 : 2;
+    uint32_t maxi = 0;
+    for (uint32_t i = 0; i < icount; i++) {
+        const uint32_t v = isz == 4 ? rd32(idata + 4 * i) : *ptr<uint16_t>(idata + 2 * i);
+        if (v > maxi) maxi = v;
+    }
+    const uint32_t ioff = blob(ptr<void>(idata), icount * isz);
+    fprintf(g_draws_json, "{\"prim\":%u,\"isz\":%u,\"icount\":%u,\"ioff\":%u,\"maxi\":%u,\"vp\":%u,\"fp\":%u",
+        prim >> 26, isz, icount, ioff, maxi, vp->program, fp ? fp->program : 0);
+    fprintf(g_draws_json, ",\"streams\":[");
+    for (uint32_t i = 0; i < vp->stream_count; i++) {
+        const uint16_t stride = *reinterpret_cast<const uint16_t *>(&vp->streams[4 * i]);
+        const uint16_t src = *reinterpret_cast<const uint16_t *>(&vp->streams[4 * i + 2]);
+        const uint32_t n = (std::min)((uint32_t)stride * (maxi + 1), 8u << 20);
+        const uint32_t off = c.streams[i] ? blob(ptr<void>(c.streams[i]), n) : 0;
+        fprintf(g_draws_json, "%s{\"stride\":%u,\"src\":%u,\"off\":%u,\"size\":%u,\"addr\":%u}", i ? "," : "", stride, src, off,
+            c.streams[i] ? n : 0, c.streams[i]);
+    }
+    fprintf(g_draws_json, "],\"attrs\":[");
+    for (uint32_t i = 0; i < vp->attr_count; i++) {
+        const uint8_t *a = &vp->attributes[8 * i];
+        fprintf(g_draws_json, "%s[%u,%u,%u,%u,%u]", i ? "," : "", a[0] | (a[1] << 8), a[2] | (a[3] << 8), a[4], a[5], a[6] | (a[7] << 8));
+    }
+    const uint32_t vsize = rd32(vp->program + 0x64) * 4, fsize = fp ? rd32(fp->program + 0x64) * 4 : 0;
+    const bool hv = c.vuniform && vsize, hf = c.funiform && fsize;
+    const uint32_t vu = hv ? blob(ptr<void>(c.vuniform), vsize) : 0;
+    const uint32_t fu = hf ? blob(ptr<void>(c.funiform), fsize) : 0;
+    fprintf(g_draws_json, "],\"vu\":[%u,%u],\"fu\":[%u,%u],\"tex\":[", vu, hv ? vsize : 0, fu, hf ? fsize : 0);
+    bool first = true;
+    for (int i = 0; i < 16; i++)
+        if (c.textures[i]) {
+            const uint32_t *w = ptr<uint32_t>(c.textures[i]);
+            fprintf(g_draws_json, "%s[%d,%u,%u,%u,%u]", first ? "" : ",", i, w[0], w[1], w[2], w[3]);
+            first = false;
+        }
+    fprintf(g_draws_json, "],\"vpr\":[%u,%u,%u,%u,%u,%u],\"vps\":[%u,%u,%u,%u,%u,%u]", c.viewport_r[0], c.viewport_r[1],
+        c.viewport_r[2], c.viewport_r[3], c.viewport_r[4], c.viewport_r[5], c.viewport_s[0], c.viewport_s[1], c.viewport_s[2],
+        c.viewport_s[3], c.viewport_s[4], c.viewport_s[5]);
+    const uint32_t blend = fp && fp->blend.size() == 4 ? *reinterpret_cast<const uint32_t *>(fp->blend.data()) : 0;
+    const uint32_t cs = c.scene.color_surface;
+    fprintf(g_draws_json, ",\"blend\":%u,\"hasblend\":%d,\"outfmt\":%u,\"depth\":[%u,%u],\"cull\":%u,\"cs\":[%u,%u,%u,%u,%u],\"ds\":%u}\n",
+        blend, fp && !fp->blend.empty() ? 1 : 0, fp ? fp->output_format : 0, c.depth_func, c.depth_write, c.cull,
+        cs ? rd32(cs) : 0, cs ? rd32(cs + 8) : 0, cs ? rd32(cs + 12) : 0, cs ? rd32(cs + 16) : 0, cs ? rd32(cs + 20) : 0,
+        c.scene.depth_surface ? rd32(c.scene.depth_surface + 8) : 0);
 }
 
 // =============================================================== inicialização
@@ -547,8 +626,10 @@ VT_HLE(sceGxmDraw) {
     auto c = context_of(arg(ctx, 0));
     if (!c) return ret(ctx, GXM_ERROR_INVALID_POINTER);
     g_draws++;
-    if (dumping())
+    if (dumping()) {
         for (uint32_t t : c->textures) dump_texture(t);
+        dump_draw(*c, arg(ctx, 1), arg(ctx, 2), arg(ctx, 3), arg(ctx, 4));
+    }
     if (c->in_scene && c->scene.draws.size() < 100000)
         c->scene.draws.push_back(DrawCall{ arg(ctx, 1), arg(ctx, 2), arg(ctx, 3), arg(ctx, 4), c->vprog, c->fprog });
     ret(ctx, SCE_OK);
@@ -568,13 +649,15 @@ static uint32_t reserve_uniforms(uint32_t &ring, uint32_t &size, uint32_t &pos, 
 VT_HLE(sceGxmReserveVertexDefaultUniformBuffer) {
     auto c = context_of(arg(ctx, 0));
     if (!c || !arg(ctx, 1)) return ret(ctx, GXM_ERROR_INVALID_POINTER);
-    wr32(arg(ctx, 1), reserve_uniforms(c->vertex_ring, c->vertex_ring_size, c->vertex_ring_pos, c->vprog));
+    c->vuniform = reserve_uniforms(c->vertex_ring, c->vertex_ring_size, c->vertex_ring_pos, c->vprog);
+    wr32(arg(ctx, 1), c->vuniform);
     ret(ctx, SCE_OK);
 }
 VT_HLE(sceGxmReserveFragmentDefaultUniformBuffer) {
     auto c = context_of(arg(ctx, 0));
     if (!c || !arg(ctx, 1)) return ret(ctx, GXM_ERROR_INVALID_POINTER);
-    wr32(arg(ctx, 1), reserve_uniforms(c->fragment_ring, c->fragment_ring_size, c->fragment_ring_pos, c->fprog));
+    c->funiform = reserve_uniforms(c->fragment_ring, c->fragment_ring_size, c->fragment_ring_pos, c->fprog);
+    wr32(arg(ctx, 1), c->funiform);
     ret(ctx, SCE_OK);
 }
 VT_HLE(sceGxmSetUniformDataF) {
@@ -612,17 +695,35 @@ VT_HLE(sceGxmPrecomputedDrawSetVertexStream) {
     ret(ctx, SCE_OK);
 }
 VT_HLE(sceGxmDrawPrecomputed) {
+    // (context, const SceGxmPrecomputedDraw *state): programa de vértice e streams vêm do estado.
     g_draws++;
+    const uint32_t st = arg(ctx, 1);
+    if (st && dumping())
+        if (auto c = context_of(arg(ctx, 0))) {
+            Context tmp = *c;
+            tmp.vprog = rd32(st);
+            const uint32_t mem = rd32(st + 4);
+            for (int i = 0; i < 8; i++) tmp.streams[i] = rd32(mem + 16 + 4 * i);
+            for (uint32_t t : tmp.textures) dump_texture(t);
+            dump_draw(tmp, rd32(mem), rd32(mem + 4), rd32(mem + 8), rd32(mem + 12));
+        }
     ret(ctx, SCE_OK);
 }
 
 // Estado fixo: só registrado quando o renderizador existir; por ora aceito.
-VT_HLE(sceGxmSetViewport) {}
-VT_HLE(sceGxmSetCullMode) {}
-VT_HLE(sceGxmSetTwoSidedEnable) {}
-VT_HLE(sceGxmSetFrontDepthFunc) {}
+VT_HLE(sceGxmSetViewport) {
+    // (context, xOffset, xScale, yOffset, yScale, zOffset, zScale): guarda r1..r3+pilha e s0..s5
+    if (auto c = context_of(arg(ctx, 0)))
+        for (int i = 0; i < 6; i++) {
+            c->viewport_r[i] = arg(ctx, 1 + i);
+            c->viewport_s[i] = (uint32_t)(ctx->d[i / 2] >> (32 * (i & 1)));
+        }
+}
+VT_HLE(sceGxmSetCullMode) { if (auto c = context_of(arg(ctx, 0))) c->cull = arg(ctx, 1); }
+VT_HLE(sceGxmSetTwoSidedEnable) { if (auto c = context_of(arg(ctx, 0))) c->two_sided = arg(ctx, 1); }
+VT_HLE(sceGxmSetFrontDepthFunc) { if (auto c = context_of(arg(ctx, 0))) c->depth_func = arg(ctx, 1); }
 VT_HLE(sceGxmSetBackDepthFunc) {}
-VT_HLE(sceGxmSetFrontDepthWriteEnable) {}
+VT_HLE(sceGxmSetFrontDepthWriteEnable) { if (auto c = context_of(arg(ctx, 0))) c->depth_write = arg(ctx, 1); }
 VT_HLE(sceGxmSetBackDepthWriteEnable) {}
 VT_HLE(sceGxmSetFrontStencilFunc) {}
 VT_HLE(sceGxmSetBackStencilFunc) {}
