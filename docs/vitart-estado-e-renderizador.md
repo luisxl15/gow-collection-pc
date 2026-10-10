@@ -38,6 +38,52 @@ Medidas que orientam o tradutor:
 - Cada programa tem duas fases: a **secundária** roda uma vez por desenho e prepara os registradores SA a
   partir dos uniforms; a **primária** roda por vértice ou pixel.
 
+## Tradutor USSE → SPIR-V: estado em 10/10/2026
+
+Código: `vitarecomp/usse/`.
+- `decode.py`: decodificador.
+- `operands.py`: bancos, swizzles, máscaras e predicados.
+- `disasm.py`: rebaixamento para operandos.
+- `interp.py`: interpretador de referência.
+- `translate.py`: emissor SPIR-V.
+- `spirv.py`: construtor binário próprio.
+
+Medição: `tools/usse_translate_all.py <captura>` traduz todos os programas e passa cada um no `spirv-val`
+(vulkan1.1).
+
+| etapa | programas traduzidos e válidos |
+|---|---|
+| F32 básico (vmad, vdp, v32nmad, vcomp) | 40 |
+| + registradores F16 empacotados | 376 |
+| + vmad2, vmov | 869 |
+| + predicados (vtst), kill | 2.299 |
+| + vpck f32/f16 | 2.306 |
+| + vbw | **2.437 de 4.922 (49,5%)**, 0 inválidos |
+
+Fatos medidos no caminho:
+- Os ossos do skinning são matrizes 4x4 em vetor-linha (16 palavras por `vldst`), misturadas como
+  A + w·(B − A).
+- A projeção se comporta como coluna: 82.637 de 170.719 vértices caem na tela, contra 12.078 na melhor
+  alternativa.
+- Com isso, `tools/gxm_softraster.py` desenha o primeiro quadro (céu, mar e logo do título). As cores ainda
+  são aproximadas.
+
+**O que "válido" ainda NÃO garante:**
+- A ligação de entradas e saídas é provisória:
+  - PA recebe os atributos pelo índice de recurso;
+  - SA recebe o buffer inteiro, e não pelos contêineres;
+  - a saída é OUTPUT 0..3;
+  - as leituras de textura não dependentes (que o hardware põe nos PA dos fragment shaders) não foram
+    modeladas.
+- `vlog`/`vexp` estão em base 2, o que ainda precisa ser validado.
+- A semântica ainda não foi comparada com execução real.
+
+Falta, por programa (primeira instrução não coberta):
+- `vldst` 1.172: leitura de memória (uniform buffers e ossos), que pede storage buffer com o endereço
+  vindo de SA;
+- `vpck` 1.164: repetição no modo SLMSI e `f32→u16`;
+- depois `vmov` inteiro condicional, `spec`, `vdual`, `br` e `smp` (texturas dependentes).
+
 ## Próximos passos (em ordem)
 
 1. **Interpretador USSE em Python** (`vitarecomp/usse/interp.py`), como referência semântica:
