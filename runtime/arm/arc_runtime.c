@@ -40,6 +40,12 @@ void arc_dispatch(arc_ctx *ctx, uint32_t target, uint32_t from) {
     if (k < target) lo = mid + 1;
     else hi = mid;
   }
+  arc_dispatch_miss(ctx, target, from);
+}
+
+/* Usado pelas plataformas de teste: código sem tradução é erro. */
+void arc_dispatch_miss_fatal(arc_ctx *ctx, uint32_t target, uint32_t from) {
+  (void)ctx;
   log_hex("arc: indirect branch to unknown code ", target, "");
   log_hex(" from ", from, "\n");
   arc_platform_exit(134);

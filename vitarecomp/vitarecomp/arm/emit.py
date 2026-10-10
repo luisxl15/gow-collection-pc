@@ -200,7 +200,9 @@ class FnEmitter:
         stub = self.prog.img.imports.get(target_key & ~1)
         if stub is not None:
             name, lib, nid = stub
-            return [f"SYNC_OUT arc_import(ctx, {nid:#010x}u, {i.addr:#010x}u); SYNC_IN /* {name} */"]
+            # O 3º argumento é o endereço do stub: o host decide se ele é HLE (svc+NID) ou foi religado
+            # pelo carregador a uma biblioteca LLE (então é um salto comum para código do guest).
+            return [f"SYNC_OUT arc_import(ctx, {nid:#010x}u, {target_key & ~1:#010x}u); SYNC_IN /* {name} */"]
         if f is None:
             return [f"SYNC_OUT arc_dispatch(ctx, {u32(target_key)}, {i.addr:#010x}u); {self.ret_check(i)} SYNC_IN"]
         return [f"SYNC_OUT {fname(f)}(ctx); {self.ret_check(i)} SYNC_IN"]
@@ -262,7 +264,11 @@ class FnEmitter:
         uf = i.uf
         R = lambda k: self.regnum(i, ops[k])  # noqa: E731
 
-        if n in ("it", "hint", "nop", "dmb", "dsb", "isb", "pld", "pli", "pldw", "clrex", "yield"):
+        if n in ("dmb", "dsb"):
+            return ["__atomic_thread_fence(__ATOMIC_SEQ_CST);"]
+        if n == "clrex":
+            return ["ctx->excl_valid = 0;"]
+        if n in ("it", "hint", "nop", "isb", "pld", "pli", "pldw", "yield"):
             return [f"/* {cs.mnemonic} */"]
         if n == "svc":
             return [f"SYNC_OUT arc_svc(ctx, {ops[0].imm & 0xFFFFFF:#x}u, {i.addr:#010x}u); SYNC_IN"]
@@ -310,12 +316,17 @@ class FnEmitter:
             return lines
 
         # ---- loads / stores ----
-        if n in ("ldr", "ldrb", "ldrh", "ldrsb", "ldrsh", "ldrex", "ldrexb", "ldrexh", "ldrt", "ldrbt"):
+        if n in ("ldrex", "ldrexb", "ldrexh"):
+            # Monitor exclusivo por thread: guarda endereço e valor lidos; o STREX faz CAS contra eles.
+            addr, _, _ = self.mem_addr(i, ops[1])
+            sz = {"ldrex": 4, "ldrexb": 1, "ldrexh": 2}[n]
+            return [f"{self.w(R(0))} = arc_ldrex(ctx, {addr}, {sz});"]
+        if n in ("ldr", "ldrb", "ldrh", "ldrsb", "ldrsh", "ldrt", "ldrbt"):
             rt = R(0)
             extra = ops[2] if len(ops) > 2 else None
             addr, wb, newbase = self.mem_addr(i, ops[1], extra)
-            load = {"ldr": "ARC_LW", "ldrex": "ARC_LW", "ldrt": "ARC_LW", "ldrb": "ARC_LBU",
-                    "ldrexb": "ARC_LBU", "ldrbt": "ARC_LBU", "ldrh": "ARC_LHU", "ldrexh": "ARC_LHU",
+            load = {"ldr": "ARC_LW", "ldrt": "ARC_LW", "ldrb": "ARC_LBU",
+                    "ldrbt": "ARC_LBU", "ldrh": "ARC_LHU",
                     "ldrsb": "ARC_LB", "ldrsh": "ARC_LH"}[n]
             t = self.new_tmp()
             lines = [f"{{ uint32_t {t} = {load}({addr});"]
@@ -338,17 +349,20 @@ class FnEmitter:
                 lines.append(f"{wb} = {newbase};")
             return lines
         if n in ("strex", "strexb", "strexh"):
-            store = {"strex": "ARC_SW", "strexb": "ARC_SB", "strexh": "ARC_SH"}[n]
+            sz = {"strex": 4, "strexb": 1, "strexh": 2}[n]
             addr, _, _ = self.mem_addr(i, ops[2])
-            return [f"{store}({addr}, {self.r(i, R(1))});", f"{self.w(R(0))} = 0u;"]
+            return [f"{self.w(R(0))} = arc_strex(ctx, {addr}, {self.r(i, R(1))}, {sz});"]
         if n in ("ldrd", "strd", "ldrexd", "strexd"):
             if n == "strexd":
                 addr, _, _ = self.mem_addr(i, ops[3])
-                return [f"{{ uint32_t a = {addr}; ARC_SW(a, {self.r(i, R(1))}); ARC_SW(a + 4u, {self.r(i, R(2))}); }}",
-                        f"{self.w(R(0))} = 0u;"]
+                return [f"{self.w(R(0))} = arc_strexd(ctx, {addr}, {self.r(i, R(1))}, {self.r(i, R(2))});"]
+            if n == "ldrexd":
+                addr, _, _ = self.mem_addr(i, ops[2])
+                return [f"{{ uint64_t v = arc_ldrexd(ctx, {addr}); {self.w(R(0))} = (uint32_t)v; "
+                        f"{self.w(R(1))} = (uint32_t)(v >> 32); }}"]
             extra = ops[3] if len(ops) > 3 else None
             addr, wb, newbase = self.mem_addr(i, ops[2], extra)
-            if n in ("ldrd", "ldrexd"):
+            if n == "ldrd":
                 lines = [f"{{ uint32_t a = {addr}; uint32_t v0 = ARC_LW(a), v1 = ARC_LW(a + 4u);"]
                 if wb:
                     lines.append(f"  {wb} = {newbase};")

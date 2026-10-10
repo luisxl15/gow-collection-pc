@@ -80,3 +80,6 @@ void arc_ret_mismatch(arc_ctx *ctx, uint32_t expected) {
   fprintf(stderr, "arc: return to %08x, expected %08x\n", ctx->r[15], expected);
   arc_platform_exit(134);
 }
+
+void arc_dispatch_miss_fatal(arc_ctx *ctx, uint32_t target, uint32_t from);
+void arc_dispatch_miss(arc_ctx *ctx, uint32_t target, uint32_t from) { arc_dispatch_miss_fatal(ctx, target, from); }

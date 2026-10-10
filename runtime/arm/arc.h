@@ -6,26 +6,7 @@
 #define ARC_H
 #include <stdint.h>
 
-typedef struct arc_ctx {
-  uint32_t r[16];
-  uint32_t n, z, c, v; /* APSR flags as 0/1 */
-  uint64_t d[32];      /* VFP/NEON D registers; S(2k) = low half of D(k), S(2k+1) = high half */
-  uint32_t fpscr;
-  uint32_t tpidruro;
-  uint32_t tpidrurw;   /* TLS de usuário gravável (mcr/mrc p15,0,rX,c13,c0,2) */
-  uint32_t apsr_rest; /* APSR bits other than NZCV (Q, GE); Q is not yet modelled */
-} arc_ctx;
-
-typedef void (*arc_func)(arc_ctx *);
-typedef struct {
-  uint32_t key; /* entry address | Thumb bit */
-  arc_func fn;
-  const char *name;
-} arc_func_entry;
-typedef struct {
-  uint32_t vaddr, filesz, memsz;
-  const uint8_t *data;
-} arc_segment;
+#include "arc_abi.h"
 
 extern uint8_t *arc_mem;
 extern const arc_func_entry arc_func_table[];
@@ -44,6 +25,35 @@ static inline uint32_t ARC_LB(uint32_t a) { return (uint32_t)(int32_t)(int8_t)*A
 static inline void ARC_SW(uint32_t a, uint32_t v) { __builtin_memcpy(ARC_P(a), &v, 4); }
 static inline void ARC_SH(uint32_t a, uint32_t v) { uint16_t h = (uint16_t)v; __builtin_memcpy(ARC_P(a), &h, 2); }
 static inline void ARC_SB(uint32_t a, uint32_t v) { *ARC_P(a) = (uint8_t)v; }
+
+/* ---- exclusivos: LDREX/STREX sobre CAS do host ---- */
+static inline uint32_t arc_ldrex(arc_ctx *c, uint32_t a, uint32_t sz) {
+  uint32_t v = sz == 4 ? __atomic_load_n((uint32_t *)ARC_P(a), __ATOMIC_ACQUIRE)
+             : sz == 2 ? __atomic_load_n((uint16_t *)ARC_P(a), __ATOMIC_ACQUIRE)
+                       : __atomic_load_n((uint8_t *)ARC_P(a), __ATOMIC_ACQUIRE);
+  c->excl_valid = 1; c->excl_addr = a; c->excl_size = sz; c->excl_val = v;
+  return v;
+}
+static inline uint32_t arc_strex(arc_ctx *c, uint32_t a, uint32_t v, uint32_t sz) {
+  if (!c->excl_valid || c->excl_addr != a || c->excl_size != sz) { c->excl_valid = 0; return 1u; }
+  c->excl_valid = 0;
+  int ok;
+  if (sz == 4) { uint32_t e = (uint32_t)c->excl_val; ok = __atomic_compare_exchange_n((uint32_t *)ARC_P(a), &e, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }
+  else if (sz == 2) { uint16_t e = (uint16_t)c->excl_val; ok = __atomic_compare_exchange_n((uint16_t *)ARC_P(a), &e, (uint16_t)v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }
+  else { uint8_t e = (uint8_t)c->excl_val; ok = __atomic_compare_exchange_n((uint8_t *)ARC_P(a), &e, (uint8_t)v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }
+  return ok ? 0u : 1u;
+}
+static inline uint64_t arc_ldrexd(arc_ctx *c, uint32_t a) {
+  uint64_t v = __atomic_load_n((uint64_t *)ARC_P(a), __ATOMIC_ACQUIRE);
+  c->excl_valid = 1; c->excl_addr = a; c->excl_size = 8; c->excl_val = v;
+  return v;
+}
+static inline uint32_t arc_strexd(arc_ctx *c, uint32_t a, uint32_t lo, uint32_t hi) {
+  if (!c->excl_valid || c->excl_addr != a || c->excl_size != 8) { c->excl_valid = 0; return 1u; }
+  c->excl_valid = 0;
+  uint64_t e = c->excl_val, v = (uint64_t)lo | ((uint64_t)hi << 32);
+  return __atomic_compare_exchange_n((uint64_t *)ARC_P(a), &e, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) ? 0u : 1u;
+}
 
 /* ---- integer helpers ---- */
 #define ARC_ROR(x, s) ((s) & 31 ? (((x) >> ((s) & 31)) | ((x) << (32 - ((s) & 31)))) : (x))
@@ -170,11 +180,13 @@ uint64_t arc_nshl(uint64_t x, int8_t sh, int n, int is_signed, int rounding, int
 
 /* ---- services ---- */
 void arc_dispatch(arc_ctx *ctx, uint32_t target, uint32_t from);
+/* Desvio indireto para código sem tradução: fatal nos testes; no Vita3K roda no JIT. */
+void arc_dispatch_miss(arc_ctx *ctx, uint32_t target, uint32_t from);
 /* Um chamado voltou para ctx->r[15] != `expected` (longjmp do guest, troca de contexto): o runtime
  * precisa desempilhar o C e continuar em r[15]. Cada plataforma decide como (fatal nos testes). */
 __attribute__((noreturn)) void arc_ret_mismatch(arc_ctx *ctx, uint32_t expected);
 void arc_svc(arc_ctx *ctx, uint32_t imm, uint32_t pc);
-void arc_import(arc_ctx *ctx, uint32_t nid, uint32_t pc);
+void arc_import(arc_ctx *ctx, uint32_t nid, uint32_t stub); /* stub: endereço do stub de import chamado */
 __attribute__((noreturn)) void arc_trap(arc_ctx *ctx, uint32_t pc);
 __attribute__((noreturn)) void arc_unimpl(arc_ctx *ctx, uint32_t pc);
 int arc_run(void);
