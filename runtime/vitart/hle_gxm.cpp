@@ -922,8 +922,20 @@ VT_HLE(sceGxmSetUniformDataF) {
     // (uniformBuffer, parameter, componentOffset, componentCount, const float *sourceData)
     const uint32_t buf = arg(ctx, 0), param = arg(ctx, 1), off = arg(ctx, 2), n = arg(ctx, 3), src = arg(ctx, 4);
     if (!buf || !param || !src) return ret(ctx, GXM_ERROR_INVALID_POINTER);
-    const uint32_t base = buf + 4 * (rd32(param + 12) + off);
-    std::memcpy(ptr<uint8_t>(base), ptr<uint8_t>(src), 4 * n);
+    const uint32_t comps = *ptr<uint8_t>(param + 5) & 15, type = *ptr<uint8_t>(param + 4) >> 4, array = rd32(param + 8);
+    if (type == 0 && array > 1 && comps > 1) {
+        // Array de vetores float: cada elemento ocupa comps*4 bytes alinhados a 8 (float3 -> 16), e o
+        // deslocamento conta componentes dentro desses elementos. Copiar contíguo punha o 2º vec3 de
+        // g_LightDir uma palavra antes e o shader lia sobra do anel (manchas no rosto do Kratos).
+        const uint32_t stride = (comps * 4 + 7) & ~7u;
+        for (uint32_t k = 0; k < n; k++) {
+            const uint32_t c = off + k;
+            wr32(buf + 4 * rd32(param + 12) + (c / comps) * stride + (c % comps) * 4, rd32(src + 4 * k));
+        }
+    } else {
+        const uint32_t base = buf + 4 * (rd32(param + 12) + off);
+        std::memcpy(ptr<uint8_t>(base), ptr<uint8_t>(src), 4 * n);
+    }
     if (std::getenv("VITART_TRACE_UNIFORMS")) {
         // Diagnóstico: quem envia cada uniform (uma linha por par chamador/nome).
         static std::mutex mu;

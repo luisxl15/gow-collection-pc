@@ -96,6 +96,15 @@ def main():
         tris = sr.Raster.triangles(dr["prim"], idx).reshape(-1).astype(np.uint32)
         tris = np.minimum(tris, nv - 1)
         vu = r.blob(*dr["vu"]) or b""
+        # Depuração: GXM_ZERO_VU="programa_hex:palavra,palavra" zera palavras dos uniforms de vértice.
+        zv = os.environ.get("GXM_ZERO_VU")
+        if zv and vu:
+            prog_s, words_s = zv.split(":")
+            if dr["vp"] == int(prog_s, 16):
+                arr = bytearray(vu)
+                for w in words_s.split(","):
+                    arr[4 * int(w):4 * int(w) + 4] = bytes(4)
+                vu = bytes(arr)
         fu = r.blob(*dr["fu"]) or b""
         fmt_, w, h, stride, addr = dr["cs"]
         dfunc = (dr["depth"][0] >> 22) & 7

@@ -215,3 +215,10 @@ enviado como dois vec3 (offsets 0 e 3), e nenhum parâmetro cobre as palavras 22
 preenchimento com sobras do anel. Hipótese a testar: alguma instrução do caminho de iluminação (o6/o8)
 lê o 4º componente onde o hardware usa só 3 (swizzle/máscara de vec3), e o brilho passa a depender de
 lixo. Teste: zerar essas palavras no pacote e ver se as manchas somem; depois achar a instrução.
+
+**Resolvido (11/10, 02:33):** a causa era o HLE de `sceGxmSetUniformDataF`. Em arrays de vetores float
+(array > 1, componentes > 1), cada elemento ocupa componentes × 4 bytes alinhados a 8 (float3 = 16
+bytes), e o deslocamento conta componentes dentro desses elementos. Copiar contíguo punha o 2º vec3 de
+`g_LightDir` uma palavra antes; o shader lia a palavra 30 (sobra do anel) como z da luz. Prova:
+zerar as palavras 22/23/30/31 no pacote (`GXM_ZERO_VU`) já removia as manchas; com a correção, o rosto
+sai liso ao vivo (`docs/ao-vivo-vulkan-titulo-corrigido.png`).
