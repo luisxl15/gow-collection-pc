@@ -17,6 +17,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -82,6 +85,7 @@ struct Voice {
     // Fonte: posição nos buffers do jogo e PCM decodificado (estéreo float) à espera de sair.
     int32_t cur_buffer = 0, byte_pos = 0, loops = 0;
     int32_t samples_since_key_on = 0, bytes_since_key_on = 0, samples_total = 0, bytes_total = 0;
+    int32_t ps2_file = -1, ps2_sf = -1; // último superquadro trocado pelo áudio do PS2
     int32_t src_ch = 2; // canais da fonte: as amostras geradas contam quadros entregues x canais (por grão)
     std::vector<float> pcm;
     size_t pcm_read = 0;
@@ -267,6 +271,157 @@ void push_frames(Voice &v, const int16_t *s, int frames, int ch) {
 }
 
 // Decodifica mais um pedaço para v.pcm. Devolve false quando os dados acabaram.
+
+// ------------------------------------------------- áudio do PS2 no lugar do ATRAC9 (docs/audio-ps2.md)
+// VITART_PS2_AUDIO=<iso do GoW1 de PS2>: cada superquadro ATRAC9 de stream é procurado pelo
+// crc32<<32|adler32 no índice <dados>/ps2audio.idx (tools/ps2_audio_index.py); achando, o trecho
+// correspondente do VPK/VAG do PS2 (lido da ISO, PS-ADPCM) sai no lugar do ATRAC9. Bytes consumidos e
+// amostras geradas não mudam, então o jogo não percebe a troca.
+namespace ps2a {
+struct File { uint32_t lba, size, vita_samples, sps, ch, rsv; };
+struct Key { uint64_t key; uint32_t file, sf; };
+struct Pcm { uint32_t rate = 0, ch = 0; size_t frames = 0; std::vector<int16_t> s; };
+static std::vector<File> g_files;
+static std::vector<Key> g_keys;
+static FILE *g_iso = nullptr;
+static std::map<uint32_t, std::shared_ptr<Pcm>> g_cache;
+static std::deque<uint32_t> g_lru;
+
+static bool on() {
+    static const bool ok = [] {
+        const char *iso = getenv("VITART_PS2_AUDIO");
+        if (!iso || !*iso) return false;
+        g_iso = fopen(iso, "rb");
+        FILE *f = fopen((data_path() + "/ps2audio.idx").c_str(), "rb");
+        uint32_t h[3] = {};
+        if (!g_iso || !f || fread(h, 4, 3, f) != 3 || h[0] != 0x32535047u) {
+            logf("vitart: áudio do PS2: ISO ou índice (ps2audio.idx) indisponível");
+            if (f) fclose(f);
+            return false;
+        }
+        g_files.resize(h[1]);
+        g_keys.resize(h[2]);
+        fread(g_files.data(), sizeof(File), g_files.size(), f);
+        fread(g_keys.data(), sizeof(Key), g_keys.size(), f);
+        fclose(f);
+        logf("vitart: áudio do PS2 ligado: %zu arquivos, %zu superquadros", g_files.size(), g_keys.size());
+        return true;
+    }();
+    return ok;
+}
+
+static uint32_t crc32(const uint8_t *p, size_t n) {
+    static uint32_t t[256];
+    static const bool init = [] {
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            t[i] = c;
+        }
+        return true;
+    }();
+    (void)init;
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; i++) c = t[(c ^ p[i]) & 255] ^ (c >> 8);
+    return c ^ 0xFFFFFFFFu;
+}
+static uint32_t adler32(const uint8_t *p, size_t n) {
+    uint32_t a = 1, b = 0;
+    for (size_t i = 0; i < n; i++) a = (a + p[i]) % 65521, b = (b + a) % 65521;
+    return b << 16 | a;
+}
+
+static void adpcm(const uint8_t *d, size_t n, std::vector<int16_t> &out) {
+    static const int F[5][2] = {{0, 0}, {60, 0}, {115, -52}, {98, -55}, {122, -60}};
+    int s1 = 0, s2 = 0;
+    for (size_t o = 0; o + 16 <= n; o += 16) {
+        const int shift = d[o] & 15, filt = ((d[o] >> 4) & 7) > 4 ? 0 : (d[o] >> 4) & 7;
+        for (int k = 0; k < 28; k++) {
+            int nib = (d[o + 2 + k / 2] >> (4 * (k & 1))) & 15;
+            if (nib >= 8) nib -= 16;
+            int v = (nib << 12) >> shift;
+            v += (s1 * F[filt][0] + s2 * F[filt][1] + 32) >> 6;
+            v = v < -32768 ? -32768 : v > 32767 ? 32767 : v;
+            out.push_back((int16_t)v);
+            s2 = s1, s1 = v;
+        }
+    }
+}
+
+static std::shared_ptr<Pcm> pcm_of(uint32_t fi) {
+    auto it = g_cache.find(fi);
+    if (it != g_cache.end()) return it->second;
+    const File &f = g_files[fi];
+    std::vector<uint8_t> d(f.size);
+    _fseeki64(g_iso, (long long)f.lba * 2048, SEEK_SET);
+    if (fread(d.data(), 1, d.size(), g_iso) != d.size() || d.size() < 0x30) return nullptr;
+    auto pcm = std::make_shared<Pcm>();
+    std::vector<std::vector<int16_t>> chans;
+    auto le = [&](size_t o) { return (uint32_t)d[o] | d[o + 1] << 8 | d[o + 2] << 16 | (uint32_t)d[o + 3] << 24; };
+    auto be = [&](size_t o) { return (uint32_t)d[o] << 24 | d[o + 1] << 16 | d[o + 2] << 8 | (uint32_t)d[o + 3]; };
+    if (!std::memcmp(d.data(), " KPV", 4)) {
+        const uint32_t size = le(4), start = le(8), inter = le(12), ch = le(20);
+        pcm->rate = le(16), pcm->ch = ch ? ch : 1;
+        const uint32_t il = inter / pcm->ch;
+        std::vector<std::vector<uint8_t>> raw(pcm->ch);
+        for (size_t o = start; il && o < start + (size_t)size * pcm->ch && o < d.size(); o += (size_t)il * pcm->ch)
+            for (uint32_t c = 0; c < pcm->ch; c++) {
+                const size_t a = o + (size_t)c * il, e = (std::min)(a + il, d.size());
+                if (a < e) raw[c].insert(raw[c].end(), d.begin() + a, d.begin() + e);
+            }
+        chans.resize(pcm->ch);
+        for (uint32_t c = 0; c < pcm->ch; c++) adpcm(raw[c].data(), raw[c].size(), chans[c]);
+    } else if (!std::memcmp(d.data(), "VAGp", 4)) {
+        pcm->rate = be(16), pcm->ch = 1;
+        chans.resize(1);
+        adpcm(d.data() + 0x30, (std::min)((size_t)be(12), d.size() - 0x30), chans[0]);
+    } else {
+        return nullptr;
+    }
+    pcm->frames = SIZE_MAX;
+    for (auto &c : chans) pcm->frames = (std::min)(pcm->frames, c.size());
+    pcm->s.resize(pcm->frames * pcm->ch);
+    for (size_t i = 0; i < pcm->frames; i++)
+        for (uint32_t c = 0; c < pcm->ch; c++) pcm->s[i * pcm->ch + c] = chans[c][i];
+    g_cache[fi] = pcm;
+    g_lru.push_back(fi);
+    while (g_lru.size() > 8) g_cache.erase(g_lru.front()), g_lru.pop_front();
+    return pcm;
+}
+
+// Troca o PCM de um superquadro (sf: amostras intercaladas com `ch` canais) pelo do PS2. Devolve false
+// se o superquadro não está no índice.
+static bool replace(Voice &v, const uint8_t *bytes, size_t n, std::vector<int16_t> &sf, int ch) {
+    const uint64_t key = (uint64_t)crc32(bytes, n) << 32 | adler32(bytes, n);
+    auto lo = std::lower_bound(g_keys.begin(), g_keys.end(), key, [](const Key &k, uint64_t x) { return k.key < x; });
+    if (lo == g_keys.end() || lo->key != key) return false;
+    const Key *pick = &*lo;
+    for (auto it = lo; it != g_keys.end() && it->key == key; ++it) // silêncio repetido: continuidade
+        if ((int32_t)it->file == v.ps2_file && (int32_t)it->sf == v.ps2_sf + 1) { pick = &*it; break; }
+    const File &f = g_files[pick->file];
+    auto pcm = pcm_of(pick->file);
+    if (!pcm || !pcm->frames || !f.vita_samples) return false;
+    if ((int32_t)pick->file != v.ps2_file)
+        logf("vitart: áudio do PS2: arquivo %u (setor %u, %u Hz, %u canais) a partir do superquadro %u",
+             pick->file, f.lba, pcm->rate, pcm->ch, pick->sf);
+    v.ps2_file = (int32_t)pick->file, v.ps2_sf = (int32_t)pick->sf;
+    const size_t frames = sf.size() / ch;
+    const double scale = (double)pcm->frames / f.vita_samples;
+    for (size_t j = 0; j < frames; j++) {
+        const double p = ((double)pick->sf * f.sps + j) * scale;
+        const size_t i0 = (std::min)((size_t)p, pcm->frames - 1), i1 = (std::min)(i0 + 1, pcm->frames - 1);
+        const float t = (float)(p - (double)(size_t)p);
+        float smp[2];
+        for (uint32_t c = 0; c < 2; c++) {
+            const uint32_t pc = (std::min)(c, pcm->ch - 1);
+            smp[c] = pcm->s[i0 * pcm->ch + pc] * (1.f - t) + pcm->s[i1 * pcm->ch + pc] * t;
+        }
+        if (ch == 1) sf[j] = (int16_t)(pcm->ch == 1 ? smp[0] : 0.5f * (smp[0] + smp[1]));
+        else for (int c = 0; c < ch; c++) sf[j * ch + c] = (int16_t)smp[c < 2 ? c : 1];
+    }
+    return true;
+}
+} // namespace ps2a
 bool decode_more(arc_ctx *ctx, std::unique_lock<std::mutex> &lock, Voice &v) {
     BufRef b = buf_param(v, v.cur_buffer);
     if (v.cur_buffer < 0 || !b.ptr || b.bytes <= 0) return false;
@@ -343,6 +498,7 @@ bool decode_more(arc_ctx *ctx, std::unique_lock<std::mutex> &lock, Voice &v) {
     }
     std::vector<int16_t> pcm((size_t)ci.frameSamples * ci.channels);
     std::vector<int16_t> sf;
+    const uint8_t *sf_bytes = in;
     for (int f = 0; f < ci.framesInSuperframe; f++) {
         int used = 0;
         if (Atrac9Decode(v.at9, in, pcm.data(), &used) != 0) {
@@ -352,6 +508,7 @@ bool decode_more(arc_ctx *ctx, std::unique_lock<std::mutex> &lock, Voice &v) {
         in += used;
         sf.insert(sf.end(), pcm.begin(), pcm.end());
     }
+    if (ps2a::on() && !ps2a::replace(v, sf_bytes, (size_t)ci.superframeSize, sf, ci.channels)) v.ps2_file = -1;
     v.staging.clear();
     int start = 0, count = (int)(sf.size() / ci.channels);
     if (sf_index != 0x7FFFFFF) {
