@@ -5,6 +5,8 @@ nop/phas). A ligação de entradas e saídas ainda é provisória: PA recebe os 
 recurso; SA recebe o storage buffer inteiro (set 0, binding 0); gl_Position ou a cor vêm de OUTPUT 0..3.
 O mapeamento fiel vem dos contêineres e das varyings do GXP (próximo passo).
 """
+import os
+
 from . import operands as O
 from . import spirv as S
 from .disasm import lower
@@ -535,7 +537,16 @@ class Translator:
         ub = b.variable(ub_t, S.SCStorageBuffer, "uniforms")
         b.decorate(ub, S.DecDescriptorSet, 2 if p.fragment else 0)
         b.decorate(ub, S.DecBinding, 0)
-        b.decorate(ub, S.DecNonWritable)
+        # Depuração (USSE_DEBUG_VSOUT=1): o vértice grava OUTPUT 0..3 no próprio buffer de uniforms, logo
+        # depois do default uniform buffer, em [palavras + 4 * gl_VertexIndex], para comparar com o interp.
+        debug_out = bool(os.environ.get("USSE_DEBUG_VSOUT")) and not p.fragment
+        if not debug_out:
+            b.decorate(ub, S.DecNonWritable)
+        vid = None
+        if debug_out:
+            vid = b.variable(self.i32, S.SCInput, "gl_VertexIndex")
+            b.decorate(vid, S.DecBuiltIn, 42)
+            ifaces.append(vid)
         outs = []  # (variável, registrador OUTPUT inicial, componentes)
         if p.fragment:
             outv = b.variable(self.v4, S.SCOutput, "color")
@@ -591,6 +602,13 @@ class Translator:
         else:
             res = b.emit(S.OpCompositeConstruct, self.v4, *[self.regs.read("out", c) for c in range(4)])
             b.store(b.chain(S.SCOutput, self.v4, outv, b.const(self.i32, 0)), res)
+            if vid is not None:
+                v = b.load(self.i32, vid)
+                base = b.emit(S.OpIAdd, self.i32, b.emit(S.OpIMul, self.i32, v, b.const(self.i32, 4)),
+                              b.const(self.i32, p.default_uniform_words))
+                for c in range(4):
+                    i = b.emit(S.OpIAdd, self.i32, base, b.const(self.i32, c))
+                    b.store(b.chain(S.SCStorageBuffer, self.f32, ub, b.const(self.i32, 0), i), self.regs.read("out", c))
             for v, reg, n in outs:
                 vals = [self.regs.read("out", reg + c) for c in range(n)] + [self.const(0)] * (4 - n)
                 b.store(v, b.emit(S.OpCompositeConstruct, self.v4, *vals))

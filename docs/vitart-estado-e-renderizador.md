@@ -199,7 +199,11 @@ buracos grandes, e as passadas seguintes preenchem os buracos em manchas. Descar
   só) e LESS coplanar;
 - blend (continuam com `VITART_VK_NOBLEND`); o fragmento não tem `kill`;
 - osso fora do buffer (índice máximo 11 -> 992 de 1.248 bytes).
-O interpretador dá vértices sãos para os mesmos dados (nenhum w <= 0, z dentro de [0, w], sem NaN).
-Conclusão: faltam triângulos porque o SPIR-V do skinning diverge do interpretador em parte dos
-vértices. Próximo passo: comparar vértice a vértice a saída do vertex shader na GPU (gravar OUTPUT
-num storage buffer indexado por gl_VertexIndex) com o `interp.py`.
+Conclusão anterior CORRIGIDA por medição: com `USSE_DEBUG_VSOUT=1` (o vértice traduzido grava OUTPUT
+0..3 após os uniforms) e `gxm_replay --debug-vs 69`, a saída da GPU bate com o `interp.py` em 600 de
+600 vértices usados pelo desenho. Os "buracos" do desenho 69 isolado são normais: o rosto é dividido em
+vários desenhos (67, 69, 71, 73...) que se completam, e os vértices 0..3688 do buffer pertencem a outros
+desenhos. As manchas vêm de iluminação diferente entre partes (cor por vértice em texcoord1, calculada
+no shader). Se houver erro, está na semântica de alguma instrução desse caminho (interp e SPIR-V
+compartilham o rebaixamento), ou em uniforms de luz por desenho. Próximo passo: rodar só a parte de
+iluminação (o6/o8) no interp para duas partes vizinhas e conferir cada instrução (vdual, vpck, f16).

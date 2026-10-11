@@ -202,7 +202,8 @@ constexpr VkDeviceSize kRingSize = 256ull << 20;
 VkDescriptorPool g_dpool = VK_NULL_HANDLE;
 uint32_t g_draws_in_frame = 0;
 constexpr uint32_t kMaxDrawsPerFrame = 2048;
-std::vector<Image> g_transient; // cópias de alvos lidas como textura: vivem até o fim do quadro
+std::vector<Image> g_transient;
+std::vector<float> g_debug_vs; // cópias de alvos lidas como textura: vivem até o fim do quadro
 
 void end_pass() {
     if (g_open) {
@@ -650,6 +651,9 @@ bool init(bool validation, bool window) {
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
+    VkPhysicalDeviceFeatures feats{};
+    feats.vertexPipelineStoresAndAtomics = VK_TRUE; // só usado pelo modo de depuração do vértice
+    dci.pEnabledFeatures = &feats;
     const char *dext = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     if (window) {
         dci.enabledExtensionCount = 1;
@@ -844,8 +848,10 @@ bool draw(const Draw &d) {
         voff[k] = ring_put(d.attrs + (size_t)k * d.vertex_count * 4, (VkDeviceSize)d.vertex_count * 16, 16);
     const VkDeviceSize ioff = ring_put(d.indices, (VkDeviceSize)d.index_count * 4, 4);
     const VkDeviceSize vuoff = ring_put(d.vert_uniforms, d.vert_uniforms_size, g_ssbo_align);
+    const VkDeviceSize dbgoff = d.debug_vs ? ring_put(nullptr, (VkDeviceSize)d.vertex_count * 16, 4) : 0;
     const VkDeviceSize fuoff = ring_put(d.frag_uniforms, d.frag_uniforms_size, g_ssbo_align);
-    const VkDeviceSize vurange = d.vert_uniforms_size ? d.vert_uniforms_size : 16;
+    const VkDeviceSize vurange = d.debug_vs ? (dbgoff + (VkDeviceSize)d.vertex_count * 16 - vuoff)
+                                            : (d.vert_uniforms_size ? d.vert_uniforms_size : 16);
     const VkDeviceSize furange = d.frag_uniforms_size ? d.frag_uniforms_size : 16;
     g_draws_in_frame++;
 
@@ -897,8 +903,15 @@ bool draw(const Draw &d) {
     if (na) vkCmdBindVertexBuffers(g_cmd, 0, na, bufs, voff);
     vkCmdBindIndexBuffer(g_cmd, g_ring.buf, ioff, VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexed(g_cmd, d.index_count, 1, 0, 0, 0);
+    if (d.debug_vs) {
+        if (!frame_flush(true)) return false;
+        g_debug_vs.assign(reinterpret_cast<const float *>(g_ring_ptr + dbgoff),
+                          reinterpret_cast<const float *>(g_ring_ptr + dbgoff) + (size_t)d.vertex_count * 4);
+    }
     return true;
 }
+
+const std::vector<float> &debug_vs_output() { return g_debug_vs; }
 
 void end_frame() {
     std::lock_guard<std::recursive_mutex> lock(g_lock);

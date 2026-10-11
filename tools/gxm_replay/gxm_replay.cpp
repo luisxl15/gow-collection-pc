@@ -43,11 +43,12 @@ int main(int argc, char **argv) {
         return 2;
     }
     bool validation = false;
-    int limit = 1 << 30, passes = 2;
+    int limit = 1 << 30, passes = 2, debug_draw = -1;
     for (int i = 3; i < argc; i++) {
         if (!std::strcmp(argv[i], "--validation")) validation = true;
         if (!std::strcmp(argv[i], "--limit") && i + 1 < argc) limit = std::atoi(argv[++i]);
         if (!std::strcmp(argv[i], "--passes") && i + 1 < argc) passes = std::atoi(argv[++i]);
+        if (!std::strcmp(argv[i], "--debug-vs") && i + 1 < argc) debug_draw = std::atoi(argv[++i]);
     }
     std::ifstream f(argv[1], std::ios::binary);
     std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -104,7 +105,18 @@ int main(int argc, char **argv) {
             skipped++;
             continue;
         }
-        if (gvk::draw(d))
+        d.debug_vs = (int)i == debug_draw;
+        const bool ok_draw = gvk::draw(d);
+        if (d.debug_vs) {
+            const auto &o = gvk::debug_vs_output();
+            char path[512];
+            std::snprintf(path, sizeof path, "%s/vsout_%u.bin", argv[2], i);
+            if (FILE *f = std::fopen(path, "wb")) {
+                std::fwrite(o.data(), 4, o.size(), f);
+                std::fclose(f);
+            }
+        }
+        if (ok_draw)
             drawn++;
         else {
             failed++;

@@ -40,6 +40,8 @@ struct Draw {
     const uint32_t *vs = nullptr; uint32_t vs_size = 0; // bytes
     const uint32_t *fs = nullptr; uint32_t fs_size = 0;
     std::vector<Texture> textures;
+    bool debug_vs = false; // o vertex shader (de depuração) grava OUTPUT 0..3 após os uniforms
+
 };
 
 // window: cria também a janela e o swapchain (apresentação ao vivo).
@@ -61,5 +63,7 @@ void end_frame();
 bool read_target(uint32_t addr, std::vector<uint8_t> &rgba, uint32_t &w, uint32_t &h);
 std::vector<uint32_t> targets();
 const char *last_error();
+// Saída OUTPUT 0..3 por vértice do último desenho com debug_vs (vec4 por vértice).
+const std::vector<float> &debug_vs_output();
 
 } // namespace gvk
