@@ -850,6 +850,16 @@ static bool create_window() {
 
 bool window_closed() { return g_closed; }
 
+bool pointer(float &nx, float &ny) {
+    if (!g_hwnd || GetForegroundWindow() != g_hwnd || !(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) return false;
+    POINT p;
+    RECT r;
+    if (!GetCursorPos(&p) || !ScreenToClient(g_hwnd, &p) || !GetClientRect(g_hwnd, &r)) return false;
+    if (p.x < 0 || p.y < 0 || p.x >= r.right || p.y >= r.bottom || r.right <= 0 || r.bottom <= 0) return false;
+    nx = (p.x + 0.5f) / (float)r.right, ny = (p.y + 0.5f) / (float)r.bottom;
+    return true;
+}
+
 bool is_target(uint32_t addr) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     return g_targets.count(addr) != 0;

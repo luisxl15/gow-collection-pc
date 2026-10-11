@@ -67,6 +67,9 @@ struct Thread {
     bool can_exit = false;
 };
 Thread *current();
+// sceAppMgrLoadExec: relança o vitart com outra DLL no lugar do módulo principal (o Vita troca o
+// processo inteiro do mesmo jeito). Não volta.
+[[noreturn]] void exec_main_module(const std::string &dll);
 Thread *create_thread(const char *name, uint32_t entry, int priority, uint32_t stack_size);
 Thread *find_thread(int id);
 int start_thread(Thread *t, uint32_t arglen, uint32_t argp);

@@ -84,6 +84,8 @@ bool init(bool validation, bool window = false);
 // Mostra o alvo de cor no endereço dado na janela (escala para o tamanho da janela).
 bool present(uint32_t addr);
 bool window_closed();
+// Mouse sobre a janela como toque: posição normalizada (0..1) na área cliente e botão esquerdo apertado.
+bool pointer(float &nx, float &ny);
 bool is_target(uint32_t addr);
 bool is_depth(uint32_t addr);
 // Início de cena do GXM: a profundidade do alvo volta ao valor de fundo (1,0), a não ser que a

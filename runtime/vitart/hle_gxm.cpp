@@ -563,6 +563,10 @@ void gxm_present(uint32_t fb) {
         }
     }
     g_present_frame++;
+    if (!gvk::is_target(fb)) {
+        static int warned = 0;
+        if (warned++ < 3) logf("vitart: apresentar 0x%08x: não é alvo de nenhuma cena", fb);
+    }
     const uint64_t tp = now_ns();
     gvk::present(fb);
     g_t_present += now_ns() - tp;
@@ -972,6 +976,26 @@ VT_HLE(sceGxmTextureSetVAddrMode) {
     tex::set(tex::w(arg(ctx, 0), 0), 3, 3, arg(ctx, 1));
     ret(ctx, SCE_OK);
 }
+VT_HLE(sceGxmTextureSetMipFilter) {
+    if (tex::type(arg(ctx, 0)) != 0xC0000000u) tex::set(tex::w(arg(ctx, 0), 0), 9, 1, arg(ctx, 1) ? 1 : 0);
+    ret(ctx, SCE_OK);
+}
+VT_HLE(sceGxmTextureSetMipmapCount) {
+    // mip_count guarda níveis - 1 (até 13 níveis).
+    const uint32_t n = arg(ctx, 1);
+    if (n > 13) return ret(ctx, GXM_ERROR_INVALID_VALUE);
+    if (tex::type(arg(ctx, 0)) != 0xC0000000u) tex::set(tex::w(arg(ctx, 0), 0), 17, 4, n ? n - 1 : 0);
+    ret(ctx, SCE_OK);
+}
+VT_HLE(sceGxmTextureSetLodMin) {
+    // lod_min: 2 bits baixos na palavra 2 (bits 0..1), 2 altos na palavra 3 (bits 26..27).
+    const uint32_t v = arg(ctx, 1);
+    if (tex::type(arg(ctx, 0)) != 0xC0000000u) {
+        tex::set(tex::w(arg(ctx, 0), 2), 0, 2, v & 3);
+        tex::set(tex::w(arg(ctx, 0), 3), 26, 2, v >> 2);
+    }
+    ret(ctx, SCE_OK);
+}
 VT_HLE(sceGxmTextureSetLodBias) {
     if (tex::type(arg(ctx, 0)) != 0xC0000000u) tex::set(tex::w(arg(ctx, 0), 0), 21, 6, arg(ctx, 1));
     ret(ctx, SCE_OK);
@@ -1191,5 +1215,29 @@ VT_HLE(sceGxmSetFrontStencilRef) { if (auto c = context_of(arg(ctx, 0))) c->sten
 VT_HLE(sceGxmSetBackStencilRef) { if (auto c = context_of(arg(ctx, 0))) c->stencil_back.ref = (uint8_t)arg(ctx, 1); }
 VT_HLE(sceGxmSetFrontPolygonMode) {}
 VT_HLE(sceGxmSetUserMarker) { ret(ctx, SCE_OK); }
+VT_HLE(sceGxmPushUserMarker) { ret(ctx, SCE_OK); }
+VT_HLE(sceGxmPopUserMarker) { ret(ctx, SCE_OK); }
+VT_HLE(sceGxmPadHeartbeat) { ret(ctx, SCE_OK); }
+VT_HLE(sceGxmSetRegionClip) {}
+VT_HLE(sceGxmSetFrontPointLineWidth) {}
+VT_HLE(sceGxmFinish) { ret(ctx, SCE_OK); }
+VT_HLE(sceGxmGetNotificationRegion) {
+    // Região de notificações (palavras que a GPU escreve ao terminar): memória do guest zerada.
+    static const uint32_t region = new_object(0x1000, "gxm:notification-region");
+    ret(ctx, region);
+}
+VT_HLE(sceGxmProgramParameterGetIndex) {
+    const uint32_t prog = arg(ctx, 0), param = arg(ctx, 1);
+    ret(ctx, prog && param ? (param - gxp_param(prog, 0)) / 16 : 0);
+}
+// Transferências 2D: o resultado não é desenhado (os alvos vivem na GPU); a notificação é escrita para
+// o jogo não esperar para sempre. Registro do uso para saber se fazem falta.
+static void transfer_notify(uint32_t note, const char *what) {
+    static std::atomic<int> n{0};
+    if (n++ < 4) logf("vitart: %s (sem efeito; notificação 0x%08x)", what, note);
+    if (note && rd32(note)) wr32(rd32(note), rd32(note + 4)); // SceGxmNotification {address, value}
+}
+VT_HLE(sceGxmTransferCopy) { transfer_notify(arg(ctx, 19), "sceGxmTransferCopy"); ret(ctx, SCE_OK); }
+VT_HLE(sceGxmTransferDownscale) { transfer_notify(arg(ctx, 14), "sceGxmTransferDownscale"); ret(ctx, SCE_OK); }
 
 } // namespace vt

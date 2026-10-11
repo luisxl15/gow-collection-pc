@@ -751,7 +751,29 @@ static void usage() {
     exit(2);
 }
 
+static std::vector<std::string> g_argv;  // linha de comando original
+static std::string g_main_dll;            // DLL do módulo principal (a primeira da lista)
+
+[[noreturn]] void vt::exec_main_module(const std::string &dll) {
+    std::string cmd;
+    for (size_t i = 0; i < g_argv.size(); i++) {
+        const std::string &a = (g_argv[i] == g_main_dll) ? dll : g_argv[i];
+        if (i) cmd += ' ';
+        cmd += '"' + a + '"';
+    }
+    logf("vitart: LoadExec -> %s", cmd.c_str());
+    if (g_logfile) fflush(g_logfile);
+    STARTUPINFOA si{sizeof si};
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi))
+        fatal("LoadExec: CreateProcess falhou (%lu)", GetLastError());
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    ExitProcess(0);
+}
+
 int main(int argc, char **argv) {
+    g_argv.assign(argv, argv + argc);
     std::vector<std::string> dlls;
     std::string hle_vars;
     for (int i = 1; i < argc; i++) {
@@ -765,6 +787,7 @@ int main(int argc, char **argv) {
     }
     if (dlls.empty() || g_app.empty())
         usage();
+    g_main_dll = dlls[0];
     if (g_data.empty())
         g_data = g_app + "/../vitart-data";
     if (const char *tr = getenv("VITART_TRACE")) {

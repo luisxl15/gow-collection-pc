@@ -434,6 +434,21 @@ VT_HLE(sceKernelFindMemBlockByAddr) {
         if (a - mb.base < mb.size) return ret(ctx, uid);
     ret(ctx, 0x80020024u); // SCE_KERNEL_ERROR_BLOCK_NOT_FOUND? (nenhum)
 }
+VT_HLE(sceKernelGetMemBlockInfoByAddr) {
+    // (base, SceKernelMemBlockInfo *): {size=0x18, mappedBase, mappedSize, memoryType, access, type}
+    const uint32_t a = arg(ctx, 0), info = arg(ctx, 1);
+    if (!info) return ret(ctx, 0x80020005u);
+    const std::lock_guard<std::mutex> lock(g_mb_mutex);
+    for (auto &[uid, mb] : g_memblocks)
+        if (a - mb.base < mb.size) {
+            wr32(info, 0x18), wr32(info + 4, mb.base), wr32(info + 8, mb.size);
+            wr32(info + 12, (mb.type & 0x00F00000u) == 0x00400000u ? 0x40 : 0x20); // CDRAM : RAM do usuário
+            wr32(info + 16, 6); // leitura e escrita
+            wr32(info + 20, mb.type);
+            return ret(ctx, SCE_OK);
+        }
+    ret(ctx, 0x80020024u);
+}
 VT_HLE(sceKernelIsPSVitaTV) { ret(ctx, 0); }
 
 // ====================================================================== tempo
@@ -503,6 +518,22 @@ VT_HLE(sceSysmoduleLoadModule) {
 }
 VT_HLE(sceSysmoduleIsLoaded) { ret(ctx, SCE_OK); }
 VT_HLE(sceAppMgrIsGameProgram) { ret(ctx, SCE_OK); }
+VT_HLE(sceAppMgrLoadExec) {
+    // (appPath, argv, optParam): "app0:gow1.self" -> gow1.dll; "app0:eboot.bin" -> eboot.dll.
+    std::string path = gstr(arg(ctx, 0));
+    logf("vitart: sceAppMgrLoadExec(%s)", path.c_str());
+    const size_t s = path.find_last_of(":/\\");
+    std::string base = s == std::string::npos ? path : path.substr(s + 1);
+    base = base.substr(0, base.find('.'));
+    const std::string dll = base + ".dll";
+    if (FILE *f = fopen(dll.c_str(), "rb")) {
+        fclose(f);
+        exec_main_module(dll);
+    }
+    logf("vitart: LoadExec: %s não existe", dll.c_str());
+    ret(ctx, 0x80802013u); // SCE_APPMGR_ERROR_INVALID_SELF_PATH (aprox.)
+}
+VT_HLE(sceSysmoduleUnloadModule) { ret(ctx, SCE_OK); }
 VT_HLE(scePowerSetConfigurationMode) { ret(ctx, SCE_OK); }
 
 } // namespace vt

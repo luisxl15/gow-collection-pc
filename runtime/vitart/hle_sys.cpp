@@ -3,6 +3,7 @@
 // overlays, NP, troféus, AppUtil e diálogos comuns. Assinaturas e layouts das estruturas: vita-headers.
 #include "vitart.h"
 #include "host_input.h"
+#include "gxm_vk.h"
 
 #include <chrono>
 #include <ctime>
@@ -302,20 +303,72 @@ VT_HLE(sceTouchGetPanelInfo) {
     ret(ctx, SCE_OK);
 }
 VT_HLE(sceTouchSetSamplingState) { ret(ctx, SCE_OK); }
+// SceTouchData {u64 timeStamp; u32 status; u32 reportNum; SceTouchReport report[8]} com
+// SceTouchReport {u8 id; u8 force; u16 x; u16 y; u8 reserved[8]; u16 info} (16 bytes). O mouse na
+// janela vira um dedo no painel frontal (1920x1088 unidades); o traseiro fica sem toque.
+// VITART_TOUCH="t_ms:x:y:dur_ms,...": toques no painel frontal em coordenadas normalizadas (0..1) da
+// tela, contados desde a primeira leitura do toque. Para testes sem ninguém no mouse.
+static bool scripted_touch(float &nx, float &ny) {
+    struct Tap { uint64_t t, dur; float x, y; };
+    static const std::vector<Tap> taps = [] {
+        std::vector<Tap> v;
+        const char *e = getenv("VITART_TOUCH");
+        while (e && *e) {
+            unsigned long long t = 0, d = 0;
+            float x = 0, y = 0;
+            if (std::sscanf(e, "%llu:%f:%f:%llu", &t, &x, &y, &d) == 4) v.push_back({ t * 1000, d * 1000, x, y });
+            e = std::strchr(e, ',');
+            if (e) e++;
+        }
+        return v;
+    }();
+    static const uint64_t t0 = now_us_sys();
+    const uint64_t t = now_us_sys() - t0;
+    for (const Tap &p : taps)
+        if (t >= p.t && t < p.t + p.dur) { nx = p.x, ny = p.y; return true; }
+    return false;
+}
+static void touch_fill(uint32_t port, uint32_t data) {
+    std::memset(ptr<void>(data), 0, 0x90);
+    wr64(data, now_us_sys());
+    float nx, ny;
+    if (port == 0 && (scripted_touch(nx, ny) || gvk::pointer(nx, ny))) {
+        static uint8_t id = 0;
+        static bool down = false;
+        static uint64_t last = 0;
+        const uint64_t t = now_us_sys();
+        if (!down || t - last > 200000) id++; // dedo novo a cada toque
+        down = true, last = t;
+        wr32(data + 12, 1);
+        uint8_t *r = ptr<uint8_t>(data + 16);
+        r[0] = id, r[1] = 128;
+        *ptr<uint16_t>(data + 18) = (uint16_t)(nx * 1920.f);
+        *ptr<uint16_t>(data + 20) = (uint16_t)(ny * 1088.f);
+    }
+}
 VT_HLE(sceTouchPeek) {
     const uint32_t data = arg(ctx, 1);
     const uint32_t n = arg(ctx, 2) ? arg(ctx, 2) : 1;
-    for (uint32_t i = 0; i < n; ++i) {
-        std::memset(ptr<void>(data + 0x90 * i), 0, 0x90);
-        wr64(data + 0x90 * i, now_us_sys());
-    }
+    for (uint32_t i = 0; i < n; ++i) touch_fill(arg(ctx, 0), data + 0x90 * i);
     ret(ctx, n);
 }
 VT_HLE(sceTouchRead) {
-    const uint32_t data = arg(ctx, 1);
-    std::memset(ptr<void>(data), 0, 0x90);
-    wr64(data, now_us_sys());
+    touch_fill(arg(ctx, 0), arg(ctx, 1));
     ret(ctx, 1);
+}
+VT_HLE(sceMotionGetState) {
+    // SceMotionState (0xF8 bytes): aparelho parado e na horizontal (gravidade em -z, orientação identidade).
+    const uint32_t st = arg(ctx, 0);
+    if (!st) return ret(ctx, 0x80360200u);
+    std::memset(ptr<void>(st), 0, 0xF8);
+    wr32(st, (uint32_t)now_us_sys());
+    float *f = ptr<float>(st);
+    f[3] = -1.f;                         // acceleration.z
+    f[13] = 1.f;                         // deviceQuat.w (x, y, z, w a partir de +0x28)
+    for (int i = 0; i < 4; i++) f[14 + 5 * i] = f[30 + 5 * i] = 1.f; // rotationMatrix e nedMatrix identidade
+    f[49] = -1.f;                        // basicOrientation.z (aparelho deitado)
+    wr64(st + 0xC8, now_us_sys());
+    ret(ctx, SCE_OK);
 }
 VT_HLE(sceMotionReset) { ret(ctx, SCE_OK); }
 VT_HLE(sceMotionStartSampling) { ret(ctx, SCE_OK); }
@@ -357,6 +410,9 @@ static void wait_vblank(uint32_t count) {
     std::this_thread::sleep_until(g_vblank0 + VBLANK * (n + (count ? count : 1)));
 }
 VT_HLE(sceDisplayWaitVblankStart) { wait_vblank(1); ret(ctx, SCE_OK); }
+VT_HLE(sceDisplayGetVcount) {
+    ret(ctx, (uint32_t)((std::chrono::steady_clock::now() - g_vblank0) / VBLANK));
+}
 VT_HLE(sceDisplayWaitVblankStartMulti) { wait_vblank(arg(ctx, 0)); ret(ctx, SCE_OK); }
 VT_HLE(sceDisplayWaitSetFrameBuf) { wait_vblank(1); ret(ctx, SCE_OK); }
 
@@ -658,6 +714,7 @@ VT_HLE(sceAppUtilSystemParamGetInt) {
     ret(ctx, SCE_OK);
 }
 VT_HLE(sceAppUtilSaveDataSlotGetParam) { ret(ctx, APPUTIL_SLOT_NOT_FOUND); }
+VT_HLE(sceAppUtilSaveDataDataRemove) { ret(ctx, SCE_OK); }
 VT_HLE(sceAppUtilSaveDataDataSave) {
     // TODO: gravar os arquivos do slot no diretório de dados; por ora só registra o pedido.
     logf("vitart: sceAppUtilSaveDataDataSave(slot %u, %u arquivos) ignorado", arg(ctx, 0), arg(ctx, 2));
