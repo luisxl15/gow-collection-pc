@@ -63,6 +63,17 @@ constexpr VkFormat kColor = VK_FORMAT_R8G8B8A8_UNORM, kDepth = VK_FORMAT_D32_SFL
 constexpr VkImageAspectFlags kDepthAspects = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
 
 Stats g_stats;
+// Resolução interna: os alvos do jogo são renderizados em escala x (VITART_VK_SCALE, padrão 2).
+// Viewport, scissor e o deslocamento de meio pixel escalam junto; texturas lidas de alvos usam
+// coordenadas normalizadas e não mudam.
+uint32_t render_scale() {
+    static const uint32_t s = [] {
+        const char *e = getenv("VITART_VK_SCALE");
+        const int v = e ? std::atoi(e) : 2;
+        return (uint32_t)(v < 1 ? 1 : v > 8 ? 8 : v);
+    }();
+    return s;
+}
 float g_aniso = 1.f;                         // anisotropia máxima dos samplers (1 = desligada)
 VkPipelineCache g_pcache = VK_NULL_HANDLE;   // persistido em vk_pipeline_cache.bin
 bool g_pcache_dirty = false;
@@ -381,6 +392,7 @@ bool get_target(uint32_t addr, uint32_t w, uint32_t h, Target *&out) {
         return true;
     }
     Target t;
+    w *= render_scale(), h *= render_scale();
     if (!make_image(t.color, w, h, kColor,
                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
         return false;
@@ -1202,7 +1214,7 @@ bool draw(const Draw &d) {
         VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
         rbi.renderPass = g_rp;
         rbi.framebuffer = tgt->fb;
-        rbi.renderArea = {{0, 0}, {d.target_w, d.target_h}};
+        rbi.renderArea = {{0, 0}, {tgt->color.w, tgt->color.h}};
         vkCmdBeginRenderPass(g_cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
         g_open = tgt;
     }
@@ -1215,11 +1227,12 @@ bool draw(const Draw &d) {
     // Sem compensar, toda passada de tela cheia lê entre texels: o quadro borra e a máscara de névoa
     // vaza 1 px além dos personagens (o contorno escuro). Medido no replay: +0,5 deixa nítido e sem halo.
     static const float halfpix = getenv("VITART_VK_HALFPIX") ? (float)std::atof(getenv("VITART_VK_HALFPIX")) : 0.5f;
-    vp.x += halfpix, vp.y += halfpix;
+    const float rs = (float)render_scale();
+    vp.x = (vp.x + halfpix) * rs, vp.y = (vp.y + halfpix) * rs, vp.width *= rs, vp.height *= rs;
     vp.minDepth = vp.minDepth < 0 ? 0 : (vp.minDepth > 1 ? 1 : vp.minDepth);
     vp.maxDepth = vp.maxDepth < 0 ? 0 : (vp.maxDepth > 1 ? 1 : vp.maxDepth);
     vkCmdSetViewport(g_cmd, 0, 1, &vp);
-    VkRect2D sc{{0, 0}, {d.target_w, d.target_h}};
+    VkRect2D sc{{0, 0}, {tgt->color.w, tgt->color.h}};
     vkCmdSetScissor(g_cmd, 0, 1, &sc);
     vkCmdSetStencilCompareMask(g_cmd, VK_STENCIL_FACE_FRONT_BIT, d.front.cmask);
     vkCmdSetStencilCompareMask(g_cmd, VK_STENCIL_FACE_BACK_BIT, d.back.cmask);
