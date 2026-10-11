@@ -9,6 +9,7 @@
 // em set 0 (binding 0 = default uniform buffer, 1 = memória do vldst); fragmento com texturas em set 1
 // (binding = recurso do sampler) e uniforms em set 2.
 #pragma once
+#include <string>
 #include <cstdint>
 #include <vector>
 
@@ -86,6 +87,8 @@ bool present(uint32_t addr);
 bool window_closed();
 // Mouse sobre a janela como toque: posição normalizada (0..1) na área cliente e botão esquerdo apertado.
 bool pointer(float &nx, float &ny);
+// Aviso curto no título da janela (UTF-8), por alguns segundos, com o som de notificação do Windows.
+void notify(const std::string &text);
 bool is_target(uint32_t addr);
 bool is_depth(uint32_t addr);
 // Início de cena do GXM: a profundidade do alvo volta ao valor de fundo (1,0), a não ser que a

@@ -11,6 +11,7 @@
 #include <vector>
 #include <deque>
 #include <map>
+#include <set>
 #include <memory>
 #include <thread>
 #include <unordered_map>
@@ -650,8 +651,96 @@ VT_HLE(sceNpInit) { ret(ctx, SCE_OK); }
 VT_HLE(sceNpTerm) { ret(ctx, SCE_OK); }
 VT_HLE(sceNpTrophyInit) { ret(ctx, SCE_OK); }
 VT_HLE(sceNpTrophyTerm) { ret(ctx, SCE_OK); }
+// Troféus: a lista vem do TROP.SFM (XML) dentro de app0:sce_sys/trophy/<NPWR>_<nn>/TROPHY.TRP; os
+// desbloqueados ficam em <dados>/trophy/<NPWR>_<nn>/unlocked.txt (um id por linha) e o aviso aparece no
+// título da janela. A platina (ttype P) sai sozinha quando todos os outros estão desbloqueados.
+struct Trophy { int id; char type; std::string name, detail; };
+struct TrophySet {
+    std::string comm;              // "NPWR05244_00"
+    std::vector<Trophy> list;
+    std::set<int> unlocked;
+};
+static std::mutex g_trophy_mutex;
+static std::map<uint32_t, TrophySet> g_trophy_sets; // contexto -> conjunto
+
+static std::string xml_between(const std::string &s, size_t from, const char *open, const char *close) {
+    const size_t a = s.find(open, from);
+    if (a == std::string::npos) return "";
+    const size_t b = s.find(close, a);
+    return b == std::string::npos ? "" : s.substr(a + std::strlen(open), b - a - std::strlen(open));
+}
+static void trophy_load(TrophySet &ts) {
+    const std::string trp = app_path() + "/sce_sys/trophy/" + ts.comm + "/TROPHY.TRP";
+    FILE *f = fopen(trp.c_str(), "rb");
+    if (!f) return logf("vitart: troféus: %s não encontrado", trp.c_str());
+    std::vector<uint8_t> d;
+    fseek(f, 0, SEEK_END);
+    d.resize((size_t)ftell(f));
+    fseek(f, 0, SEEK_SET);
+    fread(d.data(), 1, d.size(), f);
+    fclose(f);
+    auto be32 = [&](size_t o) { return (uint32_t)d[o] << 24 | d[o + 1] << 16 | d[o + 2] << 8 | d[o + 3]; };
+    auto be64 = [&](size_t o) { return (uint64_t)be32(o) << 32 | be32(o + 4); };
+    if (d.size() < 0x40 || be32(0) != 0xDCA24D00u) return;
+    const uint32_t n = be32(16), esz = be32(20);
+    for (uint32_t i = 0; i < n && 0x40 + (i + 1) * esz <= d.size(); i++) {
+        const size_t e = 0x40 + i * esz;
+        if (std::strncmp(reinterpret_cast<const char *>(&d[e]), "TROP.SFM", 32) != 0) continue;
+        const uint64_t off = be64(e + 32), size = be64(e + 40);
+        if (off + size > d.size()) break;
+        const std::string x(reinterpret_cast<const char *>(&d[off]), (size_t)size);
+        for (size_t p = x.find("<trophy id=\""); p != std::string::npos; p = x.find("<trophy id=\"", p + 1)) {
+            Trophy t;
+            t.id = std::atoi(x.c_str() + p + 12);
+            const size_t ty = x.find("ttype=\"", p);
+            t.type = ty != std::string::npos ? x[ty + 7] : 'B';
+            t.name = xml_between(x, p, "<name>", "</name>");
+            t.detail = xml_between(x, p, "<detail>", "</detail>");
+            ts.list.push_back(t);
+        }
+    }
+    const std::string saved = data_path() + "/trophy/" + ts.comm + "/unlocked.txt";
+    if (FILE *u = fopen(saved.c_str(), "r")) {
+        int id;
+        while (fscanf(u, "%d", &id) == 1) ts.unlocked.insert(id);
+        fclose(u);
+    }
+    logf("vitart: troféus %s: %zu no jogo, %zu já desbloqueados", ts.comm.c_str(), ts.list.size(), ts.unlocked.size());
+}
+static void trophy_save(const TrophySet &ts) {
+    const std::string dir = data_path() + "/trophy/" + ts.comm;
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (FILE *u = fopen((dir + "/unlocked.txt").c_str(), "w")) {
+        for (int id : ts.unlocked) fprintf(u, "%d\n", id);
+        fclose(u);
+    }
+}
+static void trophy_announce(const TrophySet &ts, int id) {
+    const char *kind = "Bronze";
+    std::string name = "#" + std::to_string(id), detail;
+    for (const Trophy &t : ts.list)
+        if (t.id == id) {
+            name = t.name, detail = t.detail;
+            kind = t.type == 'P' ? "Platina" : t.type == 'G' ? "Ouro" : t.type == 'S' ? "Prata" : "Bronze";
+        }
+    logf("vitart: TROFÉU (%s) desbloqueado: %s — %s", kind, name.c_str(), detail.c_str());
+    gvk::notify(std::string("Troféu desbloqueado (") + kind + "): " + name + " — " + detail);
+}
+
 VT_HLE(sceNpTrophyCreateContext) {
-    if (arg(ctx, 0)) wr32(arg(ctx, 0), 1);
+    // (SceNpTrophyContext *ctx, const SceNpCommunicationId *commId {char data[9]; char term; u8 num}, sign, opts)
+    static std::atomic<uint32_t> next{1};
+    const uint32_t c = next++, cid = arg(ctx, 1);
+    if (arg(ctx, 0)) wr32(arg(ctx, 0), c);
+    if (cid) {
+        char comm[16];
+        std::snprintf(comm, sizeof comm, "%.9s_%02u", gstr(cid), *ptr<uint8_t>(cid + 10));
+        const std::lock_guard<std::mutex> lock(g_trophy_mutex);
+        TrophySet &ts = g_trophy_sets[c];
+        ts.comm = comm;
+        trophy_load(ts);
+    }
     ret(ctx, SCE_OK);
 }
 VT_HLE(sceNpTrophyCreateHandle) {
@@ -662,8 +751,29 @@ VT_HLE(sceNpTrophyCreateHandle) {
 VT_HLE(sceNpTrophyDestroyHandle) { ret(ctx, SCE_OK); }
 VT_HLE(sceNpTrophyUnlockTrophy) {
     // (context, handle, trophyId, int *platinumId)
-    logf("vitart: troféu %d desbloqueado", (int)arg(ctx, 2));
+    const int id = (int)arg(ctx, 2);
     if (arg(ctx, 3)) wr32(arg(ctx, 3), 0xFFFFFFFFu); // SCE_NP_TROPHY_INVALID_TROPHY_ID: sem platina
+    const std::lock_guard<std::mutex> lock(g_trophy_mutex);
+    auto it = g_trophy_sets.find(arg(ctx, 0));
+    if (it == g_trophy_sets.end()) {
+        logf("vitart: troféu %d desbloqueado (contexto desconhecido)", id);
+        return ret(ctx, SCE_OK);
+    }
+    TrophySet &ts = it->second;
+    if (!ts.unlocked.insert(id).second) return ret(ctx, 0x80551628u); // SCE_NP_TROPHY_ERROR_TROPHY_ALREADY_UNLOCKED
+    trophy_announce(ts, id);
+    // Platina: todos os outros desbloqueados.
+    int plat = -1;
+    bool all = true;
+    for (const Trophy &t : ts.list) {
+        if (t.type == 'P') plat = t.id;
+        else if (!ts.unlocked.count(t.id)) all = false;
+    }
+    if (plat >= 0 && all && ts.unlocked.insert(plat).second) {
+        trophy_announce(ts, plat);
+        if (arg(ctx, 3)) wr32(arg(ctx, 3), (uint32_t)plat);
+    }
+    trophy_save(ts);
     ret(ctx, SCE_OK);
 }
 

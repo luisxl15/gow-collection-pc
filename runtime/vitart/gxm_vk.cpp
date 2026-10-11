@@ -850,6 +850,32 @@ static bool create_window() {
 
 bool window_closed() { return g_closed; }
 
+static std::wstring g_notice;
+static std::chrono::steady_clock::time_point g_notice_end;
+static bool g_notice_shown = false;
+static void notice_tick() {
+    // Chamado a cada apresentação: põe o aviso no título e devolve o título normal ao fim do prazo.
+    if (!g_hwnd) return;
+    if (!g_notice.empty() && !g_notice_shown) {
+        SetWindowTextW(g_hwnd, g_notice.c_str());
+        g_notice_shown = true;
+    } else if (g_notice_shown && std::chrono::steady_clock::now() > g_notice_end) {
+        SetWindowTextW(g_hwnd, L"God of War (vitart, Vulkan)");
+        g_notice.clear();
+        g_notice_shown = false;
+    }
+}
+void notify(const std::string &text) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    const int n = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+    std::wstring w(n > 0 ? n - 1 : 0, L'\0');
+    if (n > 1) MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, w.data(), n);
+    g_notice = w;
+    g_notice_end = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+    g_notice_shown = false;
+    MessageBeep(MB_ICONASTERISK);
+}
+
 bool pointer(float &nx, float &ny) {
     if (!g_hwnd || GetForegroundWindow() != g_hwnd || !(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) return false;
     POINT p;
@@ -896,6 +922,7 @@ bool present(uint32_t addr) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    notice_tick();
     auto it = g_targets.find(addr);
     if (it == g_targets.end()) return false;
     uint32_t idx = 0;
