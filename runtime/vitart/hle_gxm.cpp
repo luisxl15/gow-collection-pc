@@ -219,7 +219,26 @@ static int g_vk = -1; // -1 = ainda não decidido
 static std::string g_spv_dir;
 static std::mutex g_vk_mutex;
 static std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint32_t>>> g_spv; // programa -> SPIR-V
-static std::map<std::array<uint32_t, 4>, std::shared_ptr<std::vector<uint8_t>>> g_texcache;
+// Texturas decodificadas por descritor. O conteúdo no guest é conferido (hash) uma vez por quadro
+// apresentado: o Bink escreve cada quadro do vídeo no mesmo endereço.
+struct TexEntry {
+    std::shared_ptr<std::vector<uint8_t>> px;
+    uint64_t hash = 0;
+    uint32_t checked = UINT32_MAX;
+};
+static std::map<std::array<uint32_t, 4>, TexEntry> g_texcache;
+static std::atomic<uint32_t> g_present_frame{0};
+static uint64_t content_hash(const uint8_t *p, size_t n, uint64_t h) {
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t v;
+        std::memcpy(&v, p + i, 8);
+        h = (h ^ v) * 0x9E3779B97F4A7C15ull;
+        h ^= h >> 29;
+    }
+    for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
+    return h;
+}
 static uint64_t g_vk_draws = 0, g_vk_skipped = 0;
 // Tempo de CPU (ns) por etapa, zerado a cada relatório: onde o quadro gasta.
 static std::atomic<uint64_t> g_t_draw{0}, g_t_gvk{0}, g_t_present{0};
@@ -398,16 +417,25 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
         } else if (gvk::is_depth(info.data)) {
             t.target_addr = info.data, t.depth = true;
         } else {
-            auto it = g_texcache.find(w);
-            if (it == g_texcache.end()) {
-                auto px = std::make_shared<std::vector<uint8_t>>();
-                if (!gxmtex::decode(ptr<uint8_t>(0), info, *px)) px.reset();
-                it = g_texcache.emplace(w, px).first;
+            TexEntry &e = g_texcache[w];
+            const uint32_t frame = g_present_frame.load();
+            if (e.checked != frame) {
+                e.checked = frame;
+                const size_t n = gxmtex::data_size(info);
+                uint64_t h = content_hash(reinterpret_cast<const uint8_t *>(w.data()), 16, 1469598103934665603ull);
+                if (n) h = content_hash(ptr<uint8_t>(info.data), n, h);
+                if (info.base == 0x95000000u) h = content_hash(ptr<uint8_t>(info.palette), 1024, h);
+                if (!e.px || h != e.hash) {
+                    auto px = std::make_shared<std::vector<uint8_t>>();
+                    if (!n || !gxmtex::decode(ptr<uint8_t>(0), info, *px)) px.reset();
+                    e.px = px;
+                    e.hash = h;
+                }
             }
-            if (!it->second) continue;
-            keep.push_back(it->second);
-            t.rgba = it->second->data();
-            t.key = reinterpret_cast<uint64_t>(it->second.get());
+            if (!e.px) continue;
+            keep.push_back(e.px);
+            t.rgba = e.px->data();
+            t.key = e.hash | 1;
         }
         d.textures.push_back(t);
     }
@@ -440,6 +468,7 @@ void gxm_present(uint32_t fb) {
                  (unsigned long long)g_vk_draws, (unsigned long long)g_vk_skipped);
         }
     }
+    g_present_frame++;
     const uint64_t tp = now_ns();
     gvk::present(fb);
     g_t_present += now_ns() - tp;

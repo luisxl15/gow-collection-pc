@@ -13,5 +13,7 @@ Info describe(const uint32_t w[4]);
 // guest: base da janela de 4 GiB do guest (endereço do guest = deslocamento). Devolve false para
 // formatos ainda não suportados.
 bool decode(const uint8_t *guest, const Info &t, std::vector<uint8_t> &rgba);
+// Bytes que a textura ocupa na memória do guest a partir de t.data (0 se o formato não é suportado).
+size_t data_size(const Info &t);
 
 } // namespace gxmtex

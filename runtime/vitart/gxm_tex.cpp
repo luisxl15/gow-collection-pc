@@ -101,6 +101,26 @@ Info describe(const uint32_t w[4]) {
     return t;
 }
 
+size_t data_size(const Info &t) {
+    const uint32_t w = t.width, h = t.height, ty = t.type, fmt = t.base;
+    if (!w || !h || w > 4096 || h > 4096) return 0;
+    const bool swizzled = ty == 0 || ty == 1 || ty == 5 || ty == 7;
+    if (fmt == 0x85000000u || fmt == 0x86000000u || fmt == 0x87000000u) {
+        const size_t bw = (w + 3) / 4, bh = (h + 3) / 4, bsize = fmt == 0x85000000u ? 8 : 16;
+        return (swizzled ? (size_t)pow2((uint32_t)bw) * pow2((uint32_t)bh) : bw * bh) * bsize;
+    }
+    size_t bpp;
+    switch (fmt) {
+    case 0x0C000000u: bpp = 4; break;
+    case 0x95000000u: case 0x00000000u: bpp = 1; break;
+    case 0x07000000u: bpp = 2; break;
+    default: return 0;
+    }
+    if (swizzled) return (size_t)pow2(w) * pow2(h) * bpp;
+    if (ty == 4) return (size_t)((w + 31) / 32) * ((h + 31) / 32) * 1024 * bpp;
+    return (size_t)(ty == 6 ? t.stride : ((w + 7) & ~7u) * bpp) * (h - 1) + (size_t)w * bpp;
+}
+
 bool decode(const uint8_t *guest, const Info &t, std::vector<uint8_t> &rgba) {
     const uint32_t w = t.width, h = t.height, ty = t.type, fmt = t.base;
     if (!w || !h || w > 4096 || h > 4096) return false;

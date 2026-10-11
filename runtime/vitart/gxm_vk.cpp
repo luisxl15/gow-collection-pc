@@ -226,6 +226,9 @@ VkDescriptorPool g_dpool = VK_NULL_HANDLE;
 uint32_t g_draws_in_frame = 0;
 constexpr uint32_t kMaxDrawsPerFrame = 2048;
 std::vector<Image> g_transient;
+std::unordered_map<uint64_t, Image> g_textures;
+std::unordered_map<uint64_t, uint64_t> g_tex_used; // textura -> último quadro de gravação que a usou
+uint64_t g_frame_no = 0;                            // quadros de gravação (frame_begin) desde o início
 std::vector<float> g_debug_vs; // cópias de alvos lidas como textura: vivem até o fim do quadro
 
 void end_pass() {
@@ -258,6 +261,18 @@ bool frame_wait() {
 bool frame_begin() {
     if (g_recording) return true;
     if (!frame_wait()) return false;
+    // A GPU terminou tudo: texturas sem uso há muitos quadros saem (o vídeo gera uma por quadro).
+    if (++g_frame_no % 64 == 0)
+        for (auto it = g_textures.begin(); it != g_textures.end();) {
+            auto u = g_tex_used.find(it->first);
+            if (u == g_tex_used.end() || g_frame_no - u->second > 128) {
+                destroy(it->second);
+                g_tex_used.erase(it->first);
+                it = g_textures.erase(it);
+            } else {
+                ++it;
+            }
+        }
     g_ring_off = 0;
     g_draws_in_frame = 0;
     VKC(vkResetDescriptorPool(g_dev, g_dpool, 0));
@@ -353,7 +368,6 @@ uint64_t fnv(const void *p, size_t n, uint64_t h = 1469598103934665603ull) {
     return h;
 }
 
-std::unordered_map<uint64_t, Image> g_textures;
 std::map<uint32_t, uint32_t> g_depth_owner; // superfície de profundidade -> alvo de cor que a usa
 // Cópia amostrável de um alvo (cor ou profundidade), refeita só quando o alvo mudou desde a última cópia:
 // o passe de névoa é lido por quase todos os desenhos da cena sem mudar entre eles.
@@ -929,6 +943,7 @@ bool draw(const Draw &d) {
             it = g_textures.emplace(h, im).first;
         }
         img_info[t.binding].imageView = it->second.view;
+        g_tex_used[h] = g_frame_no;
     }
 
     tgt->cver++;

@@ -257,6 +257,7 @@ VT_HLE(sceNgsAT9GetSectionDetails) {
 // hardware; o jogo usa isso como relógio da thread de áudio.
 struct AudioPort {
     uint32_t len = 256, freq = 48000, mode = 1;
+    uint64_t outputs = 0;
     std::chrono::steady_clock::time_point next{};
 };
 static std::mutex g_audio_mutex;
@@ -272,16 +273,34 @@ VT_HLE(sceAudioOutOpenPort) {
     p.freq = arg(ctx, 2) ? arg(ctx, 2) : 48000;
     p.mode = arg(ctx, 3);
     p.next = std::chrono::steady_clock::now();
-    logf("vitart: porta de áudio %d: tipo %u, %u amostras, %u Hz, %s", id, arg(ctx, 0), p.len, p.freq, p.mode ? "estéreo" : "mono");
+    logf("vitart: porta de áudio %d: tipo %u, %u amostras, %u Hz, %s (lr 0x%08x)", id, arg(ctx, 0), p.len, p.freq,
+         p.mode ? "estéreo" : "mono", ctx->r[14]);
     ret(ctx, (uint32_t)id);
 }
 VT_HLE(sceAudioOutReleasePort) {
     std::lock_guard<std::mutex> g(g_audio_mutex);
+    auto it = g_ports.find((int)arg(ctx, 0));
+    if (getenv("VITART_AUDIO_LOG") && it != g_ports.end())
+        logf("vitart: porta de áudio %d liberada após %llu saídas (lr 0x%08x)", (int)arg(ctx, 0),
+             (unsigned long long)it->second.outputs, ctx->r[14]);
     g_ports.erase((int)arg(ctx, 0));
     ret(ctx, SCE_OK);
 }
 VT_HLE(sceAudioOutSetVolume) { ret(ctx, SCE_OK); }
-VT_HLE(sceAudioOutGetRestSample) { ret(ctx, 0); }
+// Amostras ainda não tocadas: o que falta do último bloco enviado, pelo mesmo relógio que cadencia
+// sceAudioOutOutput. O som do Bink (RADSS) lê isto como relógio; 0 fixo o fazia reiniciar a porta em
+// laço e o vídeo não andava.
+VT_HLE(sceAudioOutGetRestSample) {
+    std::lock_guard<std::mutex> g(g_audio_mutex);
+    auto it = g_ports.find((int)arg(ctx, 0));
+    if (it == g_ports.end()) return ret(ctx, 0x80260105u);
+    const AudioPort &p = it->second;
+    const auto now = std::chrono::steady_clock::now();
+    if (p.next <= now) return ret(ctx, 0);
+    const uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(p.next - now).count();
+    const uint64_t rest = us * p.freq / 1000000ull;
+    ret(ctx, (uint32_t)(rest < p.len ? rest : p.len));
+}
 VT_HLE(sceAudioOutOutput) {
     std::chrono::steady_clock::time_point wake;
     {
@@ -289,6 +308,7 @@ VT_HLE(sceAudioOutOutput) {
         auto it = g_ports.find((int)arg(ctx, 0));
         if (it == g_ports.end()) return ret(ctx, 0x80260105u); // SCE_AUDIO_OUT_ERROR_INVALID_PORT
         AudioPort &p = it->second;
+        p.outputs++;
         const auto now = std::chrono::steady_clock::now();
         if (p.next < now - std::chrono::milliseconds(100)) p.next = now; // após uma pausa longa
         wake = p.next;
@@ -317,13 +337,36 @@ static uint32_t keyboard_buttons() {
 static uint64_t now_us_sys() {
     return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+// VITART_INPUT="t_ms:máscara:dur_ms,...": botões apertados em instantes dados desde o arranque (máscara em
+// hexadecimal, bits do SceCtrlData; cruz = 4000, start = 8). Para testes sem ninguém no teclado.
+static uint32_t scripted_buttons() {
+    struct Press { uint64_t t, dur; uint32_t mask; };
+    static const std::vector<Press> presses = [] {
+        std::vector<Press> v;
+        const char *e = getenv("VITART_INPUT");
+        while (e && *e) {
+            unsigned long long t = 0, d = 0;
+            unsigned m = 0;
+            if (std::sscanf(e, "%llu:%x:%llu", &t, &m, &d) == 3) v.push_back({ t * 1000, d * 1000, m });
+            e = std::strchr(e, ',');
+            if (e) e++;
+        }
+        return v;
+    }();
+    static const uint64_t t0 = now_us_sys();
+    const uint64_t t = now_us_sys() - t0;
+    uint32_t b = 0;
+    for (const Press &p : presses)
+        if (t >= p.t && t < p.t + p.dur) b |= p.mask;
+    return b;
+}
 VT_HLE(sceCtrlSetSamplingMode) { ret(ctx, 0); } // devolve o modo anterior (desligado)
 VT_HLE(sceCtrlSetSamplingModeExt) { ret(ctx, 0); }
 static void ctrl_read(arc_ctx *ctx) {
     // (port, SceCtrlData *data, count): 0x20 bytes por amostra.
     const uint32_t data = arg(ctx, 1);
     const int count = (int)arg(ctx, 2) > 0 ? (int)arg(ctx, 2) : 1;
-    const uint32_t buttons = keyboard_buttons();
+    const uint32_t buttons = keyboard_buttons() | scripted_buttons();
     for (int i = 0; i < count; ++i) {
         const uint32_t d = data + 0x20u * i;
         std::memset(ptr<void>(d), 0, 0x20);
