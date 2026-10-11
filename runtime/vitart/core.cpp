@@ -134,10 +134,47 @@ void dump_regions(const std::string &dir, uint32_t lo, uint32_t hi) {
     }
 }
 
+// Watchpoint de escrita (diagnóstico): VITART_WATCH=endereço,tamanho. A página fica só-leitura;
+// cada escrita na faixa registra a função do guest e o valor anterior; o passo único religa a proteção.
+static uint32_t g_watch_addr = 0, g_watch_len = 0;
+static thread_local bool t_watch_rearm = false;
+static std::mutex g_watch_mutex;
+static std::map<std::string, unsigned> g_watch_hits;
+
+static void watch_protect(bool on) {
+    DWORD old;
+    VirtualProtect(g_mem + (g_watch_addr & ~0xFFFu), ((g_watch_addr & 0xFFFu) + g_watch_len + 0xFFFu) & ~0xFFFu,
+        on ? PAGE_READONLY : PAGE_READWRITE, &old);
+}
+
 static LONG CALLBACK on_fault(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
+    if (er->ExceptionCode == EXCEPTION_SINGLE_STEP && t_watch_rearm) {
+        t_watch_rearm = false;
+        watch_protect(true);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2)
         return EXCEPTION_CONTINUE_SEARCH;
+    if (g_watch_len && er->ExceptionInformation[0] == 1) {
+        const uint64_t ha = er->ExceptionInformation[1];
+        const uint64_t lo = (uint64_t)(g_mem + (g_watch_addr & ~0xFFFu));
+        const uint64_t hi = (uint64_t)(g_mem + g_watch_addr + g_watch_len + 0xFFF) & ~0xFFFull;
+        if (ha >= lo && ha < hi) {
+            const uint32_t ga = (uint32_t)(ha - (uint64_t)g_mem);
+            if (ga >= g_watch_addr && ga < g_watch_addr + g_watch_len) {
+                const std::string where = describe_host_pc(er->ExceptionAddress);
+                const std::lock_guard<std::mutex> lock(g_watch_mutex);
+                if (g_watch_hits[where]++ < 3)
+                    logf("vitart: escrita vigiada em 0x%08x (+%u) por %s; valor anterior %08x", ga, ga - g_watch_addr,
+                        where.c_str(), rd32(ga & ~3u));
+            }
+            watch_protect(false);
+            t_watch_rearm = true;
+            ep->ContextRecord->EFlags |= 0x100; // passo único
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
     uint8_t *host = reinterpret_cast<uint8_t *>(er->ExceptionInformation[1]);
     if (!g_mem || host < g_mem || host >= g_mem + (1ull << 32))
         return EXCEPTION_CONTINUE_SEARCH;
@@ -152,6 +189,8 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS *ep) {
     const uint64_t page = (uint64_t)ga & ~0xFFFFull;
     if (!VirtualAlloc(g_mem + page, 0x10000, MEM_COMMIT, PAGE_READWRITE))
         return EXCEPTION_CONTINUE_SEARCH;
+    if (g_watch_len && g_watch_addr + g_watch_len > page && g_watch_addr < page + 0x10000)
+        watch_protect(true); // a confirmação sob demanda devolveu a página vigiada como gravável
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
@@ -640,6 +679,14 @@ int main(int argc, char **argv) {
     if (!hle_vars.empty())
         load_hle_vars(hle_vars);
     link_imports();
+    if (const char *w = getenv("VITART_WATCH")) {
+        g_watch_addr = (uint32_t)std::strtoul(w, nullptr, 0);
+        const char *c = std::strchr(w, ',');
+        g_watch_len = c ? (uint32_t)std::strtoul(c + 1, nullptr, 0) : 4;
+        commit_range(g_watch_addr, g_watch_len);
+        watch_protect(true);
+        logf("vitart: vigiando escritas em 0x%08x..+%u", g_watch_addr, g_watch_len);
+    }
 
     const arc_module_info *mi = main_module();
     const uint32_t prio_p = process_param_field(mi, 5), stack_p = process_param_field(mi, 6);

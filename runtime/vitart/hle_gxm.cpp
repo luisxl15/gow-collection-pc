@@ -10,6 +10,7 @@
 #include <fstream>
 #include <deque>
 #include <map>
+#include <set>
 #include <memory>
 #include <thread>
 #include <unordered_map>
@@ -666,6 +667,18 @@ VT_HLE(sceGxmSetUniformDataF) {
     if (!buf || !param || !src) return ret(ctx, GXM_ERROR_INVALID_POINTER);
     const uint32_t base = buf + 4 * (rd32(param + 12) + off);
     std::memcpy(ptr<uint8_t>(base), ptr<uint8_t>(src), 4 * n);
+    if (std::getenv("VITART_TRACE_UNIFORMS")) {
+        // Diagnóstico: quem envia cada uniform (uma linha por par chamador/nome).
+        static std::mutex mu;
+        static std::set<std::pair<uint32_t, std::string>> seen;
+        const std::string name = gstr(param + rd32(param));
+        const std::lock_guard<std::mutex> lock(mu);
+        if (seen.insert({ ctx->r[14], name }).second) {
+            const float *f = ptr<float>(src);
+            logf("vitart: uniform %s n=%u off=%u src=0x%08x lr=0x%08x primeiros: %g %g %g %g | %g %g %g %g", name.c_str(), n, off,
+                src, ctx->r[14], f[0], f[1], f[2], f[3], n > 15 ? f[12] : 0, n > 15 ? f[13] : 0, n > 15 ? f[14] : 0, n > 15 ? f[15] : 0);
+        }
+    }
     ret(ctx, SCE_OK);
 }
 

@@ -226,6 +226,10 @@ def text(ins, second=False):
     mn, d, m, srcs = low
     if d is None:
         return "%04d %s" % (ins.pc, mn)
+    if mn == "vdual":
+        parts = ["%s %s.%s = %s" % (op["name"], op["dest"].text(0xF).split(".")[0], mask_text(op["mask"]),
+                                    ", ".join(x.text(op["smask"]) for x in op["srcs"])) for op in srcs]
+        return "%04d vdual    %s" % (ins.pc, " ; ".join(parts))
     smask = 0xF if mn.startswith("vdp") else m
     return "%04d %-8s %s.%s = %s" % (ins.pc, mn, d.text(0xF).split(".")[0], mask_text(m),
                                     ", ".join(s.text(smask) for s in srcs))

@@ -59,7 +59,7 @@ class Operand:
     gpi: bool = False
 
     def text(self, mask=0xF):
-        sw = "".join(CH_NAME[self.swizzle[i]] for i in range(4) if mask >> i & 1)
+        sw = "".join(CH_NAME[self.swizzle[i]] if self.swizzle[i] < len(CH_NAME) else "W" for i in range(4) if mask >> i & 1)
         s = "%s%d" % (self.bank, self.num)
         if sw and sw != "xyzw"[:len(sw)]:
             s += "." + sw
