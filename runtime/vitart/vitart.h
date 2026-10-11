@@ -67,6 +67,8 @@ struct Thread {
     bool can_exit = false;
 };
 Thread *current();
+// Caminho do Vita ("savedata0:x", "app0:y") -> caminho no PC.
+std::string vita_host_path(const std::string &p);
 // sceAppMgrLoadExec: relança o vitart com outra DLL no lugar do módulo principal (o Vita troca o
 // processo inteiro do mesmo jeito). Não volta.
 [[noreturn]] void exec_main_module(const std::string &dll);

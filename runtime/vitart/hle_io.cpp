@@ -39,6 +39,8 @@ static std::string host_path(const std::string &p) {
     return data_path() + "/" + dev + "/" + rest;
 }
 
+std::string vita_host_path(const std::string &p) { return host_path(p); }
+
 // VITART_SKIP_VIDEOS=1: os vídeos Bink (.bk2) aparecem como inexistentes, e o jogo segue sem tocá-los.
 static bool skipped_video(const std::string &path) {
     static const bool skip = getenv("VITART_SKIP_VIDEOS") && *getenv("VITART_SKIP_VIDEOS") == '1';

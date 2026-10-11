@@ -7,6 +7,8 @@
 
 #include <chrono>
 #include <ctime>
+#include <filesystem>
+#include <vector>
 #include <deque>
 #include <map>
 #include <memory>
@@ -713,11 +715,83 @@ VT_HLE(sceAppUtilSystemParamGetInt) {
     wr32(arg(ctx, 1), id < 7 ? values[id] : 0);
     ret(ctx, SCE_OK);
 }
-VT_HLE(sceAppUtilSaveDataSlotGetParam) { ret(ctx, APPUTIL_SLOT_NOT_FOUND); }
-VT_HLE(sceAppUtilSaveDataDataRemove) { ret(ctx, SCE_OK); }
+// Saves: os arquivos vão para savedata0: (pasta savedata0 do diretório de dados); os parâmetros de cada
+// slot (SceAppUtilSaveDataSlotParam, 0x34C bytes) ficam em savedata0:sce_sys/vitart_slot_<id>.bin, de
+// onde sceAppUtilSaveDataSlotGetParam os lê (o jogo só carrega um slot que existe).
+constexpr uint32_t kSlotParamSize = 0x34C;
+static std::string slot_file(uint32_t id) { return vita_host_path("savedata0:sce_sys/vitart_slot_" + std::to_string(id) + ".bin"); }
+VT_HLE(sceAppUtilSaveDataSlotGetParam) {
+    // (slotId, SceAppUtilSaveDataSlotParam *param, mountPoint)
+    FILE *f = fopen(slot_file(arg(ctx, 0)).c_str(), "rb");
+    if (!f) return ret(ctx, APPUTIL_SLOT_NOT_FOUND);
+    std::vector<uint8_t> b(kSlotParamSize);
+    const size_t n = fread(b.data(), 1, b.size(), f);
+    fclose(f);
+    if (arg(ctx, 1)) std::memcpy(ptr<void>(arg(ctx, 1)), b.data(), n);
+    ret(ctx, SCE_OK);
+}
+VT_HLE(sceAppUtilSaveDataDataRemove) {
+    // (slot, SceAppUtilSaveDataRemoveItem *files (0x2C cada: caminho, modo), fileNum, mountPoint)
+    const uint32_t files = arg(ctx, 1), n = arg(ctx, 2);
+    std::error_code ec;
+    for (uint32_t i = 0; files && i < n; i++) {
+        const uint32_t it = files + 0x2C * i;
+        const std::string p = vita_host_path(std::string("savedata0:") + gstr(rd32(it)));
+        if (rd32(it + 4) == 0) std::filesystem::remove(p, ec); else std::filesystem::remove_all(p, ec);
+        logf("vitart: save removido: %s", p.c_str());
+    }
+    ret(ctx, SCE_OK);
+}
 VT_HLE(sceAppUtilSaveDataDataSave) {
-    // TODO: gravar os arquivos do slot no diretório de dados; por ora só registra o pedido.
-    logf("vitart: sceAppUtilSaveDataDataSave(slot %u, %u arquivos) ignorado", arg(ctx, 0), arg(ctx, 2));
+    // (SceAppUtilSaveDataFileSlot *slot {id, slotParam*}, SceAppUtilSaveDataFile *files, fileNum, mountPoint,
+    //  SceSize *requiredSizeKB). Arquivo: {filePath, buf, bufSize, _, offset (64 bits em +16), mode em +24}.
+    // Modo 0 escreve em offset sem truncar, 1 trunca antes, 2 cria diretório.
+    const uint32_t slot = arg(ctx, 0), files = arg(ctx, 1), n = arg(ctx, 2);
+    std::error_code ec;
+    uint64_t total = 0;
+    for (uint32_t i = 0; files && i < n; i++) {
+        const uint32_t it = files + 0x40 * i;
+        const std::string p = vita_host_path(std::string("savedata0:") + gstr(rd32(it)));
+        const uint32_t buf = rd32(it + 4), size = rd32(it + 8), mode = rd32(it + 24);
+        const uint64_t off = (uint64_t)rd32(it + 16) | (uint64_t)rd32(it + 20) << 32;
+        if (mode == 2) {
+            std::filesystem::create_directories(p, ec);
+            continue;
+        }
+        std::filesystem::create_directories(std::filesystem::path(p).parent_path(), ec);
+        FILE *f = mode == 1 ? fopen(p.c_str(), "wb") : fopen(p.c_str(), "r+b");
+        if (!f) f = fopen(p.c_str(), "w+b");
+        if (!f) {
+            logf("vitart: save: não abriu %s", p.c_str());
+            return ret(ctx, 0x80100602u);
+        }
+        if (buf && size) {
+            _fseeki64(f, (long long)off, SEEK_SET);
+            fwrite(ptr<void>(buf), 1, size, f);
+        }
+        fclose(f);
+        total += size;
+        logf("vitart: save: %s (%u bytes em +%llu)", p.c_str(), size, (unsigned long long)off);
+    }
+    if (slot && rd32(slot + 4)) {
+        std::vector<uint8_t> b(kSlotParamSize);
+        std::memcpy(b.data(), ptr<void>(rd32(slot + 4)), b.size());
+        std::memset(b.data(), 0, 4); // status: disponível
+        const uint32_t kb = (uint32_t)((total + 1023) / 1024);
+        std::memcpy(b.data() + 0x308, &kb, 4); // sizeKB
+        const std::time_t now = std::time(nullptr);
+        std::tm t{};
+        localtime_s(&t, &now);
+        const uint16_t dt[6] = {(uint16_t)(t.tm_year + 1900), (uint16_t)(t.tm_mon + 1), (uint16_t)t.tm_mday,
+                                (uint16_t)t.tm_hour, (uint16_t)t.tm_min, (uint16_t)t.tm_sec};
+        std::memcpy(b.data() + 0x30C, dt, sizeof dt); // modifiedTime
+        const std::string sf = slot_file(rd32(slot));
+        std::filesystem::create_directories(std::filesystem::path(sf).parent_path(), ec);
+        if (FILE *f = fopen(sf.c_str(), "wb")) {
+            fwrite(b.data(), 1, b.size(), f);
+            fclose(f);
+        }
+    }
     if (arg(ctx, 4)) wr32(arg(ctx, 4), 0);
     ret(ctx, SCE_OK);
 }
