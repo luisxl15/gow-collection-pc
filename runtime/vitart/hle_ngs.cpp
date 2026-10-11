@@ -82,6 +82,7 @@ struct Voice {
     // Fonte: posição nos buffers do jogo e PCM decodificado (estéreo float) à espera de sair.
     int32_t cur_buffer = 0, byte_pos = 0, loops = 0;
     int32_t samples_since_key_on = 0, bytes_since_key_on = 0, samples_total = 0, bytes_total = 0;
+    int32_t src_ch = 2; // canais da fonte: as amostras geradas contam quadros entregues x canais (por grão)
     std::vector<float> pcm;
     size_t pcm_read = 0;
     double frac = 0.0;     // posição fracionária da reamostragem
@@ -286,7 +287,7 @@ bool decode_more(arc_ctx *ctx, std::unique_lock<std::mutex> &lock, Voice &v) {
             push_frames(v, pcm.data(), groups * 28, ch);
             v.byte_pos += groups * 16 * ch;
             v.bytes_since_key_on += groups * 16 * ch, v.bytes_total += groups * 16 * ch;
-            v.samples_since_key_on += groups * 28 * ch, v.samples_total += groups * 28 * ch;
+            v.src_ch = ch;
             return true;
         }
         const int frames = (std::min)((b.bytes - v.byte_pos) / (2 * ch), 4096);
@@ -297,7 +298,7 @@ bool decode_more(arc_ctx *ctx, std::unique_lock<std::mutex> &lock, Voice &v) {
         push_frames(v, ptr<int16_t>(b.ptr + v.byte_pos), frames, ch);
         v.byte_pos += frames * 2 * ch;
         v.bytes_since_key_on += frames * 2 * ch, v.bytes_total += frames * 2 * ch;
-        v.samples_since_key_on += frames * ch, v.samples_total += frames * ch;
+        v.src_ch = ch;
         return true;
     }
 
@@ -361,7 +362,7 @@ bool decode_more(arc_ctx *ctx, std::unique_lock<std::mutex> &lock, Voice &v) {
     }
     if (count > start) push_frames(v, sf.data() + (size_t)start * ci.channels, count - start, ci.channels);
     v.bytes_since_key_on += ci.superframeSize, v.bytes_total += ci.superframeSize;
-    v.samples_since_key_on += (count - start) * ci.channels, v.samples_total += (count - start) * ci.channels;
+    v.src_ch = ci.channels;
     return true;
 }
 
@@ -439,6 +440,11 @@ bool render_source(arc_ctx *ctx, std::unique_lock<std::mutex> &lock, Voice &v) {
     }
     const size_t used = (std::min)((size_t)v.frac, avail());
     v.pcm_read += used;
+    // Amostras geradas avançam por grão, como no NGS real: contar na decodificação (em rajadas de
+    // 1024+ quadros) deixava o contador parado em metade das atualizações, e o leitor de stream do
+    // jogo (sub_811333f2) devolvia 0, zerava a posição anterior e na seguinte limitava o avanço a
+    // 480000 ("locationDelta is too big"), adiantando o stream.
+    v.samples_since_key_on += (int32_t)used * v.src_ch, v.samples_total += (int32_t)used * v.src_ch;
     v.frac -= (double)used;
     if (v.pcm_read > 8192) { // compacta (guarda uma amostra para a interpolação cúbica)
         v.pcm.erase(v.pcm.begin(), v.pcm.begin() + (ptrdiff_t)(v.pcm_read - 1) * 2);

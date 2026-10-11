@@ -755,19 +755,23 @@ VT_HLE(sceGxmShaderPatcherCreateVertexProgram) {
     // (patcher, programId, attributes, attributeCount, streams, streamCount, SceGxmVertexProgram **out)
     const uint32_t id = arg(ctx, 1), out = arg(ctx, 6);
     if (!id || !out) return ret(ctx, GXM_ERROR_INVALID_POINTER);
-    auto vp = std::make_shared<VertexProgram>();
-    vp->program = rd32(id);
-    vp->attr_count = arg(ctx, 3);
-    vp->stream_count = arg(ctx, 5);
-    if (arg(ctx, 2)) vp->attributes.assign(ptr<uint8_t>(arg(ctx, 2)), ptr<uint8_t>(arg(ctx, 2)) + 8 * vp->attr_count);
-    if (arg(ctx, 4)) vp->streams.assign(ptr<uint8_t>(arg(ctx, 4)), ptr<uint8_t>(arg(ctx, 4)) + 4 * vp->stream_count);
-    // Como o patcher real: a mesma combinação devolve o mesmo programa (o jogo pede a cada uso).
-    std::string key(reinterpret_cast<const char *>(&vp->program), 4);
-    key.append(vp->attributes.begin(), vp->attributes.end()).push_back('|');
-    key.append(vp->streams.begin(), vp->streams.end());
+    // Como o patcher real: a mesma combinação devolve o mesmo programa (o jogo pede a cada uso, então
+    // a chave é montada direto da memória do guest e o objeto só é criado na falta).
+    const uint32_t program = rd32(id), attr_count = arg(ctx, 3), stream_count = arg(ctx, 5);
+    thread_local std::string key;
+    key.assign(reinterpret_cast<const char *>(&program), 4);
+    if (arg(ctx, 2)) key.append(ptr<char>(arg(ctx, 2)), 8 * attr_count);
+    key.push_back('|');
+    if (arg(ctx, 4)) key.append(ptr<char>(arg(ctx, 4)), 4 * stream_count);
     const std::lock_guard<std::mutex> lock(g_gxm_mutex);
     uint32_t &h = g_vprog_cache[key];
     if (!h) {
+        auto vp = std::make_shared<VertexProgram>();
+        vp->program = program;
+        vp->attr_count = attr_count;
+        vp->stream_count = stream_count;
+        if (arg(ctx, 2)) vp->attributes.assign(ptr<uint8_t>(arg(ctx, 2)), ptr<uint8_t>(arg(ctx, 2)) + 8 * attr_count);
+        if (arg(ctx, 4)) vp->streams.assign(ptr<uint8_t>(arg(ctx, 4)), ptr<uint8_t>(arg(ctx, 4)) + 4 * stream_count);
         h = new_object(0x20, "gxm:vertex-program");
         wr32(h, vp->program);
         g_vprogs[h] = vp;
@@ -779,20 +783,19 @@ VT_HLE(sceGxmShaderPatcherCreateFragmentProgram) {
     // (patcher, programId, outputFormat, multisampleMode, blendInfo, vertexProgram, SceGxmFragmentProgram **out)
     const uint32_t id = arg(ctx, 1), out = arg(ctx, 6);
     if (!id || !out) return ret(ctx, GXM_ERROR_INVALID_POINTER);
-    auto fp = std::make_shared<FragmentProgram>();
-    fp->program = rd32(id);
-    fp->output_format = arg(ctx, 2);
-    fp->msaa = arg(ctx, 3);
-    if (arg(ctx, 4)) fp->blend.assign(ptr<uint8_t>(arg(ctx, 4)), ptr<uint8_t>(arg(ctx, 4)) + 4); // SceGxmBlendInfo: 4 bytes
-    fp->vertex_program = arg(ctx, 5) ? rd32(arg(ctx, 5)) : 0;
-    std::string key(reinterpret_cast<const char *>(&fp->program), 4);
-    key.append(reinterpret_cast<const char *>(&fp->output_format), 4);
-    key.append(reinterpret_cast<const char *>(&fp->msaa), 4);
-    key.append(reinterpret_cast<const char *>(&fp->vertex_program), 4);
-    key.append(fp->blend.begin(), fp->blend.end());
+    const uint32_t f[4] = {rd32(id), arg(ctx, 2), arg(ctx, 3), arg(ctx, 5) ? rd32(arg(ctx, 5)) : 0};
+    thread_local std::string key;
+    key.assign(reinterpret_cast<const char *>(f), sizeof f);
+    if (arg(ctx, 4)) key.append(ptr<char>(arg(ctx, 4)), 4); // SceGxmBlendInfo: 4 bytes
     const std::lock_guard<std::mutex> lock(g_gxm_mutex);
     uint32_t &h = g_fprog_cache[key];
     if (!h) {
+        auto fp = std::make_shared<FragmentProgram>();
+        fp->program = f[0];
+        fp->output_format = f[1];
+        fp->msaa = f[2];
+        if (arg(ctx, 4)) fp->blend.assign(ptr<uint8_t>(arg(ctx, 4)), ptr<uint8_t>(arg(ctx, 4)) + 4);
+        fp->vertex_program = f[3];
         h = new_object(0x20, "gxm:fragment-program");
         wr32(h, fp->program);
         g_fprogs[h] = fp;
@@ -1077,7 +1080,8 @@ VT_HLE(sceGxmSetUniformDataF) {
         const uint32_t base = buf + 4 * (rd32(param + 12) + off);
         std::memcpy(ptr<uint8_t>(base), ptr<uint8_t>(src), 4 * n);
     }
-    if (std::getenv("VITART_TRACE_UNIFORMS")) {
+    static const bool trace_uniforms = std::getenv("VITART_TRACE_UNIFORMS") != nullptr; // getenv é caro: 1x
+    if (trace_uniforms) {
         // Diagnóstico: quem envia cada uniform (uma linha por par chamador/nome).
         static std::mutex mu;
         static std::set<std::pair<uint32_t, std::string>> seen;

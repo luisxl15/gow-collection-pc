@@ -4,6 +4,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <mmsystem.h>
 
 #include <algorithm>
 #include <chrono>
@@ -577,8 +578,86 @@ Thread *create_thread(const char *name, uint32_t entry, int priority, uint32_t s
     return raw;
 }
 
+// ================================================================ perfilador
+// VITART_PROF=1: amostra a cada 1 ms o RIP de cada thread do guest que gastou CPU desde a amostra anterior
+// (thread parada em espera não conta) e grava prof.txt a cada 10 s: "amostras módulo+rva thread".
+// Os RVAs da DLL do jogo viram funções com tools/prof_resolve.py e o mapa do lld-link.
+static std::mutex g_prof_mutex;
+struct ProfThread { HANDLE h; std::string name; ULONG64 cycles = 0; };
+static std::vector<ProfThread> g_prof_threads;
+
+static void prof_register(const Thread *t) {
+    static const bool on = getenv("VITART_PROF") != nullptr;
+    if (!on) return;
+    HANDLE h = nullptr;
+    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h,
+                    THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, 0);
+    const std::lock_guard<std::mutex> lock(g_prof_mutex);
+    g_prof_threads.push_back({h, t->name});
+}
+
+static void prof_start() {
+    if (!getenv("VITART_PROF")) return;
+    std::thread([] {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+        timeBeginPeriod(1);
+        std::map<std::pair<std::string, uint64_t>, uint64_t> hist; // (thread, rip) -> amostras
+        std::map<std::string, uint64_t> busy;
+        uint64_t ticks = 0;
+        auto last = std::chrono::steady_clock::now();
+        for (;;) {
+            Sleep(1);
+            ticks++;
+            {
+                const std::lock_guard<std::mutex> lock(g_prof_mutex);
+                for (ProfThread &pt : g_prof_threads) {
+                    ULONG64 c = 0;
+                    QueryThreadCycleTime(pt.h, &c);
+                    const ULONG64 d = c - pt.cycles;
+                    pt.cycles = c;
+                    if (d < 200000) continue; // menos de ~5% de 1 ms: dormindo
+                    if (SuspendThread(pt.h) == (DWORD)-1) continue;
+                    CONTEXT cx{};
+                    cx.ContextFlags = CONTEXT_CONTROL;
+                    if (GetThreadContext(pt.h, &cx)) hist[{pt.name, cx.Rip}]++;
+                    ResumeThread(pt.h);
+                    busy[pt.name]++;
+                }
+            }
+            if (std::chrono::steady_clock::now() - last < std::chrono::seconds(10)) continue;
+            last = std::chrono::steady_clock::now();
+            // Agrega por módulo+RVA e grava.
+            std::map<std::string, uint64_t> agg;
+            for (auto &kv : hist) {
+                HMODULE m = nullptr;
+                char mod[MAX_PATH] = "?";
+                uint64_t rva = kv.first.second;
+                if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                       (LPCSTR)kv.first.second, &m) && m) {
+                    GetModuleFileNameA(m, mod, sizeof mod);
+                    rva -= (uint64_t)m;
+                }
+                const char *b = std::strrchr(mod, '\\');
+                char key[MAX_PATH + 96];
+                std::snprintf(key, sizeof key, "%s+%llx %s", b ? b + 1 : mod, (unsigned long long)rva, kv.first.first.c_str());
+                agg[key] += kv.second;
+            }
+            std::vector<std::pair<uint64_t, std::string>> v;
+            for (auto &kv : agg) v.push_back({kv.second, kv.first});
+            std::sort(v.rbegin(), v.rend());
+            if (FILE *f = fopen("prof.txt", "w")) {
+                fprintf(f, "# ticks %llu\n", (unsigned long long)ticks);
+                for (auto &kv : busy) fprintf(f, "# thread %s %llu\n", kv.first.c_str(), (unsigned long long)kv.second);
+                for (auto &e : v) fprintf(f, "%llu %s\n", (unsigned long long)e.first, e.second.c_str());
+                fclose(f);
+            }
+        }
+    }).detach();
+}
+
 static void thread_main(Thread *t, uint32_t arglen, uint32_t argp) {
     t_current = t;
+    prof_register(t);
     t->state = 1;
     arc_ctx *ctx = &t->ctx;
     ctx->r[0] = arglen;
@@ -618,6 +697,7 @@ Thread *spawn_host_thread(const char *name, std::function<void(Thread *)> body) 
         fatal("sem memória para a thread %s", name);
     std::thread([t, body = std::move(body)] {
         t_current = t;
+        prof_register(t);
         t->state = 1;
         t->ctx.r[14] = 0xFFFFFFF1u;
         body(t);
@@ -698,6 +778,7 @@ int main(int argc, char **argv) {
             }
     }
     g_strict = getenv("VITART_STRICT") != nullptr;
+    prof_start();
 
     mem_init();
     for (const std::string &d : dlls)
