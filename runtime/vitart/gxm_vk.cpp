@@ -1156,6 +1156,11 @@ bool draw(const Draw &d) {
     // Viewport do GXM: tela = deslocamento + escala * ndc. No Vulkan, x = desl - escala, largura = 2 * escala
     // (altura negativa inverte y, como a escala negativa do GXM).
     VkViewport vp{d.vps[0] - d.vps[1], d.vps[2] - d.vps[3], 2 * d.vps[1], 2 * d.vps[3], d.vps[4], d.vps[4] + d.vps[5]};
+    // O jogo conta com o centro do pixel em coordenada inteira (como o D3D9); no Vulkan ele fica em +0,5.
+    // Sem compensar, toda passada de tela cheia lê entre texels: o quadro borra e a máscara de névoa
+    // vaza 1 px além dos personagens (o contorno escuro). Medido no replay: +0,5 deixa nítido e sem halo.
+    static const float halfpix = getenv("VITART_VK_HALFPIX") ? (float)std::atof(getenv("VITART_VK_HALFPIX")) : 0.5f;
+    vp.x += halfpix, vp.y += halfpix;
     vp.minDepth = vp.minDepth < 0 ? 0 : (vp.minDepth > 1 ? 1 : vp.minDepth);
     vp.maxDepth = vp.maxDepth < 0 ? 0 : (vp.maxDepth > 1 ? 1 : vp.maxDepth);
     vkCmdSetViewport(g_cmd, 0, 1, &vp);

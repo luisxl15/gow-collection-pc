@@ -119,6 +119,9 @@ int main(int argc, char **argv) {
         // REPLAY_SKIP_SHELL=1 (depuração): pula as cascas (stencil "diferente" sem escrita no stencil).
         static const bool skip_shell = getenv("REPLAY_SKIP_SHELL") != nullptr;
         if (skip_shell && d.stencil && d.front.func == 5 && d.front.wmask == 0) continue;
+        // REPLAY_ONLY=i (depuração): na última passada, só o desenho i.
+        static const int only = getenv("REPLAY_ONLY") ? std::atoi(getenv("REPLAY_ONLY")) : -1;
+        if (only >= 0 && pass == passes - 1 && (int)i != only) continue;
         const bool ok_draw = gvk::draw(d);
         if (d.debug_vs) {
             const auto &o = gvk::debug_vs_output();
