@@ -10,7 +10,7 @@ CC="${CC:-clang}"
 command -v "$CC" >/dev/null || CC="/c/Program Files/LLVM/bin/clang.exe"
 JOBS="${JOBS:-4}"
 export PYTHONPATH="$HERE/vitarecomp" PYTHONIOENCODING=utf-8 CC
-CFLAGS="-c -O1 -w -fwrapv -fno-strict-aliasing -ffp-contract=off -fno-math-errno -I $HERE/runtime/arm"
+CFLAGS="-c ${OPT:--O1} -w -fwrapv -fno-strict-aliasing -ffp-contract=off -fno-math-errno -I $HERE/runtime/arm"
 export CFLAGS
 
 python -P -m vitarecomp link "$PLAN" -o "$OUT/link.json"

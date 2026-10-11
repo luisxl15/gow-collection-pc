@@ -318,6 +318,9 @@ VT_HLE(sceDisplaySetFrameBuf) {
     ret(ctx, SCE_OK);
 }
 static void wait_vblank(uint32_t count) {
+    // VITART_NOVSYNC=1 (medição): sem espera de vblank, para ver o teto de quadros por segundo.
+    static const bool novsync = getenv("VITART_NOVSYNC") != nullptr;
+    if (novsync) return;
     const auto now = std::chrono::steady_clock::now();
     const auto n = (now - g_vblank0) / VBLANK;
     std::this_thread::sleep_until(g_vblank0 + VBLANK * (n + (count ? count : 1)));

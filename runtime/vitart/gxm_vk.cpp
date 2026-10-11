@@ -14,6 +14,7 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 
+#include <algorithm>
 #include <chrono>
 #include <mutex>
 
@@ -64,7 +65,6 @@ constexpr VkImageAspectFlags kDepthAspects = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAG
 Stats g_stats;
 VkQueryPool g_qpool = VK_NULL_HANDLE;
 double g_ts_period = 1.0; // ns por tique de timestamp
-bool g_ts_open = false;   // o command buffer de desenho atual tem o timestamp inicial
 uint64_t now_ns() {
     return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -133,19 +133,19 @@ struct Image {
     VkDeviceMemory mem = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
     VkImageView att_view = VK_NULL_HANDLE; // profundidade: vista de anexo (profundidade + stencil)
-    uint32_t w = 0, h = 0;
+    uint32_t w = 0, h = 0, mips = 1;
     VkFormat fmt = kColor;
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
 };
 
-bool make_image(Image &im, uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags usage) {
+bool make_image(Image &im, uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags usage, uint32_t mips = 1) {
     Timer tm(g_stats.alloc_ns);
-    im.w = w, im.h = h, im.fmt = fmt;
+    im.w = w, im.h = h, im.fmt = fmt, im.mips = mips;
     VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ci.imageType = VK_IMAGE_TYPE_2D;
     ci.format = fmt;
     ci.extent = {w, h, 1};
-    ci.mipLevels = 1;
+    ci.mipLevels = mips;
     ci.arrayLayers = 1;
     ci.samples = VK_SAMPLE_COUNT_1_BIT;
     ci.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -162,7 +162,7 @@ bool make_image(Image &im, uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFla
     vi.image = im.img;
     vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vi.format = fmt;
-    vi.subresourceRange = {(VkImageAspectFlags)(fmt == kDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), 0, 1, 0, 1};
+    vi.subresourceRange = {(VkImageAspectFlags)(fmt == kDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), 0, mips, 0, 1};
     VKC(vkCreateImageView(g_dev, &vi, nullptr, &im.view));
     if (fmt == kDepth) {
         vi.subresourceRange.aspectMask = kDepthAspects;
@@ -188,11 +188,20 @@ void barrier(Image &im, VkImageLayout to) {
     b.newLayout = to;
     b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.image = im.img;
-    b.subresourceRange = {(VkImageAspectFlags)(im.fmt == kDepth ? kDepthAspects : VK_IMAGE_ASPECT_COLOR_BIT), 0, 1, 0, 1};
+    b.subresourceRange = {(VkImageAspectFlags)(im.fmt == kDepth ? kDepthAspects : VK_IMAGE_ASPECT_COLOR_BIT), 0, im.mips, 0, 1};
     vkCmdPipelineBarrier(g_cur, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
                          nullptr, 1, &b);
     im.layout = to;
 }
+
+// Dois quadros em voo: cada vaga tem command buffer, fence, pool de descritores, metade do anel de
+// upload e um par de timestamps. A CPU grava uma vaga enquanto a GPU executa a outra.
+constexpr uint32_t kSlots = 2;
+VkCommandBuffer g_cmds[kSlots] = {};
+VkFence g_fences[kSlots] = {};
+VkDescriptorPool g_dpools[kSlots] = {};
+bool g_pend[kSlots] = {}, g_tsopen[kSlots] = {};
+uint32_t g_fi = 0; // vaga atual
 
 bool begin_cmd() {
     VKC(vkResetCommandBuffer(g_cmd, 0));
@@ -200,8 +209,8 @@ bool begin_cmd() {
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VKC(vkBeginCommandBuffer(g_cmd, &bi));
     if (g_qpool) {
-        vkCmdResetQueryPool(g_cmd, g_qpool, 0, 2);
-        vkCmdWriteTimestamp(g_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_qpool, 0);
+        vkCmdResetQueryPool(g_cmd, g_qpool, 2 * g_fi, 2);
+        vkCmdWriteTimestamp(g_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_qpool, 2 * g_fi);
     }
     return true;
 }
@@ -225,12 +234,12 @@ struct Target {
 std::map<uint32_t, Target> g_targets;
 
 // ------------------------------------------------------------- quadro em gravação
-bool g_recording = false, g_pending = false;
+bool g_recording = false;
 Target *g_open = nullptr; // alvo com render pass aberto
 Buffer g_ring;
 uint8_t *g_ring_ptr = nullptr;
-VkDeviceSize g_ring_off = 0, g_ssbo_align = 256;
-constexpr VkDeviceSize kRingSize = 256ull << 20;
+VkDeviceSize g_ring_off = 0, g_ring_base = 0, g_ssbo_align = 256;
+constexpr VkDeviceSize kRingSize = 256ull << 20, kRingHalf = kRingSize / kSlots;
 VkDescriptorPool g_dpool = VK_NULL_HANDLE;
 uint32_t g_draws_in_frame = 0;
 constexpr uint32_t kMaxDrawsPerFrame = 2048;
@@ -247,29 +256,46 @@ void end_pass() {
     }
 }
 
-bool frame_wait() {
-    if (g_pending) {
-        {
-            Timer tm(g_stats.wait_ns);
-            VKC(vkWaitForFences(g_dev, 1, &g_fence, VK_TRUE, UINT64_MAX));
-        }
-        if (g_ts_open) {
-            uint64_t ts[2] = {};
-            if (vkGetQueryPoolResults(g_dev, g_qpool, 0, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS &&
-                ts[1] > ts[0])
-                g_stats.gpu_ns += (uint64_t)((ts[1] - ts[0]) * g_ts_period);
-            g_ts_open = false;
-        }
-        g_pending = false;
-        for (auto &im : g_transient) destroy(im);
-        g_transient.clear();
+bool slot_wait(uint32_t i) {
+    if (!g_pend[i]) return true;
+    {
+        Timer tm(g_stats.wait_ns);
+        VKC(vkWaitForFences(g_dev, 1, &g_fences[i], VK_TRUE, UINT64_MAX));
     }
+    if (g_tsopen[i]) {
+        uint64_t ts[2] = {};
+        if (vkGetQueryPoolResults(g_dev, g_qpool, 2 * i, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS &&
+            ts[1] > ts[0])
+            g_stats.gpu_ns += (uint64_t)((ts[1] - ts[0]) * g_ts_period);
+        g_tsopen[i] = false;
+    }
+    g_pend[i] = false;
+    return true;
+}
+
+void select_slot(uint32_t i) {
+    g_fi = i;
+    g_cmd = g_cur = g_cmds[i];
+    g_fence = g_fences[i];
+    g_dpool = g_dpools[i];
+    g_ring_base = (VkDeviceSize)i * kRingHalf;
+}
+
+// Espera as duas vagas (leitura de alvo, depuração, encerramento).
+bool frame_wait() {
+    for (uint32_t i = 0; i < kSlots; i++)
+        if (!slot_wait(i)) return false;
+    for (auto &im : g_transient) destroy(im);
+    g_transient.clear();
     return true;
 }
 
 bool frame_begin() {
     if (g_recording) return true;
-    if (!frame_wait()) return false;
+    // Próxima vaga: só espera o quadro que a usou por último (o de dois quadros atrás).
+    const uint32_t next = (g_fi + 1) % kSlots;
+    if (!slot_wait(next)) return false;
+    select_slot(next);
     // A GPU terminou tudo: texturas sem uso há muitos quadros saem (o vídeo gera uma por quadro).
     if (++g_frame_no % 64 == 0)
         for (auto it = g_textures.begin(); it != g_textures.end();) {
@@ -293,8 +319,8 @@ bool frame_begin() {
 bool frame_flush(bool wait) {
     if (g_recording) {
         end_pass();
-        if (g_qpool) vkCmdWriteTimestamp(g_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_qpool, 1);
-        g_ts_open = g_qpool != VK_NULL_HANDLE;
+        if (g_qpool) vkCmdWriteTimestamp(g_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_qpool, 2 * g_fi + 1);
+        g_tsopen[g_fi] = g_qpool != VK_NULL_HANDLE;
         VKC(vkEndCommandBuffer(g_cmd));
         VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         si.commandBufferCount = 1;
@@ -302,7 +328,7 @@ bool frame_flush(bool wait) {
         VKC(vkResetFences(g_dev, 1, &g_fence));
         VKC(vkQueueSubmit(g_queue, 1, &si, g_fence));
         g_stats.submits++;
-        g_pending = true;
+        g_pend[g_fi] = true;
         g_recording = false;
     }
     return !wait || frame_wait();
@@ -310,19 +336,19 @@ bool frame_flush(bool wait) {
 
 // Garante espaço no anel e no pool para um desenho; se faltar, fecha o quadro e começa outro.
 bool frame_reserve(VkDeviceSize bytes) {
-    if (bytes > kRingSize) {
+    if (bytes > kRingHalf) {
         g_err = "upload maior que o anel";
         return false;
     }
     if (!frame_begin()) return false;
-    if (g_ring_off + bytes <= kRingSize && g_draws_in_frame < kMaxDrawsPerFrame) return true;
-    return frame_flush(true) && frame_begin();
+    if (g_ring_off + bytes <= kRingHalf && g_draws_in_frame < kMaxDrawsPerFrame) return true;
+    return frame_flush(false) && frame_begin();
 }
 
 VkDeviceSize ring_put(const void *data, VkDeviceSize n, VkDeviceSize align) {
     Timer tm(g_stats.ring_ns);
     g_ring_off = (g_ring_off + align - 1) & ~(align - 1);
-    const VkDeviceSize at = g_ring_off, len = n ? n : 16;
+    const VkDeviceSize at = g_ring_base + g_ring_off, len = n ? n : 16;
     if (data && n)
         std::memcpy(g_ring_ptr + at, data, n);
     else
@@ -398,7 +424,9 @@ VkSamplerAddressMode addr_mode(uint32_t m) {
     }
 }
 VkSampler sampler_for(const Texture &t) {
-    const uint32_t key = (t.mag & 1) | (t.min & 1) << 1 | (t.addr_u & 7) << 2 | (t.addr_v & 7) << 5;
+    const bool mipped = t.mip_count != 0 && t.rgba;
+    const uint32_t key = (t.mag & 1) | (t.min & 1) << 1 | (t.addr_u & 7) << 2 | (t.addr_v & 7) << 5 |
+                         (mipped ? 1u : 0u) << 8 | (t.mip_filter & 1) << 9 | (uint32_t)(t.lod_bias & 63) << 10;
     auto it = g_samplers.find(key);
     if (it != g_samplers.end()) return it->second;
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -408,15 +436,38 @@ VkSampler sampler_for(const Texture &t) {
     sci.addressModeV = addr_mode(t.addr_v);
     sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
-    sci.maxLod = 0.25f;
+    sci.maxLod = mipped ? VK_LOD_CLAMP_NONE : 0.25f;
+    sci.mipmapMode = (t.mip_filter & 1) ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sci.mipLodBias = mipped ? ((float)(t.lod_bias & 63) - 31.f) / 8.f : 0.f;
     VkSampler smp = VK_NULL_HANDLE;
     if (vkCreateSampler(g_dev, &sci, nullptr, &smp) != VK_SUCCESS) smp = g_sampler;
     return g_samplers[key] = smp;
 }
 
 // Grava o envio no quadro atual (o chamador já reservou os bytes no anel).
-bool upload_texture(Image &im, uint32_t w, uint32_t h, const uint8_t *rgba) {
-    if (!make_image(im, w, h, kColor, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+// Barreira de um único nível (geração de mipmaps).
+void level_barrier(Image &im, uint32_t level, VkImageLayout from, VkImageLayout to) {
+    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    b.oldLayout = from;
+    b.newLayout = to;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = im.img;
+    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1};
+    vkCmdPipelineBarrier(g_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+}
+
+uint32_t mip_levels(uint32_t w, uint32_t h) {
+    uint32_t n = 1;
+    while ((w | h) >> n) n++;
+    return n;
+}
+
+bool upload_texture(Image &im, uint32_t w, uint32_t h, const uint8_t *rgba, bool mipmapped = false) {
+    const uint32_t mips = mipmapped ? mip_levels(w, h) : 1;
+    if (!make_image(im, w, h, kColor,
+                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, mips))
         return false;
     g_stats.uploads++;
     const VkDeviceSize at = ring_put(rgba, (VkDeviceSize)w * h * 4, 16);
@@ -427,6 +478,21 @@ bool upload_texture(Image &im, uint32_t w, uint32_t h, const uint8_t *rgba) {
     c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     c.imageExtent = {w, h, 1};
     vkCmdCopyBufferToImage(g_cmd, g_ring.buf, im.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+    // Níveis seguintes por redução linear do anterior; ao fim todos ficam TRANSFER_SRC.
+    for (uint32_t l = 1; l < mips; l++) {
+        level_barrier(im, l - 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        VkImageBlit bl{};
+        bl.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l - 1, 0, 1};
+        bl.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1};
+        bl.srcOffsets[1] = {(int32_t)std::max(1u, w >> (l - 1)), (int32_t)std::max(1u, h >> (l - 1)), 1};
+        bl.dstOffsets[1] = {(int32_t)std::max(1u, w >> l), (int32_t)std::max(1u, h >> l), 1};
+        vkCmdBlitImage(g_cmd, im.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, im.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl,
+                       VK_FILTER_LINEAR);
+    }
+    if (mips > 1) {
+        level_barrier(im, mips - 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        im.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    }
     barrier(im, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     return true;
 }
@@ -643,6 +709,18 @@ static bool create_window() {
     ci.preTransform = caps.currentTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    // VITART_NOVSYNC=1 (medição): apresenta sem esperar o monitor (mailbox, ou imediato).
+    if (getenv("VITART_NOVSYNC")) {
+        uint32_t nm = 0;
+        vkGetPhysicalDeviceSurfacePresentModesKHR(g_phys, g_surface, &nm, nullptr);
+        std::vector<VkPresentModeKHR> modes(nm);
+        vkGetPhysicalDeviceSurfacePresentModesKHR(g_phys, g_surface, &nm, modes.data());
+        for (VkPresentModeKHR m : {VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR})
+            if (std::find(modes.begin(), modes.end(), m) != modes.end()) {
+                ci.presentMode = m;
+                break;
+            }
+    }
     ci.clipped = VK_TRUE;
     VKC(vkCreateSwapchainKHR(g_dev, &ci, nullptr, &g_swap));
     uint32_t ni = 0;
@@ -808,11 +886,11 @@ bool init(bool validation, bool window) {
     cai.commandPool = g_pool;
     cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cai.commandBufferCount = 1;
-    VKC(vkAllocateCommandBuffers(g_dev, &cai, &g_cmd));
+    for (auto &cb : g_cmds) VKC(vkAllocateCommandBuffers(g_dev, &cai, &cb));
     VKC(vkAllocateCommandBuffers(g_dev, &cai, &g_pcmd));
     g_cur = g_cmd;
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    VKC(vkCreateFence(g_dev, &fci, nullptr, &g_fence));
+    for (auto &f : g_fences) VKC(vkCreateFence(g_dev, &fci, nullptr, &f));
     VkFenceCreateInfo pfci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     pfci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
     VKC(vkCreateFence(g_dev, &pfci, nullptr, &g_pfence));
@@ -822,7 +900,7 @@ bool init(bool validation, bool window) {
         g_ts_period = pp.limits.timestampPeriod;
         VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
         qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        qi.queryCount = 2;
+        qi.queryCount = 2 * kSlots;
         if (pp.limits.timestampComputeAndGraphics && vkCreateQueryPool(g_dev, &qi, nullptr, &g_qpool) != VK_SUCCESS)
             g_qpool = VK_NULL_HANDLE;
     }
@@ -915,7 +993,8 @@ bool init(bool validation, bool window) {
         dpi.maxSets = 3 * kMaxDrawsPerFrame;
         dpi.poolSizeCount = 2;
         dpi.pPoolSizes = ps;
-        VKC(vkCreateDescriptorPool(g_dev, &dpi, nullptr, &g_dpool));
+        for (auto &dp : g_dpools) VKC(vkCreateDescriptorPool(g_dev, &dpi, nullptr, &dp));
+        select_slot(0);
     }
     // A janela nasce na primeira apresentação: as mensagens só chegam à thread que a criou, e quem
     // apresenta é a thread de vídeo, não a que inicializa.
@@ -1015,7 +1094,7 @@ bool draw(const Draw &d) {
         auto it = g_textures.find(h);
         if (it == g_textures.end()) {
             Image im;
-            if (!upload_texture(im, t.width, t.height, t.rgba)) return false;
+            if (!upload_texture(im, t.width, t.height, t.rgba, t.mip_count != 0 && t.width > 1 && t.height > 1)) return false;
             it = g_textures.emplace(h, im).first;
         }
         img_info[t.binding].imageView = it->second.view;
@@ -1152,7 +1231,7 @@ void shutdown() {
     if (!g_dev) return;
     frame_flush(true);
     vkDeviceWaitIdle(g_dev);
-    vkDestroyDescriptorPool(g_dev, g_dpool, nullptr);
+    for (auto dp : g_dpools) vkDestroyDescriptorPool(g_dev, dp, nullptr);
     vkUnmapMemory(g_dev, g_ring.mem);
     destroy(g_ring);
     if (g_swap) vkDestroySwapchainKHR(g_dev, g_swap, nullptr);
@@ -1175,7 +1254,7 @@ void shutdown() {
     vkDestroyPipelineLayout(g_dev, g_layout, nullptr);
     for (auto l : g_dsl) vkDestroyDescriptorSetLayout(g_dev, l, nullptr);
     vkDestroyRenderPass(g_dev, g_rp, nullptr);
-    vkDestroyFence(g_dev, g_fence, nullptr);
+    for (auto f : g_fences) vkDestroyFence(g_dev, f, nullptr);
     vkDestroyFence(g_dev, g_pfence, nullptr);
     if (g_qpool) vkDestroyQueryPool(g_dev, g_qpool, nullptr);
     vkDestroyCommandPool(g_dev, g_pool, nullptr);

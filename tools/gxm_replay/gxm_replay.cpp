@@ -104,6 +104,8 @@ int main(int argc, char **argv) {
             const uint32_t w0 = r.u32();
             tx.addr_v = (uint8_t)((w0 >> 3) & 7), tx.addr_u = (uint8_t)((w0 >> 6) & 7);
             tx.min = (uint8_t)((w0 >> 10) & 3), tx.mag = (uint8_t)((w0 >> 12) & 3);
+            tx.mip_filter = (uint8_t)((w0 >> 9) & 1), tx.mip_count = (uint8_t)((w0 >> 17) & 15);
+            tx.lod_bias = (uint8_t)((w0 >> 21) & 63);
             tx.depth = kind == 2;
             if (kind == 0) tx.rgba = r.bytes((size_t)tx.width * tx.height * 4);
             d.textures.push_back(tx);

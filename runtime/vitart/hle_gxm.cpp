@@ -432,6 +432,9 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
         // Palavra 0: endereçamento v em 3..5, u em 6..8, filtro de minificação em 10..11, de magnificação em 12..13.
         t.addr_v = (uint8_t)((w[0] >> 3) & 7), t.addr_u = (uint8_t)((w[0] >> 6) & 7);
         t.min = (uint8_t)((w[0] >> 10) & 3), t.mag = (uint8_t)((w[0] >> 12) & 3);
+        // mip_filter no bit 9, número de níveis em 17..20, lod bias em 21..26.
+        t.mip_filter = (uint8_t)((w[0] >> 9) & 1), t.mip_count = (uint8_t)((w[0] >> 17) & 15);
+        t.lod_bias = (uint8_t)((w[0] >> 21) & 63);
         t.width = info.width, t.height = info.height;
         if (gvk::is_target(info.data)) {
             t.target_addr = info.data;

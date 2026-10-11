@@ -24,6 +24,9 @@ struct Texture {
     // Amostragem pedida pelo jogo (palavra 0 do SceGxmTexture): SceGxmTextureFilter (0 ponto, 1 linear)
     // e SceGxmTextureAddrMode de u e v.
     uint8_t mag = 1, min = 1, addr_u = 0, addr_v = 0;
+    // Mipmaps: o jogo declara níveis (mip_count > 0) e o filtro entre eles; os níveis são gerados
+    // aqui a partir do nível 0. lod_bias é o campo cru de 6 bits ((v - 31) / 8).
+    uint8_t mip_count = 0, mip_filter = 0, lod_bias = 31;
 };
 
 // Estado de stencil de uma face (valores do GXM já decodificados; mesma ordem do Vulkan).
