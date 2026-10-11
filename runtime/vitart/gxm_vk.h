@@ -36,6 +36,18 @@ struct Stencil {
     uint8_t cmask = 0xFF, wmask = 0xFF, ref = 0;
 };
 
+// Vértices crus (sem conversão na CPU): streams do jogo e atributos com o formato do GXM
+// (SceGxmAttributeFormat: 0 U8, 1 S8, 2 U16, 3 S16, 4 U8N, 5 S8N, 6 U16N, 7 S16N, 8 F16, 9 F32).
+struct VertexStream {
+    const uint8_t *data = nullptr;
+    uint32_t stride = 0, size = 0;
+};
+struct VertexAttr {
+    uint32_t location = 0, stream = 0, offset = 0, fmt = 9, comps = 4;
+};
+// O formato existe como entrada de vértice nesta GPU?
+bool vertex_format_ok(uint32_t fmt, uint32_t comps);
+
 struct Draw {
     uint32_t prim = 0, cull = 0;
     bool has_blend = false;
@@ -48,6 +60,9 @@ struct Draw {
     uint32_t target_addr = 0, target_w = 0, target_h = 0, depth_addr = 0;
     uint32_t vertex_count = 0, attr_count = 0;
     const float *attrs = nullptr; // [attr_count][vertex_count][4]
+    // Caminho cru: se raw_attrs não está vazio, attrs é ignorado (locations sem atributo ficam sem binding).
+    std::vector<VertexStream> raw_streams;
+    std::vector<VertexAttr> raw_attrs;
     const uint32_t *indices = nullptr;
     uint32_t index_count = 0;
     const uint8_t *vert_uniforms = nullptr; uint32_t vert_uniforms_size = 0;

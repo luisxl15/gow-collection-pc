@@ -592,11 +592,32 @@ VkStencilOpState stencil_state(const Stencil &st) {
     return o;
 }
 
+VkFormat vertex_format(uint32_t fmt, uint32_t comps) {
+    static const VkFormat t[10][4] = {
+        {VK_FORMAT_R8_USCALED, VK_FORMAT_R8G8_USCALED, VK_FORMAT_R8G8B8_USCALED, VK_FORMAT_R8G8B8A8_USCALED},
+        {VK_FORMAT_R8_SSCALED, VK_FORMAT_R8G8_SSCALED, VK_FORMAT_R8G8B8_SSCALED, VK_FORMAT_R8G8B8A8_SSCALED},
+        {VK_FORMAT_R16_USCALED, VK_FORMAT_R16G16_USCALED, VK_FORMAT_R16G16B16_USCALED, VK_FORMAT_R16G16B16A16_USCALED},
+        {VK_FORMAT_R16_SSCALED, VK_FORMAT_R16G16_SSCALED, VK_FORMAT_R16G16B16_SSCALED, VK_FORMAT_R16G16B16A16_SSCALED},
+        {VK_FORMAT_R8_UNORM, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8B8_UNORM, VK_FORMAT_R8G8B8A8_UNORM},
+        {VK_FORMAT_R8_SNORM, VK_FORMAT_R8G8_SNORM, VK_FORMAT_R8G8B8_SNORM, VK_FORMAT_R8G8B8A8_SNORM},
+        {VK_FORMAT_R16_UNORM, VK_FORMAT_R16G16_UNORM, VK_FORMAT_R16G16B16_UNORM, VK_FORMAT_R16G16B16A16_UNORM},
+        {VK_FORMAT_R16_SNORM, VK_FORMAT_R16G16_SNORM, VK_FORMAT_R16G16B16_SNORM, VK_FORMAT_R16G16B16A16_SNORM},
+        {VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R16G16B16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT},
+        {VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT}};
+    if (fmt > 9 || comps < 1 || comps > 4) return VK_FORMAT_UNDEFINED;
+    return t[fmt][comps - 1];
+}
+
 VkPipeline pipeline(const Draw &d, VkShaderModule vs, VkShaderModule fs) {
     const uint32_t blend = d.has_blend ? d.blend : 0xFFFFFFFFu;
     const uint32_t depth = d.depth_func | (d.depth_write ? 8u : 0u);
     const uint32_t sten = stencil_used(d) ? (1u << 24 | stencil_bits(d.front) | stencil_bits(d.back) << 12) : 0;
-    auto key = std::make_tuple(vs, fs, d.attr_count, blend, depth, d.cull, sten);
+    // Layout dos vértices crus entra na chave (strides, e por atributo location/stream/offset/formato).
+    uint64_t layout = d.raw_attrs.empty() ? d.attr_count : 0x8000000000000000ull;
+    for (const VertexStream &st : d.raw_streams) layout = (layout ^ st.stride) * 1099511628211ull;
+    for (const VertexAttr &a : d.raw_attrs)
+        layout = (layout ^ (a.location | a.stream << 5 | a.offset << 10 | a.fmt << 20 | a.comps << 25)) * 1099511628211ull;
+    auto key = std::make_tuple(vs, fs, layout, blend, depth, d.cull, sten);
     auto it = g_pipes.find(key);
     if (it != g_pipes.end()) return it->second;
     Timer tm(g_stats.pipe_ns);
@@ -605,16 +626,21 @@ VkPipeline pipeline(const Draw &d, VkShaderModule vs, VkShaderModule fs) {
     VkPipelineShaderStageCreateInfo st[2]{};
     st[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vs, "main"};
     st[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main"};
-    std::vector<VkVertexInputBindingDescription> binds(d.attr_count);
-    std::vector<VkVertexInputAttributeDescription> attrs(d.attr_count);
-    for (uint32_t k = 0; k < d.attr_count; k++) {
-        binds[k] = {k, 16, VK_VERTEX_INPUT_RATE_VERTEX};
-        attrs[k] = {k, k, VK_FORMAT_R32G32B32A32_SFLOAT, 0};
+    std::vector<VkVertexInputBindingDescription> binds;
+    std::vector<VkVertexInputAttributeDescription> attrs;
+    if (d.raw_attrs.empty()) {
+        for (uint32_t k = 0; k < d.attr_count; k++) {
+            binds.push_back({k, 16, VK_VERTEX_INPUT_RATE_VERTEX});
+            attrs.push_back({k, k, VK_FORMAT_R32G32B32A32_SFLOAT, 0});
+        }
+    } else {
+        for (uint32_t b = 0; b < d.raw_streams.size(); b++) binds.push_back({b, d.raw_streams[b].stride, VK_VERTEX_INPUT_RATE_VERTEX});
+        for (const VertexAttr &a : d.raw_attrs) attrs.push_back({a.location, a.stream, vertex_format(a.fmt, a.comps), a.offset});
     }
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    vi.vertexBindingDescriptionCount = d.attr_count;
+    vi.vertexBindingDescriptionCount = (uint32_t)binds.size();
     vi.pVertexBindingDescriptions = binds.data();
-    vi.vertexAttributeDescriptionCount = d.attr_count;
+    vi.vertexAttributeDescriptionCount = (uint32_t)attrs.size();
     vi.pVertexAttributeDescriptions = attrs.data();
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -687,6 +713,19 @@ VkPipeline pipeline(const Draw &d, VkShaderModule vs, VkShaderModule fs) {
 } // namespace
 
 const char *last_error() { return g_err.c_str(); }
+
+bool vertex_format_ok(uint32_t fmt, uint32_t comps) {
+    static int cache[10][5] = {};
+    const VkFormat f = vertex_format(fmt, comps);
+    if (f == VK_FORMAT_UNDEFINED || !g_phys) return false;
+    int &c = cache[fmt][comps];
+    if (!c) {
+        VkFormatProperties fp;
+        vkGetPhysicalDeviceFormatProperties(g_phys, f, &fp);
+        c = (fp.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) ? 1 : -1;
+    }
+    return c > 0;
+}
 
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_CLOSE) {
@@ -1082,8 +1121,14 @@ bool draw(const Draw &d) {
         g_err = "pipeline recusado";
         return false;
     }
-    const uint32_t na = d.attr_count < 16 ? d.attr_count : 16;
-    VkDeviceSize need = (VkDeviceSize)na * d.vertex_count * 16 + (VkDeviceSize)d.index_count * 4 + d.vert_uniforms_size +
+    const bool raw = !d.raw_attrs.empty();
+    const uint32_t na = raw ? (uint32_t)std::min<size_t>(d.raw_streams.size(), 16) : (d.attr_count < 16 ? d.attr_count : 16);
+    VkDeviceSize vbytes = 0;
+    if (raw)
+        for (const VertexStream &st : d.raw_streams) vbytes += st.size + 16;
+    else
+        vbytes = (VkDeviceSize)na * d.vertex_count * 16;
+    VkDeviceSize need = vbytes + (VkDeviceSize)d.index_count * 4 + d.vert_uniforms_size +
                         d.frag_uniforms_size + 64 * 1024;
     std::vector<uint64_t> keys(d.textures.size());
     for (size_t i = 0; i < d.textures.size(); i++) {
@@ -1173,7 +1218,8 @@ bool draw(const Draw &d) {
 
     VkDeviceSize voff[16];
     for (uint32_t k = 0; k < na; k++)
-        voff[k] = ring_put(d.attrs + (size_t)k * d.vertex_count * 4, (VkDeviceSize)d.vertex_count * 16, 16);
+        voff[k] = raw ? ring_put(d.raw_streams[k].data, d.raw_streams[k].size, 16)
+                      : ring_put(d.attrs + (size_t)k * d.vertex_count * 4, (VkDeviceSize)d.vertex_count * 16, 16);
     const VkDeviceSize ioff = ring_put(d.indices, (VkDeviceSize)d.index_count * 4, 4);
     const VkDeviceSize vuoff = ring_put(d.vert_uniforms, d.vert_uniforms_size, g_ssbo_align);
     const VkDeviceSize dbgoff = d.debug_vs ? ring_put(nullptr, (VkDeviceSize)d.vertex_count * 16, 4) : 0;

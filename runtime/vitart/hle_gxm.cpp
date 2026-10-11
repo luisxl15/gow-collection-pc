@@ -251,7 +251,7 @@ static uint64_t content_hash(const uint8_t *p, size_t n, uint64_t h) {
 }
 static uint64_t g_vk_draws = 0, g_vk_skipped = 0;
 // Tempo de CPU (ns) por etapa, zerado a cada relatório: onde o quadro gasta.
-static std::atomic<uint64_t> g_t_draw{0}, g_t_gvk{0}, g_t_present{0};
+static std::atomic<uint64_t> g_t_draw{0}, g_t_gvk{0}, g_t_present{0}, g_t_idx{0}, g_t_attr{0}, g_t_tex{0};
 static uint64_t now_ns() {
     return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -345,6 +345,7 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
         g_vk_skipped++;
         return;
     }
+    const uint64_t t_idx0 = now_ns();
     const uint32_t kind = prim >> 26; // 0 triângulos, 3 faixa, 4 leque (linhas e pontos ficam de fora)
     const uint32_t isz = (itype & 0x01000000u) ? 4 : 2;
     std::vector<uint32_t> idx(icount);
@@ -367,6 +368,8 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
     if (tris.empty() || maxi > (1u << 20)) return;
     const uint32_t nv = maxi + 1;
 
+    const uint64_t t_attr0 = now_ns();
+    g_t_idx += t_attr0 - t_idx0;
     // Atributos: location k = k-ésimo parâmetro de entrada (categoria 0), ligado pelo índice de recurso.
     std::vector<uint32_t> locs;
     const uint32_t nparams = rd32(vp->program + 0x24);
@@ -374,8 +377,52 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
         const uint32_t p = gxp_param(vp->program, i);
         if ((*ptr<uint8_t>(p + 4) & 15) == 0) locs.push_back(rd32(p + 12));
     }
-    std::vector<float> attrs(locs.size() * nv * 4, 0.0f);
-    for (size_t k = 0; k < locs.size(); k++)
+    // Caminho cru: os streams vão como estão e a GPU converte (formatos nativos de vértice). Só se cada
+    // location tem atributo com formato suportado; senão, conversão para vec4 na CPU como antes.
+    std::vector<gvk::VertexStream> raw_streams;
+    std::vector<gvk::VertexAttr> raw_attrs;
+    {
+        static const bool no_raw = getenv("VITART_VK_CPU_ATTRS") != nullptr;
+        bool ok = !no_raw && !locs.empty();
+        int binding_of[16];
+        uint32_t end_of[16] = {};
+        std::fill(std::begin(binding_of), std::end(binding_of), -1);
+        for (size_t k = 0; ok && k < locs.size(); k++) {
+            bool found = false;
+            for (uint32_t a = 0; a < vp->attr_count; a++) {
+                const uint8_t *d = &vp->attributes[8 * a];
+                const uint32_t st = d[0] | (d[1] << 8), off = d[2] | (d[3] << 8), fmt = d[4], comps = d[5], reg = d[6] | (d[7] << 8);
+                if (reg != locs[k] || st >= 16 || !c.streams[st]) continue;
+                const uint32_t nc = comps < 4 ? comps : 4;
+                if (!gvk::vertex_format_ok(fmt, nc)) break;
+                if (binding_of[st] < 0) {
+                    binding_of[st] = (int)raw_streams.size();
+                    gvk::VertexStream vs_;
+                    vs_.stride = *reinterpret_cast<const uint16_t *>(&vp->streams[4 * st]);
+                    vs_.data = ptr<uint8_t>(c.streams[st] + mini * vs_.stride);
+                    raw_streams.push_back(vs_);
+                }
+                end_of[st] = std::max(end_of[st], off + attr_size(fmt) * nc);
+                gvk::VertexAttr va;
+                va.location = (uint32_t)k, va.stream = (uint32_t)binding_of[st], va.offset = off, va.fmt = fmt, va.comps = nc;
+                raw_attrs.push_back(va);
+                found = true;
+                break;
+            }
+            ok = found;
+        }
+        if (ok) {
+            for (uint32_t st = 0; st < 16; st++)
+                if (binding_of[st] >= 0) {
+                    gvk::VertexStream &vs_ = raw_streams[binding_of[st]];
+                    vs_.size = (nv - 1) * vs_.stride + end_of[st];
+                }
+        } else {
+            raw_streams.clear(), raw_attrs.clear();
+        }
+    }
+    std::vector<float> attrs(raw_attrs.empty() ? locs.size() * nv * 4 : 0, 0.0f);
+    for (size_t k = 0; raw_attrs.empty() && k < locs.size(); k++)
         for (uint32_t a = 0; a < vp->attr_count; a++) {
             const uint8_t *d = &vp->attributes[8 * a];
             const uint32_t st = d[0] | (d[1] << 8), off = d[2] | (d[3] << 8), fmt = d[4], comps = d[5], reg = d[6] | (d[7] << 8);
@@ -393,6 +440,8 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
             break;
         }
 
+    const uint64_t t_tex0 = now_ns();
+    g_t_attr += t_tex0 - t_attr0;
     gvk::Draw d;
     d.prim = kind;
     d.cull = c.cull;
@@ -414,6 +463,8 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
     d.vertex_count = nv;
     d.attr_count = (uint32_t)locs.size();
     d.attrs = attrs.data();
+    d.raw_streams = std::move(raw_streams);
+    d.raw_attrs = std::move(raw_attrs);
     d.indices = tris.data();
     d.index_count = (uint32_t)tris.size();
     const uint32_t vsize = rd32(vp->program + 0x64) * 4, fsize = rd32(fp->program + 0x64) * 4;
@@ -464,6 +515,7 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
         d.textures.push_back(t);
     }
     const uint64_t tg = now_ns();
+    g_t_tex += tg - t_tex0;
     const bool drew = gvk::draw(d);
     g_t_gvk += now_ns() - tg;
     if (!drew)
@@ -499,6 +551,8 @@ void gxm_present(uint32_t fb) {
     if (frame % 120 == 0) {
         logf("vitart: tempo por quadro (média de 120): vk_draw %.1f ms (gvk::draw %.1f ms), apresentar %.1f ms",
              g_t_draw.exchange(0) / 120e6, g_t_gvk.exchange(0) / 120e6, g_t_present.exchange(0) / 120e6);
+        logf("vitart:   hle por quadro: índices %.1f ms, atributos %.1f ms, estado+texturas %.1f ms",
+             g_t_idx.exchange(0) / 120e6, g_t_attr.exchange(0) / 120e6, g_t_tex.exchange(0) / 120e6);
         const gvk::Stats s = gvk::take_stats();
         logf("vitart:   gvk por quadro: espera %.1f ms, GPU %.1f ms, imagens %.1f ms, pipelines %.1f ms, anel %.1f ms, "
              "descritores %.1f ms; %.1f envios, %.1f desenhos, %.1f cópias de alvo, %.1f texturas, %u pipelines novos",
