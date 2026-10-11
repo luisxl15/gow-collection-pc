@@ -207,3 +207,11 @@ desenhos. As manchas vêm de iluminação diferente entre partes (cor por vérti
 no shader). Se houver erro, está na semântica de alguma instrução desse caminho (interp e SPIR-V
 compartilham o rebaixamento), ou em uniforms de luz por desenho. Próximo passo: rodar só a parte de
 iluminação (o6/o8) no interp para duas partes vizinhas e conferir cada instrução (vdual, vpck, f16).
+
+Pista medida (11/10, 02:30): o desenho 71 sai muito mais claro (RGB médio 241/128) que 69/73/75 (≈75/22)
+com os mesmos shaders. Os uniforms dos três são iguais, exceto as palavras 22/23 e 30/31 do default
+uniform buffer (palavra 30: 0,155 / 1,97 / 0,083). `VITART_TRACE_UNIFORMS` mostra que `g_LightDir` é
+enviado como dois vec3 (offsets 0 e 3), e nenhum parâmetro cobre as palavras 22/23 e 30/31: são
+preenchimento com sobras do anel. Hipótese a testar: alguma instrução do caminho de iluminação (o6/o8)
+lê o 4º componente onde o hardware usa só 3 (swizzle/máscara de vec3), e o brilho passa a depender de
+lixo. Teste: zerar essas palavras no pacote e ver se as manchas somem; depois achar a instrução.
