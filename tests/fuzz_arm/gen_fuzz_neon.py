@@ -172,6 +172,22 @@ def instr(rng) -> str:
         if c == 4:
             return f"{rng.choice(['vrecpe', 'vrsqrte'])}.{rng.choice(['f32', 'u32'])} {R(rng)}, {R(rng)}"
         return f"{rng.choice(['vrecps', 'vrsqrts'])}.f32 {R(rng)}, {R(rng)}, {R(rng)}"
+    if k == 29 and rng.random() < 0.5:
+        # imediatos vetoriais (AdvSIMDExpandImm); o i64 com máscara de bytes ficou meses errado sem este caso
+        c = rng.randrange(6)
+        if c == 0:
+            mask = rng.randrange(256)
+            v = sum(0xFF << (8 * b) for b in range(8) if mask >> b & 1)
+            return f"vmov.i64 {R(rng)}, #{v:#x}"
+        if c == 1:
+            return f"{rng.choice(['vmov', 'vmvn'])}.i32 {R(rng)}, #{rng.randrange(256) << (8 * rng.randrange(4)):#x}"
+        if c == 2:
+            return f"{rng.choice(['vmov', 'vmvn'])}.i16 {R(rng)}, #{rng.randrange(256) << (8 * rng.randrange(2)):#x}"
+        if c == 3:
+            return f"vmov.i8 {R(rng)}, #{rng.randrange(256):#x}"
+        if c == 4:
+            return f"{rng.choice(['vorr', 'vbic'])}.i32 {R(rng)}, #{rng.randrange(1, 256) << (8 * rng.randrange(4)):#x}"
+        return f"vmov.f32 {R(rng)}, #{rng.choice(['1.0', '-2.0', '0.5', '0.125', '31.0', '-1.5'])}"
     # loads / stores on the buffer at r11 (+r10 small index)
     sz = rng.choice([8, 16, 32])
     n = rng.randint(1, 4)

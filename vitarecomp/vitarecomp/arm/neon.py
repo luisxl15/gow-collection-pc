@@ -188,7 +188,7 @@ class Neon:
                 ty = unsigned(self.dt if self.dt not in ("f32",) else "32")
                 val = f"({ty}){ops[1].imm & 0xFFFFFFFFFFFFFFFF:#x}ull"
                 if self.dt == "i64":
-                    val = f"{_expand_i64(ops[1].imm)}ull"
+                    val = f"{_expand_i64(bytes(self.cs.bytes))}ull"
             D = self.load(d, nd)
             L = nd * 64 // int(ty[4:-2])
             self.lines.append(f"for (int k = 0; k < {L}; k++) (({ty} *){D})[k] = {val};")
@@ -735,8 +735,26 @@ class _RegOp:
         self.reg = reg
 
 
-def _expand_i64(imm: int) -> str:
-    return f"{imm & 0xFFFFFFFFFFFFFFFF:#x}"
+def _expand_i64(raw: bytes) -> str:
+    """VMOV.I64 (op=1, cmode=1110): cada bit de imm8 vira um byte (AdvSIMDExpandImm).
+
+    O Capstone devolve esse imediato como 32 bits com sinal estendido (0x00000000ffffffff sai -1), então
+    imm8 = i:imm3:imm4 é lido da codificação. Thumb: i é o bit 12 da 1ª meia-palavra; ARM: o bit 24.
+    """
+    if len(raw) != 4:
+        raise NeonError("vmov.i64: codificação inesperada")
+    hw1, hw2 = int.from_bytes(raw[0:2], "little"), int.from_bytes(raw[2:4], "little")
+    if hw1 >> 13 == 0b111:  # Thumb: 111i 1111 1D00 0imm3 | Vd cmode 0Q op1 imm4
+        i, imm3, imm4 = (hw1 >> 12) & 1, hw1 & 7, hw2 & 0xF
+    else:  # ARM: 1111 001i 1D00 0imm3 Vd cmode 0Q op1 imm4
+        w = int.from_bytes(raw, "little")
+        i, imm3, imm4 = (w >> 24) & 1, (w >> 16) & 7, w & 0xF
+    imm8 = (i << 7) | (imm3 << 4) | imm4
+    v = 0
+    for b in range(8):
+        if imm8 >> b & 1:
+            v |= 0xFF << (8 * b)
+    return f"{v:#x}"
 
 
 def _shr(x, s, t, n):

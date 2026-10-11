@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -138,6 +139,8 @@ void dump_regions(const std::string &dir, uint32_t lo, uint32_t hi) {
 // cada escrita na faixa registra a função do guest e o valor anterior; o passo único religa a proteção.
 static uint32_t g_watch_addr = 0, g_watch_len = 0;
 static thread_local bool t_watch_rearm = false;
+static thread_local uint32_t t_watch_logged = 0; // endereço cuja escrita foi registrada (valor novo no passo único)
+static unsigned g_watch_max = 3;
 static std::mutex g_watch_mutex;
 static std::map<std::string, unsigned> g_watch_hits;
 
@@ -151,6 +154,10 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
     if (er->ExceptionCode == EXCEPTION_SINGLE_STEP && t_watch_rearm) {
         t_watch_rearm = false;
+        if (t_watch_logged) {
+            logf("vitart:   novo valor em 0x%08x: %08x", t_watch_logged, rd32(t_watch_logged & ~3u));
+            t_watch_logged = 0;
+        }
         watch_protect(true);
         return EXCEPTION_CONTINUE_EXECUTION;
     }
@@ -165,9 +172,14 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS *ep) {
             if (ga >= g_watch_addr && ga < g_watch_addr + g_watch_len) {
                 const std::string where = describe_host_pc(er->ExceptionAddress);
                 const std::lock_guard<std::mutex> lock(g_watch_mutex);
-                if (g_watch_hits[where]++ < 3)
+                if (g_watch_hits[where]++ < g_watch_max) {
+                    t_watch_logged = ga;
                     logf("vitart: escrita vigiada em 0x%08x (+%u) por %s; valor anterior %08x", ga, ga - g_watch_addr,
                         where.c_str(), rd32(ga & ~3u));
+                    if (Thread *t = current())
+                        logf("vitart:   guest r0=%08x r1=%08x r2=%08x r3=%08x sp=%08x lr=%08x", t->ctx.r[0], t->ctx.r[1],
+                            t->ctx.r[2], t->ctx.r[3], t->ctx.r[13], t->ctx.r[14]);
+                }
             }
             watch_protect(false);
             t_watch_rearm = true;
@@ -377,7 +389,21 @@ static void host_ret_mismatch(arc_ctx *ctx, uint32_t expected) {
 
 static void host_svc(arc_ctx *, uint32_t imm, uint32_t pc) { fatal("svc #%u fora de stub em 0x%08x", imm, pc); }
 static void host_fatal(arc_ctx *, uint32_t pc, const char *why) { fatal("código gerado: %s (0x%08x)", why ? why : "?", pc); }
+static void snap_write(const char *tag) {
+    const char *dir = getenv("VITART_SNAP_DIR");
+    const std::string d = std::string(dir ? dir : "snap") + "/" + tag;
+    std::filesystem::create_directories(d);
+    if (Thread *t = t_current) {
+        std::ofstream f(d + "/ctx.bin", std::ios::binary);
+        f.write(reinterpret_cast<const char *>(&t->ctx), sizeof(arc_ctx));
+    }
+    dump_regions(d, 0x80000000u, 0xC0000000u);
+    logf("vitart: estado salvo em %s", d.c_str());
+}
+
 static void host_log(const char *msg) {
+    if (std::strncmp(msg, "@SNAP-ENTRY", 11) == 0) return snap_write("entry");
+    if (std::strncmp(msg, "@SNAP-EXIT", 10) == 0) return snap_write("exit");
     std::string s(msg);
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r'))
         s.pop_back();
@@ -683,6 +709,8 @@ int main(int argc, char **argv) {
         g_watch_addr = (uint32_t)std::strtoul(w, nullptr, 0);
         const char *c = std::strchr(w, ',');
         g_watch_len = c ? (uint32_t)std::strtoul(c + 1, nullptr, 0) : 4;
+        if (const char *m = getenv("VITART_WATCH_MAX"))
+            g_watch_max = (unsigned)std::strtoul(m, nullptr, 0);
         commit_range(g_watch_addr, g_watch_len);
         watch_protect(true);
         logf("vitart: vigiando escritas em 0x%08x..+%u", g_watch_addr, g_watch_len);

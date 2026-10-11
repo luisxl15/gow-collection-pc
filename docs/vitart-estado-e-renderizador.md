@@ -110,26 +110,37 @@ instruções. Hipóteses a testar:
 
 O teste é ler com +4 e ver se as posições caem na tela.
 
-**Resultado (medido):**
-- +4 não resolve (w ≈ 477, x ≈ −1400);
-- **−4 resolve**: com a memória do `vldst` = 4 bytes zerados + o uniform buffer capturado
-  (`USSE_MEM_SHIFT=-4`), **33 de 100 vértices** do modelo com skinning caem na tela, com w ≈ 1083 coerente.
-  Sem o deslocamento eram 0. É a mesma proporção do rasterizador de prova validado (cerca de 48%).
+**Resultado (medido, revisto em 11/10/2026):**
+- o "−4 resolve" da primeira medição era **falso positivo**: o critério "cai na tela" aceitava vértices
+  errados. A comparação vértice a vértice (interpretador contra o modelo numpy) mostra que **+4** é o
+  deslocamento certo: x, y e w batem exatamente;
+- mesmo assim y continuava fora da tela. A causa **não** estava no shader: os ossos que o jogo grava têm
+  a linha de translação no padrão (a, a, b, −b) em vez de (tx, ty, tz, 1).
 
-Portanto a semântica traduzida do shader de skinning está correta. A diferença está em como o endereço
-`ldst_base_value` se relaciona com o início do buffer que o jogo recebe. O runtime e o tradutor precisam
-aplicar esse deslocamento ao ligar a memória; falta descobrir a regra geral (conferir em outros programas
-e buffers).
+### Diferencial de função contra o Unicorn (como a causa foi achada)
 
-Generalização medida (100 vértices por desenho):
-- os desenhos 3, 5, 9 e 13 vão de 0 para 33 na tela com −4;
-- o desenho 46 (outra família de shader) fica em 0 nos dois casos: é o próximo caso a investigar.
+Ferramentas novas:
+- `VITART_WATCH=endereço,tamanho` (`VITART_WATCH_MAX=n`): watchpoint de escrita. Registra a função do
+  guest, r0–r3/sp/lr, o valor anterior e o valor novo.
+- `tools/snap_wrap.py <gen> <endereço> <n>`: põe uma casca na N-ésima chamada de uma função gerada; o
+  runtime grava o estado na entrada e na saída (`VITART_SNAP_DIR`). `--remove` tira as cascas.
+- `tools/func_diff.py <snap> <endereço>`: roda o ARM original no Unicorn a partir da entrada e compara
+  registradores e cada byte escrito com o que a tradução deixou. `--reads` lista os blocos lidos.
 
-Padrão observado nos dois programas: `ldst_base_value` = deslocamento de `g_Transforms` − 4 bytes:
-- 0x860f27b0: recurso 56 → 224 bytes, base 220;
-- 0x860b7460: recurso 32 → 128 bytes, base 124.
+A cadeia, medida elo a elo:
+1. a paleta de ossos sai da 0x810d761a: o diferencial deu 0 bytes diferentes (2.556 bytes alterados). A
+   função está certa; a entrada já vinha ruim;
+2. a raiz da paleta = mundo do objeto × matriz de câmera; a de câmera vem da inversa afim calculada pela
+   0x8110f2b4. A rotação é gravada direto dos registradores s, mas a translação passa por uma cadeia
+   NEON de `vdup`/`vbif`/`vsli.64`;
+3. o diferencial da 0x8110f2b4 acusou `vmov.i64 d19, #0xffffffff`: o ARM dá `0x00000000ffffffff`, a
+   tradução dava `0xffffffffffffffff`. O Capstone devolve esse imediato como −1 (32 bits com sinal
+   estendido). A máscara toda em 1 faz o `vbif` copiar a lane errada, o que produz exatamente
+   (a, a, b, −b).
 
-A regra exata (por que −4 funciona no primeiro e nada no segundo) é o ponto de partida da próxima sessão.
+Correção: `neon.py::_expand_i64` lê imm8 = i:imm3:imm4 da codificação e expande cada bit num byte. O
+jogo tem 55 dessas instruções e todas estavam erradas. O fuzz de NEON não gerava imediatos vetoriais;
+o caso foi acrescentado em `tests/fuzz_arm/gen_fuzz_neon.py`.
 
 O próximo marco não é cobertura, é **fidelidade**:
 1. ligar a E/S de verdade (contêineres de SA, endereços de buffer, literais, varyings e as leituras de
