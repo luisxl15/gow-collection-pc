@@ -437,6 +437,11 @@ void gxm_present(uint32_t fb) {
     if (frame % 120 == 0) {
         logf("vitart: tempo por quadro (média de 120): vk_draw %.1f ms (gvk::draw %.1f ms), apresentar %.1f ms",
              g_t_draw.exchange(0) / 120e6, g_t_gvk.exchange(0) / 120e6, g_t_present.exchange(0) / 120e6);
+        const gvk::Stats s = gvk::take_stats();
+        logf("vitart:   gvk por quadro: espera %.1f ms, GPU %.1f ms, imagens %.1f ms, pipelines %.1f ms, anel %.1f ms, "
+             "descritores %.1f ms; %.1f envios, %.1f desenhos, %.1f cópias de alvo, %.1f texturas, %u pipelines novos",
+             s.wait_ns / 120e6, s.gpu_ns / 120e6, s.alloc_ns / 120e6, s.pipe_ns / 120e6, s.ring_ns / 120e6,
+             s.desc_ns / 120e6, s.submits / 120.0, s.draws / 120.0, s.snapshots / 120.0, s.uploads / 120.0, s.pipes);
     }
     if (gvk::window_closed()) {
         logf("vitart: janela fechada (%llu desenhos Vulkan, %llu sem shader)", (unsigned long long)g_vk_draws,

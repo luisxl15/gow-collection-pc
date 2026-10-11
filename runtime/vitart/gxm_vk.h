@@ -66,4 +66,16 @@ const char *last_error();
 // Saída OUTPUT 0..3 por vértice do último desenho com debug_vs (vec4 por vértice).
 const std::vector<float> &debug_vs_output();
 
+// Onde o tempo vai, acumulado desde a última chamada (que zera): CPU em ns, GPU por timestamps.
+struct Stats {
+    uint64_t wait_ns = 0;   // esperando a fence do quadro anterior
+    uint64_t gpu_ns = 0;    // duração na GPU dos command buffers de desenho concluídos
+    uint64_t alloc_ns = 0;  // criação de imagens (texturas, cópias de alvo)
+    uint64_t pipe_ns = 0;   // criação de módulos e pipelines
+    uint64_t ring_ns = 0;   // cópias para o anel de upload
+    uint64_t desc_ns = 0;   // alocação e escrita de descritores
+    uint32_t submits = 0, snapshots = 0, uploads = 0, pipes = 0, draws = 0;
+};
+Stats take_stats();
+
 } // namespace gvk

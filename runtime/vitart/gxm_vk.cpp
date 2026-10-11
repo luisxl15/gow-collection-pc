@@ -14,6 +14,7 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 
+#include <chrono>
 #include <mutex>
 
 #include <cstdio>
@@ -56,6 +57,19 @@ std::vector<VkImage> g_swap_images;
 VkExtent2D g_swap_extent{};
 VkSemaphore g_acquired = VK_NULL_HANDLE, g_rendered = VK_NULL_HANDLE;
 constexpr VkFormat kColor = VK_FORMAT_R8G8B8A8_UNORM, kDepth = VK_FORMAT_D32_SFLOAT;
+
+Stats g_stats;
+VkQueryPool g_qpool = VK_NULL_HANDLE;
+double g_ts_period = 1.0; // ns por tique de timestamp
+bool g_ts_open = false;   // o command buffer de desenho atual tem o timestamp inicial
+uint64_t now_ns() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+struct Timer {
+    uint64_t &acc, t0 = now_ns();
+    explicit Timer(uint64_t &a) : acc(a) {}
+    ~Timer() { acc += now_ns() - t0; }
+};
 
 bool fail(const char *what, VkResult r) {
     char b[160];
@@ -121,6 +135,7 @@ struct Image {
 };
 
 bool make_image(Image &im, uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags usage) {
+    Timer tm(g_stats.alloc_ns);
     im.w = w, im.h = h, im.fmt = fmt;
     VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ci.imageType = VK_IMAGE_TYPE_2D;
@@ -175,6 +190,10 @@ bool begin_cmd() {
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VKC(vkBeginCommandBuffer(g_cmd, &bi));
+    if (g_qpool) {
+        vkCmdResetQueryPool(g_cmd, g_qpool, 0, 2);
+        vkCmdWriteTimestamp(g_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_qpool, 0);
+    }
     return true;
 }
 
@@ -192,6 +211,7 @@ bool submit_wait() {
 struct Target {
     Image color, depth;
     VkFramebuffer fb = VK_NULL_HANDLE;
+    uint64_t cver = 1, dver = 1; // sobem a cada escrita na cor / na profundidade
 };
 std::map<uint32_t, Target> g_targets;
 
@@ -217,7 +237,17 @@ void end_pass() {
 
 bool frame_wait() {
     if (g_pending) {
-        VKC(vkWaitForFences(g_dev, 1, &g_fence, VK_TRUE, UINT64_MAX));
+        {
+            Timer tm(g_stats.wait_ns);
+            VKC(vkWaitForFences(g_dev, 1, &g_fence, VK_TRUE, UINT64_MAX));
+        }
+        if (g_ts_open) {
+            uint64_t ts[2] = {};
+            if (vkGetQueryPoolResults(g_dev, g_qpool, 0, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS &&
+                ts[1] > ts[0])
+                g_stats.gpu_ns += (uint64_t)((ts[1] - ts[0]) * g_ts_period);
+            g_ts_open = false;
+        }
         g_pending = false;
         for (auto &im : g_transient) destroy(im);
         g_transient.clear();
@@ -239,12 +269,15 @@ bool frame_begin() {
 bool frame_flush(bool wait) {
     if (g_recording) {
         end_pass();
+        if (g_qpool) vkCmdWriteTimestamp(g_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_qpool, 1);
+        g_ts_open = g_qpool != VK_NULL_HANDLE;
         VKC(vkEndCommandBuffer(g_cmd));
         VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         si.commandBufferCount = 1;
         si.pCommandBuffers = &g_cmd;
         VKC(vkResetFences(g_dev, 1, &g_fence));
         VKC(vkQueueSubmit(g_queue, 1, &si, g_fence));
+        g_stats.submits++;
         g_pending = true;
         g_recording = false;
     }
@@ -263,6 +296,7 @@ bool frame_reserve(VkDeviceSize bytes) {
 }
 
 VkDeviceSize ring_put(const void *data, VkDeviceSize n, VkDeviceSize align) {
+    Timer tm(g_stats.ring_ns);
     g_ring_off = (g_ring_off + align - 1) & ~(align - 1);
     const VkDeviceSize at = g_ring_off, len = n ? n : 16;
     if (data && n)
@@ -321,12 +355,20 @@ uint64_t fnv(const void *p, size_t n, uint64_t h = 1469598103934665603ull) {
 
 std::unordered_map<uint64_t, Image> g_textures;
 std::map<uint32_t, uint32_t> g_depth_owner; // superfície de profundidade -> alvo de cor que a usa
+// Cópia amostrável de um alvo (cor ou profundidade), refeita só quando o alvo mudou desde a última cópia:
+// o passe de névoa é lido por quase todos os desenhos da cena sem mudar entre eles.
+struct Snap {
+    Image im;
+    uint64_t ver = 0;
+};
+std::map<std::pair<uint32_t, bool>, Snap> g_snaps;
 Image g_white;
 
 // Grava o envio no quadro atual (o chamador já reservou os bytes no anel).
 bool upload_texture(Image &im, uint32_t w, uint32_t h, const uint8_t *rgba) {
     if (!make_image(im, w, h, kColor, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
         return false;
+    g_stats.uploads++;
     const VkDeviceSize at = ring_put(rgba, (VkDeviceSize)w * h * 4, 16);
     end_pass();
     barrier(im, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -345,6 +387,7 @@ VkShaderModule module(const uint32_t *code, uint32_t size) {
     const uint64_t h = fnv(code, size);
     auto it = g_modules.find(h);
     if (it != g_modules.end()) return it->second;
+    Timer tm(g_stats.pipe_ns);
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     ci.codeSize = size;
     ci.pCode = code;
@@ -380,6 +423,8 @@ VkPipeline pipeline(const Draw &d, VkShaderModule vs, VkShaderModule fs) {
     auto key = std::make_tuple(vs, fs, d.attr_count, blend, depth, d.cull);
     auto it = g_pipes.find(key);
     if (it != g_pipes.end()) return it->second;
+    Timer tm(g_stats.pipe_ns);
+    g_stats.pipes++;
 
     VkPipelineShaderStageCreateInfo st[2]{};
     st[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vs, "main"};
@@ -549,6 +594,7 @@ void begin_scene(uint32_t color_addr) {
     VkImageSubresourceRange dr{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
     vkCmdClearDepthStencilImage(g_cmd, dep.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &dc, 1, &dr);
     barrier(dep, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    it->second.dver++;
 }
 
 bool present(uint32_t addr) {
@@ -686,6 +732,16 @@ bool init(bool validation, bool window) {
     VkFenceCreateInfo pfci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     pfci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
     VKC(vkCreateFence(g_dev, &pfci, nullptr, &g_pfence));
+    {
+        VkPhysicalDeviceProperties pp;
+        vkGetPhysicalDeviceProperties(g_phys, &pp);
+        g_ts_period = pp.limits.timestampPeriod;
+        VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qi.queryCount = 2;
+        if (pp.limits.timestampComputeAndGraphics && vkCreateQueryPool(g_dev, &qi, nullptr, &g_qpool) != VK_SUCCESS)
+            g_qpool = VK_NULL_HANDLE;
+    }
 
     // Passo de render único (cor + profundidade, carregando o conteúdo): serve a todos os alvos.
     VkAttachmentDescription at[2]{};
@@ -828,9 +884,18 @@ bool draw(const Draw &d) {
             const VkImageLayout back = t.depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
                                                : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             const VkImageAspectFlags aspect = t.depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
-            Image snap;
-            if (!make_image(snap, src.w, src.h, src.fmt, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+            const uint64_t ver = t.depth ? it->second.dver : it->second.cver;
+            Snap &sn = g_snaps[{owner, t.depth}];
+            Image &snap = sn.im;
+            if (t.depth) img_info[t.binding].sampler = g_sampler_nearest;
+            if (snap.img && sn.ver == ver) {
+                img_info[t.binding].imageView = snap.view;
+                continue;
+            }
+            if (!snap.img &&
+                !make_image(snap, src.w, src.h, src.fmt, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
                 return false;
+            sn.ver = ver;
             end_pass();
             barrier(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
             barrier(snap, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -841,9 +906,18 @@ bool draw(const Draw &d) {
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
             barrier(src, back);
             barrier(snap, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            g_transient.push_back(snap);
+            g_stats.snapshots++;
+            static int snaplog = getenv("VITART_VK_SNAPLOG") ? atoi(getenv("VITART_VK_SNAPLOG")) : 0;
+            if (snaplog > 0) {
+                snaplog--;
+                if (FILE *f = fopen("vk_snap.log", "a")) {
+                    fprintf(f, "desenho %u: binding %u lê %s de 0x%08x (dono 0x%08x %ux%u), desenha em 0x%08x prof 0x%08x\n",
+                            g_draws_in_frame, t.binding, t.depth ? "prof" : "cor", t.target_addr, owner, src.w, src.h,
+                            d.target_addr, d.depth_addr);
+                    fclose(f);
+                }
+            }
             img_info[t.binding].imageView = snap.view;
-            if (t.depth) img_info[t.binding].sampler = g_sampler_nearest;
             continue;
         }
         if (!t.rgba) continue;
@@ -857,6 +931,9 @@ bool draw(const Draw &d) {
         img_info[t.binding].imageView = it->second.view;
     }
 
+    tgt->cver++;
+    if (d.depth_write) tgt->dver++;
+
     VkDeviceSize voff[16];
     for (uint32_t k = 0; k < na; k++)
         voff[k] = ring_put(d.attrs + (size_t)k * d.vertex_count * 4, (VkDeviceSize)d.vertex_count * 16, 16);
@@ -868,6 +945,8 @@ bool draw(const Draw &d) {
                                             : (d.vert_uniforms_size ? d.vert_uniforms_size : 16);
     const VkDeviceSize furange = d.frag_uniforms_size ? d.frag_uniforms_size : 16;
     g_draws_in_frame++;
+    g_stats.draws++;
+    Timer tdesc(g_stats.desc_ns);
 
     VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     dai.descriptorPool = g_dpool;
@@ -927,6 +1006,13 @@ bool draw(const Draw &d) {
 
 const std::vector<float> &debug_vs_output() { return g_debug_vs; }
 
+Stats take_stats() {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Stats s = g_stats;
+    g_stats = {};
+    return s;
+}
+
 void end_frame() {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (g_dev) frame_flush(true);
@@ -979,6 +1065,7 @@ void shutdown() {
     for (auto &kv : g_pipes) if (kv.second) vkDestroyPipeline(g_dev, kv.second, nullptr);
     for (auto &kv : g_modules) if (kv.second) vkDestroyShaderModule(g_dev, kv.second, nullptr);
     for (auto &kv : g_textures) destroy(kv.second);
+    for (auto &kv : g_snaps) destroy(kv.second.im);
     for (auto &kv : g_targets) {
         vkDestroyFramebuffer(g_dev, kv.second.fb, nullptr);
         destroy(kv.second.color), destroy(kv.second.depth);
@@ -991,6 +1078,7 @@ void shutdown() {
     vkDestroyRenderPass(g_dev, g_rp, nullptr);
     vkDestroyFence(g_dev, g_fence, nullptr);
     vkDestroyFence(g_dev, g_pfence, nullptr);
+    if (g_qpool) vkDestroyQueryPool(g_dev, g_qpool, nullptr);
     vkDestroyCommandPool(g_dev, g_pool, nullptr);
     vkDestroyDevice(g_dev, nullptr);
     vkDestroyInstance(g_inst, nullptr);
