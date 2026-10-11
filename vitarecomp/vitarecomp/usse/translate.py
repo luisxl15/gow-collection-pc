@@ -137,7 +137,7 @@ class Translator:
             b.decorate(st, S.DecBlock)
             b.member_decorate(st, 0, S.DecOffset, 0)
             self._mem = b.variable(st, S.SCStorageBuffer, "memory")
-            b.decorate(self._mem, S.DecDescriptorSet, 0)
+            b.decorate(self._mem, S.DecDescriptorSet, 2 if self.p.fragment else 0)
             b.decorate(self._mem, S.DecBinding, 1)
             b.decorate(self._mem, S.DecNonWritable)
         return self._mem
@@ -395,7 +395,8 @@ class Translator:
     #     nas locations da varying (cor0 1, cor1 2, fog 3, texcoordN 4+N), vec4 cada;
     #   fragmento: as mesmas locations como entrada; texturas em set 1, binding = recurso do sampler;
     #     cor em location 0;
-    #   uniforms: storage buffer set 0 binding 0 (default uniform buffer); memória do vldst em binding 1.
+    #   uniforms: storage buffer binding 0 (default uniform buffer) e memória do vldst em binding 1, no set 0
+    #     (vértice) ou 2 (fragmento): os conteúdos são diferentes e o layout do pipeline é um só.
     def _pack_words(self, vals, dtype):
         """Valores float -> palavras de 32 bits como o hardware põe nos PA (f32, f16 aos pares, u8 x4)."""
         b, u32 = self.b, self.b.u32()
@@ -493,7 +494,7 @@ class Translator:
         b.decorate(ub_t, S.DecBlock)
         b.member_decorate(ub_t, 0, S.DecOffset, 0)
         ub = b.variable(ub_t, S.SCStorageBuffer, "uniforms")
-        b.decorate(ub, S.DecDescriptorSet, 0)
+        b.decorate(ub, S.DecDescriptorSet, 2 if p.fragment else 0)
         b.decorate(ub, S.DecBinding, 0)
         b.decorate(ub, S.DecNonWritable)
         outs = []  # (variável, registrador OUTPUT inicial, componentes)

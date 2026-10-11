@@ -9,7 +9,8 @@ DATA="${DATA:-C:/Users/Luis/Desktop/projeto_CLAUDE/gow-dump/vitart-data}"
 LOG="$1"; SECS="${2:-60}"; shift; [ $# -gt 0 ] && shift
 CXX="${CXX:-/c/Program Files/LLVM/bin/clang++.exe}"
 "$CXX" -std=c++20 -O1 -g -w -D_CRT_SECURE_NO_WARNINGS -I"$HERE/runtime/arm" -I"$HERE/runtime/vitart" \
-  -o "$RT/vitart.exe" "$HERE"/runtime/vitart/*.cpp || exit 1
+  -I"${VULKAN_SDK:-C:/VulkanSDK/latest}/Include" -o "$RT/vitart.exe" "$HERE"/runtime/vitart/*.cpp \
+  "${VULKAN_SDK:-C:/VulkanSDK/latest}/Lib/vulkan-1.lib" || exit 1
 cd "$RT" && timeout "$SECS" ./vitart.exe --app "$APP" --data "$DATA" --hle-vars link.hlevars.txt --log "$LOG" "$@" \
   gow1.dll libc.dll libfios2.dll > /dev/null 2>&1
 echo "rc=$?"
