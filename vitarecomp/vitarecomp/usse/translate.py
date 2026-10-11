@@ -10,7 +10,7 @@ from . import spirv as S
 from .disasm import lower
 from .interp import FPC0, FPC1
 
-GLSL_PACKH, GLSL_UNPACKH = 58, 62
+GLSL_PACKH, GLSL_UNPACKH, GLSL_PACKUNORM4X8 = 58, 62, 55
 GLSL_FABS, GLSL_FMA, GLSL_INVSQRT, GLSL_LOG2, GLSL_EXP2, GLSL_FLOOR, GLSL_FMIN, GLSL_FMAX = 4, 50, 32, 30, 29, 8, 37, 40
 OpFNegate = 127
 BANK_VAR = {O.TEMP: "temp", O.PA: "pa", O.SA: "sa", O.OUT: "out", O.FPI: "fpi"}
@@ -387,15 +387,105 @@ class Translator:
                 raise Unsupported(mn)
         self.write(d, m, res, half)
 
+    # ------------------------------------------------------------------ E/S
+    # Contrato com o renderizador (Vulkan):
+    #   vértice: atributos em location k (ordem dos parâmetros de categoria 0); saídas em gl_Position e
+    #     nas locations da varying (cor0 1, cor1 2, fog 3, texcoordN 4+N), vec4 cada;
+    #   fragmento: as mesmas locations como entrada; texturas em set 1, binding = recurso do sampler;
+    #     cor em location 0;
+    #   uniforms: storage buffer set 0 binding 0 (default uniform buffer); memória do vldst em binding 1.
+    def _pack_words(self, vals, dtype):
+        """Valores float -> palavras de 32 bits como o hardware põe nos PA (f32, f16 aos pares, u8 x4)."""
+        b, u32 = self.b, self.b.u32()
+        if dtype == "f32":
+            return list(vals)
+        if dtype == "f16":
+            out = []
+            for k in range(0, len(vals), 2):
+                second = vals[k + 1] if k + 1 < len(vals) else self.const(0)
+                pair = b.emit(S.OpCompositeConstruct, self.v2, vals[k], second)
+                out.append(b.emit(S.OpBitcast, self.f32, b.emit(S.OpExtInst, u32, self.glsl, GLSL_PACKH, pair)))
+            return out
+        if dtype in ("u8", "int"):
+            v = list(vals) + [self.const(0)] * (4 - len(vals))
+            vec = b.emit(S.OpCompositeConstruct, self.v4, *v[:4])
+            return [b.emit(S.OpBitcast, self.f32, b.emit(S.OpExtInst, u32, self.glsl, GLSL_PACKUNORM4X8, vec))]
+        raise Unsupported("varying " + dtype)
+
+    def _write_pa(self, pa, regs, words):
+        for k, w in enumerate(words[:regs]):
+            if pa + k < 256:
+                self.regs.write("pa", pa + k, w)
+
+    def _frag_inputs(self, ifaces):
+        b, p = self.b, self.p
+        locs = {}
+
+        def input_var(loc, name):
+            if loc not in locs:
+                if loc == -1:
+                    v = b.variable(self.v4, S.SCInput, "gl_FragCoord")
+                    b.decorate(v, S.DecBuiltIn, S.BuiltInFragCoord)
+                else:
+                    v = b.variable(self.v4, S.SCInput, name)
+                    b.decorate(v, S.DecLocation, loc)
+                ifaces.append(v)
+                locs[loc] = v
+            return locs[loc]
+
+        samplers = {}
+        for inp in p.frag_inputs or []:
+            if inp["kind"] == "iter":
+                if inp["loc"] < -1:
+                    raise Unsupported("varying " + inp["name"])
+                val = b.load(self.v4, input_var(inp["loc"], inp["name"]))
+                comps = [b.emit(S.OpCompositeExtract, self.f32, val, c) for c in range(inp["comps"])]
+                self._write_pa(inp["pa"], inp["regs"], self._pack_words(comps, inp["dtype"]))
+                continue
+            if inp["coord"] > 9:
+                raise Unsupported("textura com coordenada de sprite")
+            simg = b.sampled_image()
+            if inp["sampler"] not in samplers:
+                sv = b.variable(simg, S.SCUniformConstant, "tex%d" % inp["sampler"])
+                b.decorate(sv, S.DecDescriptorSet, 1)
+                b.decorate(sv, S.DecBinding, inp["sampler"])
+                samplers[inp["sampler"]] = sv
+            coord = b.load(self.v4, input_var(4 + inp["coord"], "texcoord%d" % inp["coord"]))
+            img = b.load(simg, samplers[inp["sampler"]])
+            if inp["proj"] is None:
+                c2 = b.emit(S.OpVectorShuffle, self.v2, coord, coord, 0, 1)
+                texel = b.emit(S.OpImageSampleImplicitLod, self.v4, img, c2)
+            else:
+                v3 = b.vec(self.f32, 3)
+                c3 = b.emit(S.OpVectorShuffle, v3, coord, coord, 0, 1, inp["proj"])
+                texel = b.emit(S.OpImageSampleProjImplicitLod, self.v4, img, c3)
+            comps = [b.emit(S.OpCompositeExtract, self.f32, texel, c) for c in range(4)]
+            self._write_pa(inp["pa"], inp["regs"], self._pack_words(comps, inp["store"]))
+
+    def _frag_color(self):
+        p = self.p
+        bank, base = ("out", 0) if p.native_color else ("pa", p.output_start)
+        n = min(p.output_components or 4, 4)
+        if p.output_type == 1:  # F16: componentes aos pares por palavra
+            vals = [self.read_half(bank, base, c) for c in range(n)]
+        elif p.output_type == 0:
+            vals = [self.regs.read(bank, base + c) for c in range(n)]
+        else:
+            raise Unsupported("saída de fragmento tipo %d" % p.output_type)
+        while len(vals) < 4:
+            vals.append(self.const(1 if len(vals) == 3 else 0))
+        return self.b.emit(S.OpCompositeConstruct, self.v4, *vals)
+
     def build(self):
         b, p = self.b, self.p
         ifaces = []
         avars = []
-        for k, q in enumerate(q for q in p.params if q["category"] == 0):
-            v = b.variable(self.v4, S.SCInput, q["name"].replace(".", "_"))
-            b.decorate(v, S.DecLocation, k)
-            avars.append((v, q["resource"]))
-            ifaces.append(v)
+        if not p.fragment:
+            for k, q in enumerate(q for q in p.params if q["category"] == 0):
+                v = b.variable(self.v4, S.SCInput, q["name"].replace(".", "_"))
+                b.decorate(v, S.DecLocation, k)
+                avars.append((v, q["resource"]))
+                ifaces.append(v)
         rta = b.runtime_array(self.f32, 4)
         ub_t = b.struct("ub", rta)
         b.decorate(ub_t, S.DecBlock)
@@ -404,15 +494,24 @@ class Translator:
         b.decorate(ub, S.DecDescriptorSet, 0)
         b.decorate(ub, S.DecBinding, 0)
         b.decorate(ub, S.DecNonWritable)
+        outs = []  # (variável, registrador OUTPUT inicial, componentes)
         if p.fragment:
             outv = b.variable(self.v4, S.SCOutput, "color")
             b.decorate(outv, S.DecLocation, 0)
+            ifaces.append(outv)
         else:
             pv_t = b.struct("pv", self.v4)
             b.decorate(pv_t, S.DecBlock)
             b.member_decorate(pv_t, 0, S.DecBuiltIn, S.BuiltInPosition)
             outv = b.variable(pv_t, S.SCOutput, "gl_PerVertex")
-        ifaces.append(outv)
+            ifaces.append(outv)
+            for name, loc, n, reg in p.vertex_outputs or [("position", -1, 4, 0)]:
+                if loc < 0:
+                    continue  # posição vai no gl_PerVertex; psize fica de fora (pontos não usados)
+                v = b.variable(self.v4, S.SCOutput, name)
+                b.decorate(v, S.DecLocation, loc)
+                ifaces.append(v)
+                outs.append((v, reg, n))
         main = b.id()
         b.body += b.inst(S.OpFunction, b.void(), main, 0, b.fn(b.void()))
         b.body += b.inst(S.OpLabel, b.id())
@@ -421,6 +520,8 @@ class Translator:
             for c in range(4):
                 if res + c < 256:
                     self.regs.write("pa", res + c, b.emit(S.OpCompositeExtract, self.f32, val, c))
+        if p.fragment:
+            self._frag_inputs(ifaces)
         # Entradas em SA pelas tabelas do GXP: contêiner 14 = default uniform buffer copiado a partir
         # de base_sa_offset; infos de uniform buffer põem em SA (base do contêiner 19 + ldst_base_offset)
         # o endereço em bytes do buffer na memória do vldst (o default fica em 0) + ldst_base_value;
@@ -445,11 +546,14 @@ class Translator:
             self.instr(ins, True)
         for ins in p.primary:
             self.instr(ins, False)
-        res = b.emit(S.OpCompositeConstruct, self.v4, *[self.regs.read("out", c) for c in range(4)])
         if p.fragment:
-            b.store(outv, res)
+            b.store(outv, self._frag_color())
         else:
+            res = b.emit(S.OpCompositeConstruct, self.v4, *[self.regs.read("out", c) for c in range(4)])
             b.store(b.chain(S.SCOutput, self.v4, outv, b.const(self.i32, 0)), res)
+            for v, reg, n in outs:
+                vals = [self.regs.read("out", reg + c) for c in range(n)] + [self.const(0)] * (4 - n)
+                b.store(v, b.emit(S.OpCompositeConstruct, self.v4, *vals))
         b.body += b.inst(S.OpReturn) + b.inst(S.OpFunctionEnd)
         return b.finish(S.ExecFragment if p.fragment else S.ExecVertex, main, ifaces, frag=p.fragment)
 

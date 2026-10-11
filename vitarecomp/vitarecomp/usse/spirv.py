@@ -21,14 +21,17 @@ OpCompositeExtract, OpCompositeConstruct = 81, 80
 OpBitcast = 124
 OpFAdd, OpFSub, OpFMul, OpFDiv, OpIAdd, OpIMul = 129, 131, 133, 136, 128, 132
 OpLabel, OpReturn = 248, 253
+OpTypeImage, OpTypeSampledImage, OpVectorShuffle = 25, 27, 79
+OpImageSampleImplicitLod, OpImageSampleProjImplicitLod = 87, 91
 
 # enums
 CapShader = 1
 AddrLogical, MemGLSL450 = 0, 1
 ExecVertex, ExecFragment = 0, 4
-SCInput, SCUniform, SCOutput, SCPrivate, SCFunction, SCStorageBuffer = 1, 2, 3, 6, 7, 12
+SCUniformConstant, SCInput, SCUniform, SCOutput, SCPrivate, SCFunction, SCStorageBuffer = 0, 1, 2, 3, 6, 7, 12
 DecBlock, DecBuiltIn, DecLocation, DecBinding, DecDescriptorSet, DecOffset, DecArrayStride, DecNonWritable = 2, 11, 30, 33, 34, 35, 6, 24
-BuiltInPosition = 0
+BuiltInPosition, BuiltInFragCoord = 0, 15
+Dim2D, DimCube = 1, 3
 ExecOriginUpperLeft = 7
 
 
@@ -70,6 +73,10 @@ class Builder:
     def vec(self, t, n): return self._type(("vec", t, n), OpTypeVector, t, n)
     def ptr(self, sc, t): return self._type(("ptr", sc, t), OpTypePointer, sc, t)
     def fn(self, ret): return self._type(("fn", ret), OpTypeFunction, ret)
+
+    def sampled_image(self, dim=Dim2D):
+        img = self._type(("img", dim), OpTypeImage, self.f32(), dim, 0, 0, 0, 1, 0)
+        return self._type(("simg", dim), OpTypeSampledImage, img)
 
     def const(self, t, v):
         key = ("c", t, v)
