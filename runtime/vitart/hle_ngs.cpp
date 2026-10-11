@@ -16,6 +16,7 @@
 #include <libatrac9.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -407,8 +408,12 @@ static bool replace(Voice &v, const uint8_t *bytes, size_t n, std::vector<int16_
     v.ps2_file = (int32_t)pick->file, v.ps2_sf = (int32_t)pick->sf;
     const size_t frames = sf.size() / ch;
     const double scale = (double)pcm->frames / f.vita_samples;
+    static const bool diag = getenv("VITART_PS2_DIAG") != nullptr;
+    std::vector<int16_t> orig;
+    if (diag) orig = sf;
     for (size_t j = 0; j < frames; j++) {
-        const double p = ((double)pick->sf * f.sps + j) * scale;
+        // 256 = atraso do codificador ATRAC9 (fact[2] dos .at9 do jogo): a amostra 0 do Vita é a 256 do stream.
+        const double p = (std::max)(0.0, ((double)pick->sf * f.sps + j - 256.0) * scale);
         const size_t i0 = (std::min)((size_t)p, pcm->frames - 1), i1 = (std::min)(i0 + 1, pcm->frames - 1);
         const float t = (float)(p - (double)(size_t)p);
         float smp[2];
@@ -418,6 +423,15 @@ static bool replace(Voice &v, const uint8_t *bytes, size_t n, std::vector<int16_
         }
         if (ch == 1) sf[j] = (int16_t)(pcm->ch == 1 ? smp[0] : 0.5f * (smp[0] + smp[1]));
         else for (int c = 0; c < ch; c++) sf[j * ch + c] = (int16_t)smp[c < 2 ? c : 1];
+    }
+    if (diag) {
+        // Correlação normalizada ATRAC9 x PS2 por arquivo (alinhamento no tempo e nos canais).
+        static std::map<uint32_t, std::array<double, 4>> acc; // sxy, sxx, syy, superquadros
+        auto &a = acc[pick->file];
+        for (size_t i = 0; i < sf.size(); i++) a[0] += (double)orig[i] * sf[i], a[1] += (double)orig[i] * orig[i], a[2] += (double)sf[i] * sf[i];
+        if (++a[3] == 200)
+            logf("vitart: PS2 DIAG arquivo %u: correlação %.3f, nível PS2/Vita %.2f", pick->file,
+                 a[0] / std::sqrt(a[1] * a[2] + 1e-9), std::sqrt(a[2] / (a[1] + 1e-9)));
     }
     return true;
 }
