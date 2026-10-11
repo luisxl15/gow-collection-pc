@@ -230,6 +230,15 @@ VkFence g_fences[kSlots] = {};
 VkDescriptorPool g_dpools[kSlots] = {};
 bool g_pend[kSlots] = {}, g_tsopen[kSlots] = {};
 uint32_t g_fi = 0; // vaga atual
+// Descritores: uniforms (sets 0 e 2) num conjunto por vaga com STORAGE_BUFFER_DYNAMIC (cada desenho só
+// passa os deslocamentos); texturas (set 1) num cache por combinação de imagens e samplers, num pool
+// persistente que é esvaziado quando enche ou quando imagens são destruídas.
+constexpr VkDeviceSize kUBWindow = 1u << 20; // janela de cada descritor dinâmico (uniforms + depuração)
+VkDescriptorSet g_ubsets[kSlots][2] = {};
+VkDescriptorPool g_tex_pool = VK_NULL_HANDLE;
+constexpr uint32_t kTexSets = 4096;
+std::unordered_map<uint64_t, VkDescriptorSet> g_tex_sets;
+bool g_tex_sets_stale = false;
 
 bool begin_cmd() {
     VKC(vkResetCommandBuffer(g_cmd, 0));
@@ -329,6 +338,7 @@ bool frame_begin() {
         for (auto it = g_textures.begin(); it != g_textures.end();) {
             auto u = g_tex_used.find(it->first);
             if (u == g_tex_used.end() || g_frame_no - u->second > 128) {
+                g_tex_sets_stale = true;
                 destroy(it->second);
                 g_tex_used.erase(it->first);
                 it = g_textures.erase(it);
@@ -339,6 +349,34 @@ bool frame_begin() {
     g_ring_off = 0;
     g_draws_in_frame = 0;
     VKC(vkResetDescriptorPool(g_dev, g_dpool, 0));
+    {
+        // Conjuntos de uniforms da vaga: o anel inteiro, deslocamento dinâmico por desenho.
+        VkDescriptorSetLayout ls[2] = {g_dsl[0], g_dsl[2]};
+        VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        dai.descriptorPool = g_dpool;
+        dai.descriptorSetCount = 2;
+        dai.pSetLayouts = ls;
+        VKC(vkAllocateDescriptorSets(g_dev, &dai, g_ubsets[g_fi]));
+        VkDescriptorBufferInfo bi{g_ring.buf, 0, kUBWindow};
+        VkWriteDescriptorSet w[4]{};
+        for (int i = 0; i < 4; i++) {
+            w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            w[i].dstSet = g_ubsets[g_fi][i / 2];
+            w[i].dstBinding = i & 1;
+            w[i].descriptorCount = 1;
+            w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+            w[i].pBufferInfo = &bi;
+        }
+        vkUpdateDescriptorSets(g_dev, 4, w, 0, nullptr);
+    }
+    // Cache de conjuntos de textura: esvaziado com a outra vaga parada (ela pode usar um deles).
+    if (g_tex_sets_stale || g_tex_sets.size() >= kTexSets) {
+        for (uint32_t i = 0; i < kSlots; i++)
+            if (!slot_wait(i)) return false;
+        VKC(vkResetDescriptorPool(g_dev, g_tex_pool, 0));
+        g_tex_sets.clear();
+        g_tex_sets_stale = false;
+    }
     if (!begin_cmd()) return false;
     g_recording = true;
     return true;
@@ -650,8 +688,11 @@ VkPipeline pipeline(const Draw &d, VkShaderModule vs, VkShaderModule fs) {
     VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     rs.polygonMode = VK_POLYGON_MODE_FILL;
     rs.cullMode = VK_CULL_MODE_NONE; // o sentido da face com viewport invertido ainda não foi medido
-    static const bool cw_front = getenv("VITART_VK_FRONT_CW") != nullptr; // depuração: inverte a face da frente
-    rs.frontFace = cw_front ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    // Frente = horária na tela (com o viewport invertido). Medido nas sombras por volume do GoW (stencil
+    // em 128, frente decrementa e verso incrementa na falha de profundidade, escurece onde < 128): com a
+    // anti-horária a sombra do Kratos no convés sumia (83 px escurecidos contra 2.710).
+    static const bool ccw_front = getenv("VITART_VK_FRONT_CCW") != nullptr; // depuração
+    rs.frontFace = ccw_front ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
     rs.lineWidth = 1.0f;
     VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
@@ -1025,14 +1066,14 @@ bool init(bool validation, bool window) {
     // Layout: set 0 = uniforms do vértice (0) e memória do vldst (1); set 1 = texturas do fragmento;
     // set 2 = uniforms e memória do fragmento.
     VkDescriptorSetLayoutBinding b0[2] = {
-        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr},
-        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr}};
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr}};
     VkDescriptorSetLayoutBinding b1[kTexBindings];
     for (uint32_t i = 0; i < kTexBindings; i++)
         b1[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     VkDescriptorSetLayoutBinding b2[2] = {
-        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
     const VkDescriptorSetLayoutBinding *bs[3] = {b0, b1, b2};
     const uint32_t bn[3] = {2, kTexBindings, 2};
     for (int i = 0; i < 3; i++) {
@@ -1077,7 +1118,7 @@ bool init(bool validation, bool window) {
     g_ssbo_align = props.limits.minStorageBufferOffsetAlignment > 16 ? props.limits.minStorageBufferOffsetAlignment : 16;
     {
         VkBufferCreateInfo ci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        ci.size = kRingSize;
+        ci.size = kRingSize + kUBWindow; // folga: deslocamento + janela dinâmica cabe no buffer
         ci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         VKC(vkCreateBuffer(g_dev, &ci, nullptr, &g_ring.buf));
@@ -1088,19 +1129,24 @@ bool init(bool validation, bool window) {
         ai.memoryTypeIndex = mem_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         VKC(vkAllocateMemory(g_dev, &ai, nullptr, &g_ring.mem));
         VKC(vkBindBufferMemory(g_dev, g_ring.buf, g_ring.mem, 0));
-        g_ring.size = kRingSize;
+        g_ring.size = kRingSize + kUBWindow;
         void *p;
-        VKC(vkMapMemory(g_dev, g_ring.mem, 0, kRingSize, 0, &p));
+        VKC(vkMapMemory(g_dev, g_ring.mem, 0, kRingSize + kUBWindow, 0, &p));
         g_ring_ptr = static_cast<uint8_t *>(p);
     }
     {
-        VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 * kMaxDrawsPerFrame},
-                                      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kTexBindings * kMaxDrawsPerFrame}};
+        VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 4};
         VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        dpi.maxSets = 3 * kMaxDrawsPerFrame;
-        dpi.poolSizeCount = 2;
-        dpi.pPoolSizes = ps;
+        dpi.maxSets = 2;
+        dpi.poolSizeCount = 1;
+        dpi.pPoolSizes = &ps;
         for (auto &dp : g_dpools) VKC(vkCreateDescriptorPool(g_dev, &dpi, nullptr, &dp));
+        VkDescriptorPoolSize tps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kTexBindings * kTexSets};
+        VkDescriptorPoolCreateInfo tpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        tpi.maxSets = kTexSets;
+        tpi.poolSizeCount = 1;
+        tpi.pPoolSizes = &tps;
+        VKC(vkCreateDescriptorPool(g_dev, &tpi, nullptr, &g_tex_pool));
         select_slot(0);
     }
     // A janela nasce na primeira apresentação: as mensagens só chegam à thread que a criou, e quem
@@ -1233,29 +1279,33 @@ bool draw(const Draw &d) {
     g_stats.draws++;
     Timer tdesc(g_stats.desc_ns);
 
-    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    dai.descriptorPool = g_dpool;
-    dai.descriptorSetCount = 3;
-    dai.pSetLayouts = g_dsl;
-    VkDescriptorSet sets[3];
-    VKC(vkAllocateDescriptorSets(g_dev, &dai, sets));
-    VkDescriptorBufferInfo bi[4] = {{g_ring.buf, vuoff, vurange}, {g_ring.buf, vuoff, vurange},
-                                    {g_ring.buf, fuoff, furange}, {g_ring.buf, fuoff, furange}};
-    VkWriteDescriptorSet w[5]{};
-    for (int i = 0; i < 4; i++) {
-        w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w[i].dstSet = sets[i < 2 ? 0 : 2];
-        w[i].dstBinding = i & 1;
-        w[i].descriptorCount = 1;
-        w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w[i].pBufferInfo = &bi[i];
+    (void)vurange, (void)furange;
+    VkDescriptorSet sets[3] = {g_ubsets[g_fi][0], VK_NULL_HANDLE, g_ubsets[g_fi][1]};
+    {
+        uint64_t key = 1469598103934665603ull;
+        for (const VkDescriptorImageInfo &ii : img_info) {
+            key = (key ^ (uint64_t)(uintptr_t)ii.imageView) * 1099511628211ull;
+            key = (key ^ (uint64_t)(uintptr_t)ii.sampler) * 1099511628211ull;
+        }
+        auto it = g_tex_sets.find(key);
+        if (it != g_tex_sets.end()) {
+            sets[1] = it->second;
+        } else {
+            VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            dai.descriptorPool = g_tex_pool;
+            dai.descriptorSetCount = 1;
+            dai.pSetLayouts = &g_dsl[1];
+            VKC(vkAllocateDescriptorSets(g_dev, &dai, &sets[1]));
+            VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            w.dstSet = sets[1];
+            w.descriptorCount = kTexBindings;
+            w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w.pImageInfo = img_info;
+            vkUpdateDescriptorSets(g_dev, 1, &w, 0, nullptr);
+            g_tex_sets[key] = sets[1];
+        }
     }
-    w[4] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    w[4].dstSet = sets[1];
-    w[4].descriptorCount = kTexBindings;
-    w[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    w[4].pImageInfo = img_info;
-    vkUpdateDescriptorSets(g_dev, 5, w, 0, nullptr);
+    const uint32_t dyn[4] = {(uint32_t)vuoff, (uint32_t)vuoff, (uint32_t)fuoff, (uint32_t)fuoff};
 
     if (g_open != tgt) {
         end_pass();
@@ -1267,7 +1317,7 @@ bool draw(const Draw &d) {
         g_open = tgt;
     }
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 3, sets, 0, nullptr);
+    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 3, sets, 4, dyn);
     // Viewport do GXM: tela = deslocamento + escala * ndc. No Vulkan, x = desl - escala, largura = 2 * escala
     // (altura negativa inverte y, como a escala negativa do GXM).
     VkViewport vp{d.vps[0] - d.vps[1], d.vps[2] - d.vps[3], 2 * d.vps[1], 2 * d.vps[3], d.vps[4], d.vps[4] + d.vps[5]};
@@ -1356,6 +1406,7 @@ void shutdown() {
     save_pcache();
     if (g_pcache) vkDestroyPipelineCache(g_dev, g_pcache, nullptr);
     for (auto dp : g_dpools) vkDestroyDescriptorPool(g_dev, dp, nullptr);
+    vkDestroyDescriptorPool(g_dev, g_tex_pool, nullptr);
     vkUnmapMemory(g_dev, g_ring.mem);
     destroy(g_ring);
     if (g_swap) vkDestroySwapchainKHR(g_dev, g_swap, nullptr);

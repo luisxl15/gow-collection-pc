@@ -250,6 +250,12 @@ static uint64_t content_hash(const uint8_t *p, size_t n, uint64_t h) {
     return h;
 }
 static uint64_t g_vk_draws = 0, g_vk_skipped = 0;
+// Censo do que fica de fora (VITART_VK_CENSUS=1): primitivas por tipo e formatos de textura sem decodificador.
+static std::map<std::string, uint64_t> g_census;
+static bool census() {
+    static const bool on = getenv("VITART_VK_CENSUS") != nullptr;
+    return on;
+}
 // Tempo de CPU (ns) por etapa, zerado a cada relatório: onde o quadro gasta.
 static std::atomic<uint64_t> g_t_draw{0}, g_t_gvk{0}, g_t_present{0}, g_t_idx{0}, g_t_attr{0}, g_t_tex{0};
 static uint64_t now_ns() {
@@ -343,6 +349,7 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
     auto vs = spv_of(vp->program), fs = spv_of(fp->program);
     if (!vs || !fs) {
         g_vk_skipped++;
+        if (census()) g_census["sem shader"]++;
         return;
     }
     const uint64_t t_idx0 = now_ns();
@@ -350,6 +357,7 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
     const uint32_t isz = (itype & 0x01000000u) ? 4 : 2;
     // Os índices do jogo vão para a GPU como estão (16 ou 32 bits), com a topologia nativa (lista, faixa,
     // leque); só a faixa de vértices usada é enviada e o deslocamento vira o vertexOffset do desenho.
+    if (census()) g_census["primitiva " + std::to_string(kind) + (kind == 0 || kind == 3 || kind == 4 ? "" : " (pulada)")]++;
     if (kind != 0 && kind != 3 && kind != 4) return;
     const uint32_t nidx = kind == 0 ? icount / 3 * 3 : icount;
     if (nidx < 3) return;
@@ -504,7 +512,14 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
                 if (info.base == 0x95000000u) h = content_hash(ptr<uint8_t>(info.palette), 1024, h);
                 if (!e.px || h != e.hash) {
                     auto px = std::make_shared<std::vector<uint8_t>>();
-                    if (!n || !gxmtex::decode(ptr<uint8_t>(0), info, *px)) px.reset();
+                    if (!n || !gxmtex::decode(ptr<uint8_t>(0), info, *px)) {
+                        px.reset();
+                        if (census()) {
+                            char k[64];
+                            std::snprintf(k, sizeof k, "textura sem decodificador: base 0x%08x tipo %u", info.base, info.type);
+                            g_census[k]++;
+                        }
+                    }
                     e.px = px;
                     e.hash = h;
                 }
@@ -550,6 +565,9 @@ void gxm_present(uint32_t fb) {
     const uint64_t tp = now_ns();
     gvk::present(fb);
     g_t_present += now_ns() - tp;
+    if (census() && frame % 600 == 0) {
+        for (auto &[k, n] : g_census) logf("vitart: censo: %s: %llu", k.c_str(), (unsigned long long)n);
+    }
     if (frame % 120 == 0) {
         logf("vitart: tempo por quadro (média de 120): vk_draw %.1f ms (gvk::draw %.1f ms), apresentar %.1f ms",
              g_t_draw.exchange(0) / 120e6, g_t_gvk.exchange(0) / 120e6, g_t_present.exchange(0) / 120e6);
