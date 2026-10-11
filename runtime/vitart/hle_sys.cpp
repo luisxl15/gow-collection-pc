@@ -18,6 +18,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #pragma comment(lib, "user32.lib")
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
 #endif
 
 namespace vt {
@@ -255,11 +257,82 @@ VT_HLE(sceNgsAT9GetSectionDetails) {
 // =================================================================== SceAudio
 // Saída cadenciada: sceAudioOutOutput bloqueia até o tempo do bloco anterior passar, como o
 // hardware; o jogo usa isso como relógio da thread de áudio.
+// Saída no host: cada porta vira um fluxo waveOut estéreo de 16 bits (o Windows mistura os fluxos).
+// O relógio continua sendo o da cadência acima; a fila do waveOut só amortece a variação. Começa em
+// pausa e só toca depois de kPrebuffer blocos, para não faltar amostra logo no início.
+struct HostOut {
+    static constexpr int kBufs = 8, kPrebuffer = 3;
+    HWAVEOUT wo = nullptr;
+    WAVEHDR hdr[kBufs]{};
+    std::vector<int16_t> data[kBufs];
+    int next = 0, queued = 0;
+    bool started = false;
+    ~HostOut() {
+        if (!wo) return;
+        waveOutReset(wo);
+        for (auto &h : hdr)
+            if (h.dwFlags & WHDR_PREPARED) waveOutUnprepareHeader(wo, &h, sizeof h);
+        waveOutClose(wo);
+    }
+};
 struct AudioPort {
     uint32_t len = 256, freq = 48000, mode = 1;
     uint64_t outputs = 0;
+    int peak = 0; // maior amplitude enviada (diagnóstico)
+    int vol[2] = { 32768, 32768 };
     std::chrono::steady_clock::time_point next{};
+    std::shared_ptr<HostOut> host;
 };
+static bool audio_muted() {
+    static const bool m = getenv("VITART_MUTE") != nullptr;
+    return m;
+}
+static void host_open(AudioPort &p) {
+    if (audio_muted()) return;
+    auto h = std::make_shared<HostOut>();
+    WAVEFORMATEX f{};
+    f.wFormatTag = WAVE_FORMAT_PCM;
+    f.nChannels = 2;
+    f.nSamplesPerSec = p.freq;
+    f.wBitsPerSample = 16;
+    f.nBlockAlign = 4;
+    f.nAvgBytesPerSec = p.freq * 4;
+    if (waveOutOpen(&h->wo, WAVE_MAPPER, &f, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
+        h->wo = nullptr;
+        logf("vitart: waveOut indisponível; porta de áudio sem som no host");
+        return;
+    }
+    waveOutPause(h->wo);
+    p.host = h;
+}
+static void host_submit(AudioPort &p, const int16_t *src) {
+    HostOut *h = p.host.get();
+    if (!h || !h->wo) return;
+    WAVEHDR &hd = h->hdr[h->next];
+    if (hd.dwFlags & WHDR_PREPARED) {
+        if (!(hd.dwFlags & WHDR_DONE)) return; // fila cheia: descarta este bloco
+        waveOutUnprepareHeader(h->wo, &hd, sizeof hd);
+    }
+    std::vector<int16_t> &d = h->data[h->next];
+    d.resize((size_t)p.len * 2);
+    const bool stereo = p.mode != 0;
+    for (uint32_t i = 0; i < p.len; i++) {
+        const int l = stereo ? src[2 * i] : src[i], r = stereo ? src[2 * i + 1] : src[i];
+        p.peak = (std::max)(p.peak, (std::max)(std::abs(l), std::abs(r)));
+        d[2 * i] = (int16_t)((l * p.vol[0]) >> 15);
+        d[2 * i + 1] = (int16_t)((r * p.vol[1]) >> 15);
+    }
+    hd = {};
+    hd.lpData = reinterpret_cast<LPSTR>(d.data());
+    hd.dwBufferLength = (DWORD)(d.size() * 2);
+    waveOutPrepareHeader(h->wo, &hd, sizeof hd);
+    waveOutWrite(h->wo, &hd, sizeof hd);
+    h->next = (h->next + 1) % HostOut::kBufs;
+    if (!h->started && ++h->queued >= HostOut::kPrebuffer) {
+        waveOutRestart(h->wo);
+        h->started = true;
+    }
+}
 static std::mutex g_audio_mutex;
 static std::map<int, AudioPort> g_ports;
 static int g_next_port = 0;
@@ -273,6 +346,7 @@ VT_HLE(sceAudioOutOpenPort) {
     p.freq = arg(ctx, 2) ? arg(ctx, 2) : 48000;
     p.mode = arg(ctx, 3);
     p.next = std::chrono::steady_clock::now();
+    host_open(p);
     logf("vitart: porta de áudio %d: tipo %u, %u amostras, %u Hz, %s (lr 0x%08x)", id, arg(ctx, 0), p.len, p.freq,
          p.mode ? "estéreo" : "mono", ctx->r[14]);
     ret(ctx, (uint32_t)id);
@@ -281,12 +355,24 @@ VT_HLE(sceAudioOutReleasePort) {
     std::lock_guard<std::mutex> g(g_audio_mutex);
     auto it = g_ports.find((int)arg(ctx, 0));
     if (getenv("VITART_AUDIO_LOG") && it != g_ports.end())
-        logf("vitart: porta de áudio %d liberada após %llu saídas (lr 0x%08x)", (int)arg(ctx, 0),
-             (unsigned long long)it->second.outputs, ctx->r[14]);
+        logf("vitart: porta de áudio %d liberada após %llu saídas, pico %d (lr 0x%08x)", (int)arg(ctx, 0),
+             (unsigned long long)it->second.outputs, it->second.peak, ctx->r[14]);
     g_ports.erase((int)arg(ctx, 0));
     ret(ctx, SCE_OK);
 }
-VT_HLE(sceAudioOutSetVolume) { ret(ctx, SCE_OK); }
+VT_HLE(sceAudioOutSetVolume) {
+    // (port, flag: 1 = esquerdo, 2 = direito, vol[2]: 0..32768)
+    std::lock_guard<std::mutex> g(g_audio_mutex);
+    auto it = g_ports.find((int)arg(ctx, 0));
+    if (it == g_ports.end()) return ret(ctx, 0x80260105u);
+    const uint32_t flag = arg(ctx, 1), v = arg(ctx, 2);
+    for (int c = 0; c < 2; c++)
+        if ((flag >> c) & 1) {
+            const int x = v ? (int)rd32(v + 4 * c) : 32768;
+            it->second.vol[c] = x < 0 ? 0 : x > 32768 ? 32768 : x;
+        }
+    ret(ctx, SCE_OK);
+}
 // Amostras ainda não tocadas: o que falta do último bloco enviado, pelo mesmo relógio que cadencia
 // sceAudioOutOutput. O som do Bink (RADSS) lê isto como relógio; 0 fixo o fazia reiniciar a porta em
 // laço e o vídeo não andava.
@@ -313,6 +399,7 @@ VT_HLE(sceAudioOutOutput) {
         if (p.next < now - std::chrono::milliseconds(100)) p.next = now; // após uma pausa longa
         wake = p.next;
         p.next += std::chrono::microseconds((uint64_t)p.len * 1000000ull / p.freq);
+        if (const uint32_t buf = arg(ctx, 1)) host_submit(p, ptr<int16_t>(buf));
     }
     std::this_thread::sleep_until(wake);
     ret(ctx, SCE_OK);
