@@ -128,6 +128,45 @@ class Translator:
         finally:
             self.cur_pred = None
 
+    def run(self, code, second):
+        """Emite uma fase. Desvios só para a frente (br relativo): o trecho pulado vira um if estruturado,
+        executado quando o predicado do desvio é falso; desvio incondicional apaga o trecho."""
+        b = self.b
+        merges = []  # (índice de destino, rótulo de junção), aninhados
+        skip_to = -1
+        for i, ins in enumerate(code):
+            while merges and merges[-1][0] == i:
+                _, merge = merges.pop()
+                b.body += b.inst(249, merge) + b.inst(248, merge)  # OpBranch; OpLabel
+            if i < skip_to:
+                continue
+            if ins.op != "br":
+                self.instr(ins, second)
+                continue
+            f = ins.f
+            off = f["br_off"]
+            if f["br_type"] and off >> 19:
+                off -= 1 << 20
+            target = i + off if f["br_type"] else off
+            if target <= i or target > len(code) or f["save_link"] or f["exception"]:
+                raise Unsupported("br para %d (de %d)" % (target, i))
+            if merges and target > merges[-1][0]:
+                raise Unsupported("br não aninhado")
+            pr = O.predicate(ins)
+            if pr is None:
+                skip_to = target
+                continue
+            pv = b.load(self.f32, b.chain(S.SCPrivate, self.f32, self.preds, b.const(self.i32, pr[0])))
+            taken = b.emit(182 if not pr[1] else 180, self.boolt, pv, self.const(0))
+            body, merge = b.id(), b.id()
+            b.body += b.inst(247, merge, 0)              # OpSelectionMerge
+            b.body += b.inst(250, taken, merge, body)    # OpBranchConditional: desvio -> junção
+            b.body += b.inst(248, body)
+            merges.append((target, merge))
+        while merges:
+            _, merge = merges.pop()
+            b.body += b.inst(249, merge) + b.inst(248, merge)
+
     def memory(self):
         """Storage buffer (set 0, binding 1) com a memória que o vldst lê, em palavras de 32 bits."""
         if getattr(self, "_mem", None) is None:
@@ -545,10 +584,8 @@ class Translator:
         for off, val in (p.literals or []):
             if lit_base + off < 512:
                 self.regs.write("sa", lit_base + off, self.const(val))
-        for ins in p.secondary:
-            self.instr(ins, True)
-        for ins in p.primary:
-            self.instr(ins, False)
+        self.run(p.secondary, True)
+        self.run(p.primary, False)
         if p.fragment:
             b.store(outv, self._frag_color())
         else:

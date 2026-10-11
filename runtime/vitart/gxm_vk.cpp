@@ -31,7 +31,7 @@ VkPhysicalDeviceMemoryProperties g_memprops{};
 VkRenderPass g_rp = VK_NULL_HANDLE;
 VkDescriptorSetLayout g_dsl[3] = {};
 VkPipelineLayout g_layout = VK_NULL_HANDLE;
-VkSampler g_sampler = VK_NULL_HANDLE;
+VkSampler g_sampler = VK_NULL_HANDLE, g_sampler_nearest = VK_NULL_HANDLE;
 constexpr uint32_t kTexBindings = 16;
 constexpr VkFormat kColor = VK_FORMAT_R8G8B8A8_UNORM, kDepth = VK_FORMAT_D32_SFLOAT;
 
@@ -183,7 +183,8 @@ bool get_target(uint32_t addr, uint32_t w, uint32_t h, Target *&out) {
     if (!make_image(t.color, w, h, kColor,
                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
         return false;
-    if (!make_image(t.depth, w, h, kDepth, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+    if (!make_image(t.depth, w, h, kDepth,
+                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT))
         return false;
     VkImageView views[2] = {t.color.view, t.depth.view};
     VkFramebufferCreateInfo fi{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
@@ -219,6 +220,7 @@ uint64_t fnv(const void *p, size_t n, uint64_t h = 1469598103934665603ull) {
 }
 
 std::unordered_map<uint64_t, Image> g_textures;
+std::map<uint32_t, uint32_t> g_depth_owner; // superfície de profundidade -> alvo de cor que a usa
 Image g_white;
 
 bool upload_texture(Image &im, uint32_t w, uint32_t h, const uint8_t *rgba) {
@@ -467,6 +469,9 @@ bool init(bool validation) {
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     sci.maxLod = 0.25f;
     VKC(vkCreateSampler(g_dev, &sci, nullptr, &g_sampler));
+    sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
+    sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    VKC(vkCreateSampler(g_dev, &sci, nullptr, &g_sampler_nearest));
     const uint8_t white[4] = {255, 255, 255, 255};
     return upload_texture(g_white, 1, 1, white);
 }
@@ -485,6 +490,7 @@ bool draw(const Draw &d) {
     }
     Target *tgt;
     if (!get_target(d.target_addr, d.target_w, d.target_h, tgt)) return false;
+    if (d.depth_addr) g_depth_owner[d.depth_addr] = d.target_addr;
 
     // Texturas: imagens enviadas (cache por conteúdo) ou cópia de um alvo deste quadro.
     std::vector<Image> snapshots;
@@ -493,25 +499,35 @@ bool draw(const Draw &d) {
     for (const Texture &t : d.textures) {
         if (t.binding >= kTexBindings) continue;
         if (t.target_addr) {
-            auto it = g_targets.find(t.target_addr);
-            if (it == g_targets.end() || it->first == d.target_addr) continue;
-            Image &src = it->second.color;
+            uint32_t owner = t.target_addr;
+            if (t.depth) {
+                auto o = g_depth_owner.find(t.target_addr);
+                if (o == g_depth_owner.end()) continue;
+                owner = o->second;
+            }
+            auto it = g_targets.find(owner);
+            if (it == g_targets.end() || (!t.depth && it->first == d.target_addr)) continue;
+            Image &src = t.depth ? it->second.depth : it->second.color;
+            const VkImageLayout back = t.depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                                               : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            const VkImageAspectFlags aspect = t.depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
             Image snap;
-            if (!make_image(snap, src.w, src.h, kColor, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+            if (!make_image(snap, src.w, src.h, src.fmt, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
                 return false;
             if (!begin_cmd()) return false;
             barrier(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
             barrier(snap, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             VkImageCopy c{};
-            c.srcSubresource = c.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            c.srcSubresource = c.dstSubresource = {aspect, 0, 0, 1};
             c.extent = {src.w, src.h, 1};
             vkCmdCopyImage(g_cmd, src.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, snap.img,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
-            barrier(src, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            barrier(src, back);
             barrier(snap, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             if (!submit_wait()) return false;
             snapshots.push_back(snap);
             img_info[t.binding].imageView = snap.view;
+            if (t.depth) img_info[t.binding].sampler = g_sampler_nearest;
             continue;
         }
         if (!t.rgba) continue;
@@ -644,6 +660,7 @@ void shutdown() {
     }
     destroy(g_white);
     vkDestroySampler(g_dev, g_sampler, nullptr);
+    vkDestroySampler(g_dev, g_sampler_nearest, nullptr);
     vkDestroyPipelineLayout(g_dev, g_layout, nullptr);
     for (auto l : g_dsl) vkDestroyDescriptorSetLayout(g_dev, l, nullptr);
     vkDestroyRenderPass(g_dev, g_rp, nullptr);

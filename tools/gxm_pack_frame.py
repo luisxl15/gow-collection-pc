@@ -16,7 +16,8 @@ profundidade, viewport, alvo). Formato (little-endian):
       f32 atributos[n_atributos][n_vértices][4]; u32 índices[n_índices]
       u32 n, bytes (uniforms de vértice); u32 n, bytes (uniforms de fragmento)
       u32 n, SPIR-V do vértice; u32 n, SPIR-V do fragmento
-      u32 n_texturas; por textura: u32 binding, end_alvo (0 = pixels a seguir), l, a, rgba[l*a*4]
+      u32 n_texturas; por textura: u32 binding, tipo, endereço, l, a [, rgba[l*a*4] se tipo 0]
+        tipo 0 = pixels a seguir, 1 = alvo de cor deste quadro, 2 = superfície de profundidade
 """
 import json
 import os
@@ -32,7 +33,7 @@ import gxm_tex_dump as tx  # noqa: E402
 from vitarecomp.usse.decode import Program  # noqa: E402
 from vitarecomp.usse.translate import Unsupported, translate  # noqa: E402
 
-VERSION = 1
+VERSION = 2
 
 
 def main():
@@ -42,6 +43,7 @@ def main():
     draws = [json.loads(line) for line in open(os.path.join(d, "draws.jsonl"))]
     progs, spv, texcache = {}, {}, {}
     targets = {dr["cs"][4] for dr in draws}
+    depths = {dr["ds"] for dr in draws if dr.get("ds")}
 
     def program(addr):
         if addr not in progs:
@@ -112,8 +114,9 @@ def main():
         for t in dr["tex"] or []:
             unit, words = t[0], t[1:5]
             desc = tx.describe(words)
-            if desc["data"] in targets:
-                texs.append(struct.pack("<4I", unit, desc["data"], desc["width"], desc["height"]))
+            if desc["data"] in targets or desc["data"] in depths:
+                kind = 1 if desc["data"] in targets else 2
+                texs.append(struct.pack("<5I", unit, kind, desc["data"], desc["width"], desc["height"]))
                 continue
             key = tuple(words)
             if key not in texcache:
@@ -128,7 +131,7 @@ def main():
                     img = np.concatenate([img, np.full(img.shape[:2] + (1,), 255, np.uint8)], 2)
                 texcache[key] = img
             img = texcache[key]
-            texs.append(struct.pack("<4I", unit, 0, img.shape[1], img.shape[0]) + img.tobytes())
+            texs.append(struct.pack("<5I", unit, 0, 0, img.shape[1], img.shape[0]) + img.tobytes())
         parts.append(struct.pack("<I", len(texs)))
         parts.extend(texs)
     with open(out, "wb") as f:

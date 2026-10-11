@@ -1,7 +1,10 @@
 // Reproduz um quadro empacotado por tools/gxm_pack_frame.py no renderizador Vulkan do vitart e grava cada
 // alvo em PNG.
 //
-//   gxm_replay <quadro.gxmf> <dir de saída> [--validation] [--limit N]
+//   gxm_replay <quadro.gxmf> <dir de saída> [--validation] [--limit N] [--passes N]
+//
+// Com --passes 2 (padrão) o quadro roda duas vezes: os primeiros desenhos leem alvos (a neblina, por
+// exemplo) que o quadro anterior deixou, como no jogo.
 #include "../../runtime/vitart/gxm_vk.h"
 
 #include <cstdio>
@@ -40,10 +43,11 @@ int main(int argc, char **argv) {
         return 2;
     }
     bool validation = false;
-    int limit = 1 << 30;
+    int limit = 1 << 30, passes = 2;
     for (int i = 3; i < argc; i++) {
         if (!std::strcmp(argv[i], "--validation")) validation = true;
         if (!std::strcmp(argv[i], "--limit") && i + 1 < argc) limit = std::atoi(argv[++i]);
+        if (!std::strcmp(argv[i], "--passes") && i + 1 < argc) passes = std::atoi(argv[++i]);
     }
     std::ifstream f(argv[1], std::ios::binary);
     std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -53,7 +57,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     const uint32_t version = r.u32(), ndraws = r.u32();
-    if (version != 1) {
+    if (version != 2) {
         std::fprintf(stderr, "versão %u não suportada\n", version);
         return 1;
     }
@@ -62,6 +66,12 @@ int main(int argc, char **argv) {
         return 1;
     }
     int drawn = 0, skipped = 0, failed = 0;
+    const uint8_t *first = r.p;
+    for (int pass = 0; pass < passes; pass++) {
+    r.p = first;
+    drawn = skipped = failed = 0;
+    // na última passada vale o --limit (bisseção); as anteriores rodam o quadro inteiro
+    const int lim = pass == passes - 1 ? limit : 1 << 30;
     for (uint32_t i = 0; i < ndraws && r.ok; i++) {
         gvk::Draw d;
         const uint32_t valid = r.u32();
@@ -79,12 +89,15 @@ int main(int argc, char **argv) {
         const uint32_t ntex = r.u32();
         for (uint32_t t = 0; t < ntex && r.ok; t++) {
             gvk::Texture tx;
-            tx.binding = r.u32(), tx.target_addr = r.u32(), tx.width = r.u32(), tx.height = r.u32();
-            if (!tx.target_addr) tx.rgba = r.bytes((size_t)tx.width * tx.height * 4);
+            tx.binding = r.u32();
+            const uint32_t kind = r.u32();
+            tx.target_addr = r.u32(), tx.width = r.u32(), tx.height = r.u32();
+            tx.depth = kind == 2;
+            if (kind == 0) tx.rgba = r.bytes((size_t)tx.width * tx.height * 4);
             d.textures.push_back(tx);
         }
         if (!r.ok) break;
-        if (!valid || (int)i >= limit || !d.vs_size || !d.fs_size) {
+        if (!valid || (int)i >= lim || !d.vs_size || !d.fs_size) {
             skipped++;
             continue;
         }
@@ -94,6 +107,7 @@ int main(int argc, char **argv) {
             failed++;
             std::fprintf(stderr, "desenho %u: %s\n", i, gvk::last_error());
         }
+    }
     }
     gvk::end_frame();
     std::printf("%d desenhados, %d pulados, %d com erro%s\n", drawn, skipped, failed, r.ok ? "" : " (arquivo truncado)");

@@ -17,6 +17,7 @@ namespace gvk {
 struct Texture {
     uint32_t binding = 0;
     uint32_t target_addr = 0; // != 0: usa o alvo desenhado neste endereço
+    bool depth = false;       // target_addr é uma superfície de profundidade (lida como float em .r)
     uint32_t width = 1, height = 1;
     const uint8_t *rgba = nullptr; // width*height*4
 };
