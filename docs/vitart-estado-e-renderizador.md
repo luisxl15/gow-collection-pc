@@ -142,6 +142,11 @@ Correção: `neon.py::_expand_i64` lê imm8 = i:imm3:imm4 da codificação e exp
 jogo tem 55 dessas instruções e todas estavam erradas. O fuzz de NEON não gerava imediatos vetoriais;
 o caso foi acrescentado em `tests/fuzz_arm/gen_fuzz_neon.py`.
 
+Resultado (captura nova do quadro 900, `dump900b`): 0 de 219 desenhos com o padrão ruim, e o
+rasterizador de prova passa a desenhar o Kratos, que antes sumia
+(`docs/quadro900-antes-depois-vmov-i64.png`). O bug afetava as 55 instruções do jogo, não só o
+skinning: lógica, física ou câmera que usem essa máscara também estavam erradas.
+
 O próximo marco não é cobertura, é **fidelidade**:
 1. ligar a E/S de verdade (contêineres de SA, endereços de buffer, literais, varyings e as leituras de
    textura não dependentes nos PA);
