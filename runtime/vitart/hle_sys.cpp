@@ -382,6 +382,7 @@ uint32_t display_framebuffer(uint32_t *pitch, uint32_t *w, uint32_t *h) {
     if (h) *h = g_fb_h;
     return g_fb_base;
 }
+void gxm_present(uint32_t fb); // hle_gxm.cpp
 VT_HLE(sceDisplaySetFrameBuf) {
     // SceDisplayFrameBuf: size, base, pitch, pixelformat, width, height
     const uint32_t p = arg(ctx, 0);
@@ -392,6 +393,7 @@ VT_HLE(sceDisplaySetFrameBuf) {
         g_fb_h = rd32(p + 20);
         if (g_fb_sets++ == 0)
             logf("vitart: framebuffer 0x%08x, %ux%u, pitch %u, formato 0x%x", g_fb_base.load(), g_fb_w.load(), g_fb_h.load(), g_fb_pitch.load(), rd32(p + 12));
+        gxm_present(g_fb_base);
     }
     ret(ctx, SCE_OK);
 }

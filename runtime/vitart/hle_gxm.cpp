@@ -3,6 +3,12 @@
 // ponteiros válidos) com o estado no host. Ainda não desenha: grava o que cada cena pede e
 // conclui as notificações na hora, para o jogo seguir o laço. O renderizador Vulkan entra aqui.
 #include "vitart.h"
+#include "gxm_tex.h"
+#include "gxm_vk.h"
+
+#include <array>
+#include <cmath>
+#include <cstring>
 
 #include <chrono>
 #include <cstdlib>
@@ -201,6 +207,222 @@ static void dump_draw(Context &c, uint32_t prim, uint32_t itype, uint32_t idata,
         blend, fp && !fp->blend.empty() ? 1 : 0, fp ? fp->output_format : 0, c.depth_func, c.depth_write, c.cull,
         cs ? rd32(cs) : 0, cs ? rd32(cs + 8) : 0, cs ? rd32(cs + 12) : 0, cs ? rd32(cs + 16) : 0, cs ? rd32(cs + 20) : 0,
         c.scene.depth_surface ? rd32(c.scene.depth_surface + 8) : 0);
+}
+
+
+// =============================================================== renderizador Vulkan (ao vivo)
+// VITART_VULKAN=1 liga. Os shaders vêm do cache gerado offline por tools/usse_build_cache.py
+// (VITART_SPV_DIR, padrão "spv"), pelo FNV-1a de 64 bits do binário do programa; programa sem cache
+// é gravado em <dir>/miss/<hash>.gxp para a próxima geração do cache, e o desenho fica de fora.
+static uint32_t gxp_param(uint32_t prog, uint32_t i);
+static int g_vk = -1; // -1 = ainda não decidido
+static std::string g_spv_dir;
+static std::mutex g_vk_mutex;
+static std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint32_t>>> g_spv; // programa -> SPIR-V
+static std::map<std::array<uint32_t, 4>, std::shared_ptr<std::vector<uint8_t>>> g_texcache;
+static uint64_t g_vk_draws = 0, g_vk_skipped = 0;
+
+static bool vk_on() {
+    if (g_vk < 0) {
+        const char *e = getenv("VITART_VULKAN");
+        g_vk = e && *e == '1';
+        if (g_vk) {
+            const char *d = getenv("VITART_SPV_DIR");
+            g_spv_dir = d ? d : "spv";
+            if (!gvk::init(getenv("VITART_VK_VALIDATION") != nullptr, true)) {
+                logf("vitart: Vulkan indisponível: %s", gvk::last_error());
+                g_vk = 0;
+            } else {
+                logf("vitart: renderizador Vulkan ligado (shaders em %s)", g_spv_dir.c_str());
+            }
+        }
+    }
+    return g_vk == 1;
+}
+
+static std::shared_ptr<std::vector<uint32_t>> spv_of(uint32_t prog) {
+    auto it = g_spv.find(prog);
+    if (it != g_spv.end()) return it->second;
+    const uint32_t size = rd32(prog + 8);
+    const uint8_t *b = ptr<uint8_t>(prog);
+    uint64_t h = 0xCBF29CE484222325ull;
+    for (uint32_t i = 0; i < size; i++) h = (h ^ b[i]) * 0x100000001B3ull;
+    char name[64];
+    std::snprintf(name, sizeof name, "%016llx", (unsigned long long)h);
+    std::shared_ptr<std::vector<uint32_t>> code;
+    std::ifstream f(g_spv_dir + "/" + name + ".spv", std::ios::binary);
+    if (f) {
+        std::vector<char> raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        code = std::make_shared<std::vector<uint32_t>>(raw.size() / 4);
+        std::memcpy(code->data(), raw.data(), code->size() * 4);
+    } else {
+        std::filesystem::create_directories(g_spv_dir + "/miss");
+        std::ofstream o(g_spv_dir + "/miss/" + name + ".gxp", std::ios::binary);
+        o.write(reinterpret_cast<const char *>(b), size);
+        logf("vitart: programa 0x%08x sem SPIR-V no cache (%s)", prog, name);
+    }
+    return g_spv[prog] = code;
+}
+
+// Formato de atributo (SceGxmAttributeFormat) -> float, normalizado quando pedido.
+static float attr_value(const uint8_t *p, uint32_t fmt, uint32_t i) {
+    switch (fmt) {
+    case 0: return p[i];
+    case 1: return (int8_t)p[i];
+    case 2: return reinterpret_cast<const uint16_t *>(p)[i];
+    case 3: return reinterpret_cast<const int16_t *>(p)[i];
+    case 4: return p[i] / 255.0f;
+    case 5: return (int8_t)p[i] / 127.0f;
+    case 6: return reinterpret_cast<const uint16_t *>(p)[i] / 65535.0f;
+    case 7: return reinterpret_cast<const int16_t *>(p)[i] / 32767.0f;
+    case 8: {
+        const uint16_t hbits = reinterpret_cast<const uint16_t *>(p)[i];
+        const uint32_t s = (hbits >> 15) & 1, e = (hbits >> 10) & 31, m = hbits & 1023;
+        float v = e == 0 ? std::ldexp((float)m, -24) : e == 31 ? (m ? NAN : INFINITY) : std::ldexp((float)(m | 1024), (int)e - 25);
+        return s ? -v : v;
+    }
+    case 9: return reinterpret_cast<const float *>(p)[i];
+    default: return 0.0f;
+    }
+}
+static uint32_t attr_size(uint32_t fmt) { return fmt <= 1 || fmt == 4 || fmt == 5 ? 1 : fmt == 9 ? 4 : 2; }
+
+static void vk_draw(Context &c, uint32_t prim, uint32_t itype, uint32_t idata, uint32_t icount) {
+    std::shared_ptr<VertexProgram> vp;
+    std::shared_ptr<FragmentProgram> fp;
+    {
+        const std::lock_guard<std::mutex> lock(g_gxm_mutex);
+        auto v = g_vprogs.find(c.vprog);
+        auto f = g_fprogs.find(c.fprog);
+        if (v != g_vprogs.end()) vp = v->second;
+        if (f != g_fprogs.end()) fp = f->second;
+    }
+    const uint32_t cs = c.scene.color_surface;
+    if (!vp || !fp || !cs || !icount) return;
+    const std::lock_guard<std::mutex> lock(g_vk_mutex);
+    auto vs = spv_of(vp->program), fs = spv_of(fp->program);
+    if (!vs || !fs) {
+        g_vk_skipped++;
+        return;
+    }
+    const uint32_t kind = prim >> 26; // 0 triângulos, 3 faixa, 4 leque (linhas e pontos ficam de fora)
+    const uint32_t isz = (itype & 0x01000000u) ? 4 : 2;
+    std::vector<uint32_t> idx(icount);
+    uint32_t maxi = 0;
+    for (uint32_t i = 0; i < icount; i++) {
+        idx[i] = isz == 4 ? rd32(idata + 4 * i) : *ptr<uint16_t>(idata + 2 * i);
+        if (idx[i] > maxi) maxi = idx[i];
+    }
+    std::vector<uint32_t> tris;
+    if (kind == 0)
+        tris.assign(idx.begin(), idx.begin() + icount / 3 * 3);
+    else if (kind == 3)
+        for (uint32_t i = 0; i + 2 < icount; i++) tris.insert(tris.end(), {idx[i], idx[i + 1], idx[i + 2]});
+    else if (kind == 4)
+        for (uint32_t i = 1; i + 1 < icount; i++) tris.insert(tris.end(), {idx[0], idx[i], idx[i + 1]});
+    if (tris.empty() || maxi > (1u << 20)) return;
+    const uint32_t nv = maxi + 1;
+
+    // Atributos: location k = k-ésimo parâmetro de entrada (categoria 0), ligado pelo índice de recurso.
+    std::vector<uint32_t> locs;
+    const uint32_t nparams = rd32(vp->program + 0x24);
+    for (uint32_t i = 0; i < nparams; i++) {
+        const uint32_t p = gxp_param(vp->program, i);
+        if ((*ptr<uint8_t>(p + 4) & 15) == 0) locs.push_back(rd32(p + 12));
+    }
+    std::vector<float> attrs(locs.size() * nv * 4, 0.0f);
+    for (size_t k = 0; k < locs.size(); k++)
+        for (uint32_t a = 0; a < vp->attr_count; a++) {
+            const uint8_t *d = &vp->attributes[8 * a];
+            const uint32_t st = d[0] | (d[1] << 8), off = d[2] | (d[3] << 8), fmt = d[4], comps = d[5], reg = d[6] | (d[7] << 8);
+            if (reg != locs[k] || st >= 16 || !c.streams[st]) continue;
+            const uint32_t stride = *reinterpret_cast<const uint16_t *>(&vp->streams[4 * st]);
+            for (uint32_t v = 0; v < nv; v++) {
+                const uint8_t *src = ptr<uint8_t>(c.streams[st] + v * stride + off);
+                for (uint32_t ch = 0; ch < comps && ch < 4; ch++) attrs[(k * nv + v) * 4 + ch] = attr_value(src, fmt, ch);
+            }
+            break;
+        }
+
+    gvk::Draw d;
+    d.prim = kind;
+    d.cull = c.cull;
+    d.has_blend = fp->blend.size() == 4;
+    d.blend = d.has_blend ? *reinterpret_cast<const uint32_t *>(fp->blend.data()) : 0;
+    d.depth_func = (c.depth_func >> 22) & 7;
+    d.depth_write = c.depth_write == 0;
+    std::memcpy(d.vps, c.viewport_s, sizeof d.vps);
+    d.target_w = rd32(cs + 8), d.target_h = rd32(cs + 12), d.target_addr = rd32(cs + 20);
+    d.depth_addr = c.scene.depth_surface ? rd32(c.scene.depth_surface + 8) : 0;
+    d.vertex_count = nv;
+    d.attr_count = (uint32_t)locs.size();
+    d.attrs = attrs.data();
+    d.indices = tris.data();
+    d.index_count = (uint32_t)tris.size();
+    const uint32_t vsize = rd32(vp->program + 0x64) * 4, fsize = rd32(fp->program + 0x64) * 4;
+    if (c.vuniform && vsize) d.vert_uniforms = ptr<uint8_t>(c.vuniform), d.vert_uniforms_size = vsize;
+    if (c.funiform && fsize) d.frag_uniforms = ptr<uint8_t>(c.funiform), d.frag_uniforms_size = fsize;
+    d.vs = vs->data(), d.vs_size = (uint32_t)vs->size() * 4;
+    d.fs = fs->data(), d.fs_size = (uint32_t)fs->size() * 4;
+    std::vector<std::shared_ptr<std::vector<uint8_t>>> keep;
+    for (uint32_t i = 0; i < 16; i++) {
+        if (!c.textures[i]) continue;
+        std::array<uint32_t, 4> w;
+        std::memcpy(w.data(), ptr<uint32_t>(c.textures[i]), 16);
+        const gxmtex::Info info = gxmtex::describe(w.data());
+        gvk::Texture t;
+        t.binding = i;
+        t.width = info.width, t.height = info.height;
+        if (gvk::is_target(info.data)) {
+            t.target_addr = info.data;
+        } else if (gvk::is_depth(info.data)) {
+            t.target_addr = info.data, t.depth = true;
+        } else {
+            auto it = g_texcache.find(w);
+            if (it == g_texcache.end()) {
+                auto px = std::make_shared<std::vector<uint8_t>>();
+                if (!gxmtex::decode(ptr<uint8_t>(0), info, *px)) px.reset();
+                it = g_texcache.emplace(w, px).first;
+            }
+            if (!it->second) continue;
+            keep.push_back(it->second);
+            t.rgba = it->second->data();
+        }
+        d.textures.push_back(t);
+    }
+    if (!gvk::draw(d))
+        logf("vitart: desenho Vulkan falhou: %s", gvk::last_error());
+    else
+        g_vk_draws++;
+}
+
+void gxm_present(uint32_t fb) {
+    if (g_vk != 1) return;
+    static uint32_t frame = 0;
+    static const uint32_t dump_at = getenv("VITART_VK_DUMP") ? (uint32_t)std::atoi(getenv("VITART_VK_DUMP")) : 0;
+    if (++frame == dump_at || (dump_at && frame % 300 == 0)) {
+        // Quadro apresentado em PPM (RGB): medir a imagem sem captura de tela.
+        std::vector<uint8_t> px;
+        uint32_t w, h;
+        if (gvk::read_target(fb, px, w, h)) {
+            char path[64];
+            std::snprintf(path, sizeof path, "vkframe_%05u.ppm", frame);
+            if (FILE *f = fopen(path, "wb")) {
+                fprintf(f, "P6\n%u %u\n255\n", w, h);
+                for (size_t i = 0; i < (size_t)w * h; i++) fwrite(&px[4 * i], 1, 3, f);
+                fclose(f);
+            }
+            logf("vitart: quadro %u apresentado -> %s (%llu desenhos Vulkan, %llu sem shader)", frame, path,
+                 (unsigned long long)g_vk_draws, (unsigned long long)g_vk_skipped);
+        }
+    }
+    gvk::present(fb);
+    if (gvk::window_closed()) {
+        logf("vitart: janela fechada (%llu desenhos Vulkan, %llu sem shader)", (unsigned long long)g_vk_draws,
+             (unsigned long long)g_vk_skipped);
+        gvk::shutdown();
+        std::exit(0);
+    }
 }
 
 // =============================================================== inicialização
@@ -631,6 +853,7 @@ VT_HLE(sceGxmDraw) {
         for (uint32_t t : c->textures) dump_texture(t);
         dump_draw(*c, arg(ctx, 1), arg(ctx, 2), arg(ctx, 3), arg(ctx, 4));
     }
+    if (vk_on()) vk_draw(*c, arg(ctx, 1), arg(ctx, 2), arg(ctx, 3), arg(ctx, 4));
     if (c->in_scene && c->scene.draws.size() < 100000)
         c->scene.draws.push_back(DrawCall{ arg(ctx, 1), arg(ctx, 2), arg(ctx, 3), arg(ctx, 4), c->vprog, c->fprog });
     ret(ctx, SCE_OK);
@@ -711,6 +934,14 @@ VT_HLE(sceGxmDrawPrecomputed) {
     // (context, const SceGxmPrecomputedDraw *state): programa de vértice e streams vêm do estado.
     g_draws++;
     const uint32_t st = arg(ctx, 1);
+    if (st && vk_on())
+        if (auto c = context_of(arg(ctx, 0))) {
+            Context tmp = *c;
+            tmp.vprog = rd32(st);
+            const uint32_t mem = rd32(st + 4);
+            for (int i = 0; i < 8; i++) tmp.streams[i] = rd32(mem + 16 + 4 * i);
+            vk_draw(tmp, rd32(mem), rd32(mem + 4), rd32(mem + 8), rd32(mem + 12));
+        }
     if (st && dumping())
         if (auto c = context_of(arg(ctx, 0))) {
             Context tmp = *c;

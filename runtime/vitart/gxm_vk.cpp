@@ -6,7 +6,13 @@
 // estar certa.
 #include "gxm_vk.h"
 
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
+
+#include <mutex>
 
 #include <cstdio>
 #include <cstring>
@@ -33,6 +39,16 @@ VkDescriptorSetLayout g_dsl[3] = {};
 VkPipelineLayout g_layout = VK_NULL_HANDLE;
 VkSampler g_sampler = VK_NULL_HANDLE, g_sampler_nearest = VK_NULL_HANDLE;
 constexpr uint32_t kTexBindings = 16;
+std::recursive_mutex g_lock; // desenhos vêm da thread de render do jogo, a apresentação da de vídeo
+
+// Janela e swapchain (só com init(..., true)).
+HWND g_hwnd = nullptr;
+bool g_closed = false;
+VkSurfaceKHR g_surface = VK_NULL_HANDLE;
+VkSwapchainKHR g_swap = VK_NULL_HANDLE;
+std::vector<VkImage> g_swap_images;
+VkExtent2D g_swap_extent{};
+VkSemaphore g_acquired = VK_NULL_HANDLE, g_rendered = VK_NULL_HANDLE;
 constexpr VkFormat kColor = VK_FORMAT_R8G8B8A8_UNORM, kDepth = VK_FORMAT_D32_SFLOAT;
 
 bool fail(const char *what, VkResult r) {
@@ -357,7 +373,139 @@ VkPipeline pipeline(const Draw &d, VkShaderModule vs, VkShaderModule fs) {
 
 const char *last_error() { return g_err.c_str(); }
 
-bool init(bool validation) {
+static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_CLOSE) {
+        g_closed = true;
+        return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+static bool create_window() {
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = wndproc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"vitart";
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    RegisterClassW(&wc);
+    RECT r{0, 0, 1440, 816}; // 2x o framebuffer de 720x408
+    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME, FALSE);
+    g_hwnd = CreateWindowExW(0, L"vitart", L"God of War (vitart, Vulkan)", (WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME) | WS_VISIBLE,
+                             CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, nullptr, nullptr, wc.hInstance, nullptr);
+    if (!g_hwnd) {
+        g_err = "CreateWindowEx falhou";
+        return false;
+    }
+    VkWin32SurfaceCreateInfoKHR si{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
+    si.hinstance = wc.hInstance;
+    si.hwnd = g_hwnd;
+    VKC(vkCreateWin32SurfaceKHR(g_inst, &si, nullptr, &g_surface));
+    VkBool32 ok = VK_FALSE;
+    vkGetPhysicalDeviceSurfaceSupportKHR(g_phys, g_qfam, g_surface, &ok);
+    if (!ok) {
+        g_err = "a fila não apresenta nesta superfície";
+        return false;
+    }
+    VkSurfaceCapabilitiesKHR caps;
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_phys, g_surface, &caps);
+    uint32_t nf = 0;
+    vkGetPhysicalDeviceSurfaceFormatsKHR(g_phys, g_surface, &nf, nullptr);
+    std::vector<VkSurfaceFormatKHR> fmts(nf);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(g_phys, g_surface, &nf, fmts.data());
+    VkSurfaceFormatKHR fmt = fmts[0];
+    for (auto &f : fmts)
+        if (f.format == VK_FORMAT_B8G8R8A8_UNORM) fmt = f;
+    g_swap_extent = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent : VkExtent2D{1440, 816};
+    VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+    ci.surface = g_surface;
+    ci.minImageCount = caps.minImageCount + 1;
+    if (caps.maxImageCount && ci.minImageCount > caps.maxImageCount) ci.minImageCount = caps.maxImageCount;
+    ci.imageFormat = fmt.format;
+    ci.imageColorSpace = fmt.colorSpace;
+    ci.imageExtent = g_swap_extent;
+    ci.imageArrayLayers = 1;
+    ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    ci.preTransform = caps.currentTransform;
+    ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    ci.clipped = VK_TRUE;
+    VKC(vkCreateSwapchainKHR(g_dev, &ci, nullptr, &g_swap));
+    uint32_t ni = 0;
+    vkGetSwapchainImagesKHR(g_dev, g_swap, &ni, nullptr);
+    g_swap_images.resize(ni);
+    vkGetSwapchainImagesKHR(g_dev, g_swap, &ni, g_swap_images.data());
+    VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    VKC(vkCreateSemaphore(g_dev, &sci, nullptr, &g_acquired));
+    VKC(vkCreateSemaphore(g_dev, &sci, nullptr, &g_rendered));
+    return true;
+}
+
+bool window_closed() { return g_closed; }
+
+bool is_target(uint32_t addr) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    return g_targets.count(addr) != 0;
+}
+
+bool is_depth(uint32_t addr) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    return g_depth_owner.count(addr) != 0;
+}
+
+bool present(uint32_t addr) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    if (!g_dev) return false;
+    if (!g_swap && !g_hwnd && !create_window()) return false;
+    if (!g_swap) return false;
+    MSG msg;
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    auto it = g_targets.find(addr);
+    if (it == g_targets.end()) return false;
+    uint32_t idx = 0;
+    VkResult r = vkAcquireNextImageKHR(g_dev, g_swap, UINT64_MAX, g_acquired, VK_NULL_HANDLE, &idx);
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return fail("vkAcquireNextImageKHR", r);
+    if (!begin_cmd()) return false;
+    Image &src = it->second.color;
+    Image dst;
+    dst.img = g_swap_images[idx];
+    dst.fmt = VK_FORMAT_B8G8R8A8_UNORM;
+    barrier(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    barrier(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkImageBlit b{};
+    b.srcSubresource = b.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    b.srcOffsets[1] = {(int32_t)src.w, (int32_t)src.h, 1};
+    b.dstOffsets[1] = {(int32_t)g_swap_extent.width, (int32_t)g_swap_extent.height, 1};
+    vkCmdBlitImage(g_cmd, src.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
+                   VK_FILTER_LINEAR);
+    barrier(src, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    barrier(dst, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    VKC(vkEndCommandBuffer(g_cmd));
+    const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.waitSemaphoreCount = 1;
+    si.pWaitSemaphores = &g_acquired;
+    si.pWaitDstStageMask = &stage;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &g_cmd;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores = &g_rendered;
+    VKC(vkResetFences(g_dev, 1, &g_fence));
+    VKC(vkQueueSubmit(g_queue, 1, &si, g_fence));
+    VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+    pi.waitSemaphoreCount = 1;
+    pi.pWaitSemaphores = &g_rendered;
+    pi.swapchainCount = 1;
+    pi.pSwapchains = &g_swap;
+    pi.pImageIndices = &idx;
+    vkQueuePresentKHR(g_queue, &pi);
+    VKC(vkWaitForFences(g_dev, 1, &g_fence, VK_TRUE, UINT64_MAX));
+    return true;
+}
+
+bool init(bool validation, bool window) {
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.pApplicationName = "vitart";
     app.apiVersion = VK_API_VERSION_1_1;
@@ -367,6 +515,11 @@ bool init(bool validation) {
     if (validation) {
         ici.enabledLayerCount = 1;
         ici.ppEnabledLayerNames = &layer;
+    }
+    const char *iext[2] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+    if (window) {
+        ici.enabledExtensionCount = 2;
+        ici.ppEnabledExtensionNames = iext;
     }
     VKC(vkCreateInstance(&ici, nullptr, &g_inst));
     uint32_t n = 0;
@@ -401,6 +554,11 @@ bool init(bool validation) {
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
+    const char *dext = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    if (window) {
+        dci.enabledExtensionCount = 1;
+        dci.ppEnabledExtensionNames = &dext;
+    }
     VKC(vkCreateDevice(g_phys, &dci, nullptr, &g_dev));
     vkGetDeviceQueue(g_dev, g_qfam, 0, &g_queue);
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -473,10 +631,13 @@ bool init(bool validation) {
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     VKC(vkCreateSampler(g_dev, &sci, nullptr, &g_sampler_nearest));
     const uint8_t white[4] = {255, 255, 255, 255};
+    // A janela nasce na primeira apresentação: as mensagens só chegam à thread que a criou, e quem
+    // apresenta é a thread de vídeo, não a que inicializa.
     return upload_texture(g_white, 1, 1, white);
 }
 
 bool draw(const Draw &d) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (!d.vs || !d.fs || !d.index_count || !d.vertex_count || !d.target_w || !d.target_h) return true;
     VkShaderModule vs = module(d.vs, d.vs_size), fs = module(d.fs, d.fs_size);
     if (!vs || !fs) {
@@ -625,6 +786,7 @@ std::vector<uint32_t> targets() {
 }
 
 bool read_target(uint32_t addr, std::vector<uint8_t> &rgba, uint32_t &w, uint32_t &h) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
     auto it = g_targets.find(addr);
     if (it == g_targets.end()) return false;
     Image &im = it->second.color;
@@ -649,8 +811,13 @@ bool read_target(uint32_t addr, std::vector<uint8_t> &rgba, uint32_t &w, uint32_
 }
 
 void shutdown() {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (!g_dev) return;
     vkDeviceWaitIdle(g_dev);
+    if (g_swap) vkDestroySwapchainKHR(g_dev, g_swap, nullptr);
+    if (g_acquired) vkDestroySemaphore(g_dev, g_acquired, nullptr);
+    if (g_rendered) vkDestroySemaphore(g_dev, g_rendered, nullptr);
+    if (g_surface) vkDestroySurfaceKHR(g_inst, g_surface, nullptr);
     for (auto &kv : g_pipes) if (kv.second) vkDestroyPipeline(g_dev, kv.second, nullptr);
     for (auto &kv : g_modules) if (kv.second) vkDestroyShaderModule(g_dev, kv.second, nullptr);
     for (auto &kv : g_textures) destroy(kv.second);

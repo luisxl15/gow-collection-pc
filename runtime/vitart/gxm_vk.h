@@ -41,7 +41,13 @@ struct Draw {
     std::vector<Texture> textures;
 };
 
-bool init(bool validation);
+// window: cria também a janela e o swapchain (apresentação ao vivo).
+bool init(bool validation, bool window = false);
+// Mostra o alvo de cor no endereço dado na janela (escala para o tamanho da janela).
+bool present(uint32_t addr);
+bool window_closed();
+bool is_target(uint32_t addr);
+bool is_depth(uint32_t addr);
 void shutdown();
 // Grava o desenho no quadro atual (os desenhos são executados em ordem em end_frame).
 bool draw(const Draw &d);
