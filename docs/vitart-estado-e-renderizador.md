@@ -222,3 +222,9 @@ bytes), e o deslocamento conta componentes dentro desses elementos. Copiar cont�
 `g_LightDir` uma palavra antes; o shader lia a palavra 30 (sobra do anel) como z da luz. Prova:
 zerar as palavras 22/23/30/31 no pacote (`GXM_ZERO_VU`) já removia as manchas; com a correção, o rosto
 sai liso ao vivo (`docs/ao-vivo-vulkan-titulo-corrigido.png`).
+
+Desempenho (02:36): a apresentação usa command buffer e fence próprios e não espera a GPU (61 -> 0,2 ms);
+`vk_draw` caiu de 117 para 53 ms por quadro (a thread do jogo deixou de esperar o mutex segurado durante
+a espera da GPU). O total ficou em 8,3 quadros/s: o gargalo restante ainda não foi medido (candidatos:
+espera em frame_begin pela GPU, de 35 ms; tempo fora do renderizador). Próximo: medir o tempo de GPU do
+quadro (timestamps) e manter dois quadros em voo (dois anéis e dois command buffers).

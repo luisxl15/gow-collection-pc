@@ -35,6 +35,9 @@ VkQueue g_queue = VK_NULL_HANDLE;
 uint32_t g_qfam = 0;
 VkCommandPool g_pool = VK_NULL_HANDLE;
 VkCommandBuffer g_cmd = VK_NULL_HANDLE;
+VkCommandBuffer g_cur = VK_NULL_HANDLE;  // onde barrier() grava (g_cmd, ou g_pcmd durante a apresentação)
+VkCommandBuffer g_pcmd = VK_NULL_HANDLE; // apresentação: buffer e fence próprios, sem esperar a GPU
+VkFence g_pfence = VK_NULL_HANDLE;
 VkFence g_fence = VK_NULL_HANDLE;
 VkPhysicalDeviceMemoryProperties g_memprops{};
 VkRenderPass g_rp = VK_NULL_HANDLE;
@@ -162,7 +165,7 @@ void barrier(Image &im, VkImageLayout to) {
     b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.image = im.img;
     b.subresourceRange = {(VkImageAspectFlags)(im.fmt == kDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), 0, 1, 0, 1};
-    vkCmdPipelineBarrier(g_cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+    vkCmdPipelineBarrier(g_cur, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
                          nullptr, 1, &b);
     im.layout = to;
 }
@@ -551,7 +554,8 @@ void begin_scene(uint32_t color_addr) {
 bool present(uint32_t addr) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (!g_dev) return false;
-    if (!frame_flush(true)) return false;
+    // O quadro vai para a fila sem esperar; o blit vem depois na mesma fila, que garante a ordem.
+    if (!frame_flush(false)) return false;
     if (!g_swap && !g_hwnd && !create_window()) return false;
     if (!g_swap) return false;
     MSG msg;
@@ -564,7 +568,12 @@ bool present(uint32_t addr) {
     uint32_t idx = 0;
     VkResult r = vkAcquireNextImageKHR(g_dev, g_swap, UINT64_MAX, g_acquired, VK_NULL_HANDLE, &idx);
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return fail("vkAcquireNextImageKHR", r);
-    if (!begin_cmd()) return false;
+    VKC(vkWaitForFences(g_dev, 1, &g_pfence, VK_TRUE, UINT64_MAX)); // apresentação anterior concluída
+    VKC(vkResetCommandBuffer(g_pcmd, 0));
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VKC(vkBeginCommandBuffer(g_pcmd, &bi));
+    g_cur = g_pcmd;
     Image &src = it->second.color;
     Image dst;
     dst.img = g_swap_images[idx];
@@ -575,22 +584,23 @@ bool present(uint32_t addr) {
     b.srcSubresource = b.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     b.srcOffsets[1] = {(int32_t)src.w, (int32_t)src.h, 1};
     b.dstOffsets[1] = {(int32_t)g_swap_extent.width, (int32_t)g_swap_extent.height, 1};
-    vkCmdBlitImage(g_cmd, src.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
+    vkCmdBlitImage(g_pcmd, src.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
                    VK_FILTER_LINEAR);
     barrier(src, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     barrier(dst, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-    VKC(vkEndCommandBuffer(g_cmd));
+    g_cur = g_cmd;
+    VKC(vkEndCommandBuffer(g_pcmd));
     const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.waitSemaphoreCount = 1;
     si.pWaitSemaphores = &g_acquired;
     si.pWaitDstStageMask = &stage;
     si.commandBufferCount = 1;
-    si.pCommandBuffers = &g_cmd;
+    si.pCommandBuffers = &g_pcmd;
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores = &g_rendered;
-    VKC(vkResetFences(g_dev, 1, &g_fence));
-    VKC(vkQueueSubmit(g_queue, 1, &si, g_fence));
+    VKC(vkResetFences(g_dev, 1, &g_pfence));
+    VKC(vkQueueSubmit(g_queue, 1, &si, g_pfence));
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     pi.waitSemaphoreCount = 1;
     pi.pWaitSemaphores = &g_rendered;
@@ -598,7 +608,6 @@ bool present(uint32_t addr) {
     pi.pSwapchains = &g_swap;
     pi.pImageIndices = &idx;
     vkQueuePresentKHR(g_queue, &pi);
-    VKC(vkWaitForFences(g_dev, 1, &g_fence, VK_TRUE, UINT64_MAX));
     return true;
 }
 
@@ -670,8 +679,13 @@ bool init(bool validation, bool window) {
     cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cai.commandBufferCount = 1;
     VKC(vkAllocateCommandBuffers(g_dev, &cai, &g_cmd));
+    VKC(vkAllocateCommandBuffers(g_dev, &cai, &g_pcmd));
+    g_cur = g_cmd;
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     VKC(vkCreateFence(g_dev, &fci, nullptr, &g_fence));
+    VkFenceCreateInfo pfci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    pfci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    VKC(vkCreateFence(g_dev, &pfci, nullptr, &g_pfence));
 
     // Passo de render único (cor + profundidade, carregando o conteúdo): serve a todos os alvos.
     VkAttachmentDescription at[2]{};
@@ -976,6 +990,7 @@ void shutdown() {
     for (auto l : g_dsl) vkDestroyDescriptorSetLayout(g_dev, l, nullptr);
     vkDestroyRenderPass(g_dev, g_rp, nullptr);
     vkDestroyFence(g_dev, g_fence, nullptr);
+    vkDestroyFence(g_dev, g_pfence, nullptr);
     vkDestroyCommandPool(g_dev, g_pool, nullptr);
     vkDestroyDevice(g_dev, nullptr);
     vkDestroyInstance(g_inst, nullptr);
