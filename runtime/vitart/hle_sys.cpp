@@ -41,6 +41,7 @@ struct HostOut {
     WAVEHDR hdr[kBufs]{};
     std::vector<int16_t> data[kBufs];
     int next = 0, queued = 0;
+    uint64_t dropped = 0, written = 0;
     bool started = false;
     ~HostOut() {
         if (!wo) return;
@@ -85,7 +86,10 @@ static void host_submit(AudioPort &p, const int16_t *src) {
     if (!h || !h->wo) return;
     WAVEHDR &hd = h->hdr[h->next];
     if (hd.dwFlags & WHDR_PREPARED) {
-        if (!(hd.dwFlags & WHDR_DONE)) return; // fila cheia: descarta este bloco
+        if (!(hd.dwFlags & WHDR_DONE)) { // fila cheia: descarta este bloco
+            h->dropped++;
+            return;
+        }
         waveOutUnprepareHeader(h->wo, &hd, sizeof hd);
     }
     std::vector<int16_t> &d = h->data[h->next];
@@ -101,7 +105,7 @@ static void host_submit(AudioPort &p, const int16_t *src) {
     hd.lpData = reinterpret_cast<LPSTR>(d.data());
     hd.dwBufferLength = (DWORD)(d.size() * 2);
     waveOutPrepareHeader(h->wo, &hd, sizeof hd);
-    waveOutWrite(h->wo, &hd, sizeof hd);
+    if (waveOutWrite(h->wo, &hd, sizeof hd) == MMSYSERR_NOERROR) h->written++;
     h->next = (h->next + 1) % HostOut::kBufs;
     if (!h->started && ++h->queued >= HostOut::kPrebuffer) {
         waveOutRestart(h->wo);
@@ -175,6 +179,17 @@ VT_HLE(sceAudioOutOutput) {
         wake = p.next;
         p.next += std::chrono::microseconds((uint64_t)p.len * 1000000ull / p.freq);
         if (const uint32_t buf = arg(ctx, 1)) host_submit(p, ptr<int16_t>(buf));
+        static const bool alog = getenv("VITART_AUDIO_LOG") != nullptr;
+        if (alog && p.outputs % 1000 == 0) {
+            MMTIME mt{};
+            mt.wType = TIME_SAMPLES;
+            HostOut *h = p.host.get();
+            if (h && h->wo) waveOutGetPosition(h->wo, &mt, sizeof mt);
+            logf("vitart: porta de áudio %d: %llu saídas, pico %d, volume %d/%d, waveOut %s: %llu escritos, %llu descartados, posição %u amostras",
+                 (int)arg(ctx, 0), (unsigned long long)p.outputs, p.peak, p.vol[0], p.vol[1], h && h->wo ? "aberto" : "FECHADO",
+                 h ? (unsigned long long)h->written : 0ull, h ? (unsigned long long)h->dropped : 0ull, (unsigned)mt.u.sample);
+            p.peak = 0;
+        }
     }
     std::this_thread::sleep_until(wake);
     ret(ctx, SCE_OK);
