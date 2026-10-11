@@ -15,6 +15,7 @@
 
 #include <libatrac9.h>
 
+#include <algorithm>
 #include <cmath>
 #include <map>
 #include <memory>
@@ -49,6 +50,26 @@ float rdf(uint32_t a) {
     return f;
 }
 
+// Reverb estéreo (rede de Schroeder/Moorer: 8 filtros comb com amortecimento + 4 allpass por canal,
+// afinações do Freeverb escaladas para a taxa do sistema), guiado pelos parâmetros I3DL2 do NGS:
+// tempo de decaimento, razão HF, nível de sala e de reverb (mB), atraso das reflexões e do reverb.
+struct Reverb {
+    static constexpr int kCombs = 8, kAll = 4;
+    std::vector<float> comb[2][kCombs], ap[2][kAll], pre;
+    size_t ci[2][kCombs] = {}, ai[2][kAll] = {}, pw = 0;
+    float damp_state[2][kCombs] = {}, hf_state[2] = {};
+    explicit Reverb(int rate) {
+        static const int combs[kCombs] = {1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617};
+        static const int alls[kAll] = {556, 441, 341, 225};
+        const double k = rate / 44100.0;
+        for (int c = 0; c < 2; c++) {
+            for (int i = 0; i < kCombs; i++) comb[c][i].assign((size_t)((combs[i] + 23 * c) * k) + 1, 0.f);
+            for (int i = 0; i < kAll; i++) ap[c][i].assign((size_t)((alls[i] + 23 * c) * k) + 1, 0.f);
+        }
+        pre.assign((size_t)(rate * 0.5) * 2 + 2, 0.f); // até 0,5 s de pré-atraso, estéreo intercalado
+    }
+};
+
 struct Voice {
     uint32_t handle = 0, rack = 0;
     Kind kind = K_SCREAM;
@@ -74,6 +95,13 @@ struct Voice {
     std::vector<float> in, out;
     bool has_out = false;
     std::vector<int16_t> master_pcm;
+    // Envelope (módulo 1 das vozes Scream): tempo desde o key-on e a soltura depois do key-off.
+    double env_ms = 0, rel_ms = 0;
+    float env_level = 1.f, rel_from = 1.f;
+    bool releasing = false, env_done = false;
+    // Busses de efeito.
+    std::unique_ptr<Reverb> reverb;
+    float comp_env[2] = {};
     ~Voice() {
         if (at9) Atrac9ReleaseHandle(at9);
     }
@@ -337,6 +365,50 @@ bool decode_more(arc_ctx *ctx, std::unique_lock<std::mutex> &lock, Voice &v) {
     return true;
 }
 
+// Envelope do módulo 1 (SceNgsEnvelopeParams, id 0x01015CE3): até 4 pontos {ms até o próximo, amplitude,
+// curva}, tempo de soltura (+56) e número de pontos (+60). Curva "curved" = quadrática.
+constexpr uint32_t kEnvelopeId = 0x01015CE3;
+bool has_envelope(const Voice &v) { return v.params[1] && rd32(v.params[1]) == kEnvelopeId; }
+uint32_t release_ms(const Voice &v) { return has_envelope(v) ? rd32(v.params[1] + 56) : 0; }
+float envelope_gain(Voice &v, double dt_ms) {
+    if (!has_envelope(v)) return 1.f;
+    const uint32_t q = v.params[1];
+    if (v.releasing) {
+        const double rel = (double)rd32(q + 56);
+        v.rel_ms += dt_ms;
+        if (rel <= 0 || v.rel_ms >= rel) {
+            v.env_done = true;
+            return 0.f;
+        }
+        float t = (float)(1.0 - v.rel_ms / rel);
+        if (rd32(q + 8 + 8) == 1) t *= t; // curva do primeiro ponto vale para a soltura
+        return v.rel_from * t;
+    }
+    const uint32_t np = std::min(rd32(q + 60), 4u);
+    double t = v.env_ms;
+    v.env_ms += dt_ms;
+    float level = np ? rdf(q + 8 + 4) : 1.f;
+    for (uint32_t i = 0; i + 1 < np; i++) {
+        const double d = (double)rd32(q + 8 + 12 * i);
+        const float a = rdf(q + 8 + 12 * i + 4), b = rdf(q + 8 + 12 * (i + 1) + 4);
+        if (t < d) {
+            float f = d > 0 ? (float)(t / d) : 1.f;
+            if (rd32(q + 8 + 12 * i + 8) == 1) f = b > a ? f * (2.f - f) : f * f; // curva: sobe rápido, cai devagar
+            level = a + (b - a) * f;
+            break;
+        }
+        t -= d;
+        level = b;
+    }
+    v.env_level = level;
+    return level;
+}
+
+// Catmull-Rom entre p1 e p2 (amostras vizinhas p0 e p3).
+inline float cubic(float p0, float p1, float p2, float p3, float t) {
+    return p1 + 0.5f * t * (p2 - p0 + t * (2.f * p0 - 5.f * p1 + 4.f * p2 - p3 + t * (3.f * (p1 - p2) + p3 - p0)));
+}
+
 // Um grão de saída da fonte (estéreo float em v.out). Devolve true quando a voz terminou.
 bool render_source(arc_ctx *ctx, std::unique_lock<std::mutex> &lock, Voice &v) {
     const int G = g_granularity;
@@ -346,23 +418,31 @@ bool render_source(arc_ctx *ctx, std::unique_lock<std::mutex> &lock, Voice &v) {
     auto avail = [&] { return (v.pcm.size() / 2) - v.pcm_read; };
     for (int i = 0; i < G; i++) {
         const size_t idx = (size_t)v.frac;
-        while (!v.src_done && avail() < idx + 2) {
+        while (!v.src_done && avail() < idx + 3) {
             if (!decode_more(ctx, lock, v)) v.src_done = true;
         }
         if (avail() < idx + 1) return true; // acabou o PCM
         const float t = (float)(v.frac - (double)idx);
-        const float *a = &v.pcm[(v.pcm_read + idx) * 2];
+        const size_t at = v.pcm_read + idx;
+        const float *a = &v.pcm[at * 2];
         const float *b2 = avail() > idx + 1 ? a + 2 : a;
-        v.out[2 * i] = a[0] + (b2[0] - a[0]) * t;
-        v.out[2 * i + 1] = a[1] + (b2[1] - a[1]) * t;
+        const float *a0 = at > 0 ? a - 2 : a;
+        const float *b3 = avail() > idx + 2 ? a + 4 : b2;
+        const float g = envelope_gain(v, 1000.0 / g_rate);
+        if (t == 0.f) {
+            v.out[2 * i] = a[0] * g, v.out[2 * i + 1] = a[1] * g;
+        } else {
+            v.out[2 * i] = cubic(a0[0], a[0], b2[0], b3[0], t) * g;
+            v.out[2 * i + 1] = cubic(a0[1], a[1], b2[1], b3[1], t) * g;
+        }
         v.frac += rate;
     }
     const size_t used = (std::min)((size_t)v.frac, avail());
     v.pcm_read += used;
     v.frac -= (double)used;
-    if (v.pcm_read > 8192) { // compacta
-        v.pcm.erase(v.pcm.begin(), v.pcm.begin() + (ptrdiff_t)v.pcm_read * 2);
-        v.pcm_read = 0;
+    if (v.pcm_read > 8192) { // compacta (guarda uma amostra para a interpolação cúbica)
+        v.pcm.erase(v.pcm.begin(), v.pcm.begin() + (ptrdiff_t)(v.pcm_read - 1) * 2);
+        v.pcm_read = 1;
     }
     return v.src_done && avail() == 0;
 }
@@ -378,9 +458,106 @@ void reset_source(Voice &v) {
     v.samples_since_key_on = v.bytes_since_key_on = 0;
     v.pcm.clear(), v.pcm_read = 0, v.frac = 0.0, v.src_done = false;
     v.staging.clear();
+    v.env_ms = v.rel_ms = 0, v.env_level = v.rel_from = 1.f, v.releasing = v.env_done = false;
     std::memset(v.hist, 0, sizeof v.hist);
     if (v.at9) Atrac9ReleaseHandle(v.at9), v.at9 = nullptr;
     v.at9_config = 0;
+}
+
+float mb_gain(float mb) { return std::pow(10.f, mb / 2000.f); } // milibéis -> ganho linear
+
+// Reverb do bus (módulo 1, SceNgsReverbParams id 0x01015CE7/0x01025CE7): fRoom +8, fRoomHF +12,
+// fDecayTime +16, fDecayHFRatio +20, fReflections +24, fReflectionsDelay +28, fReverb +32,
+// fReverbDelay +36, fDryMB +72. Entrada em b.in, saída em b.out.
+void run_reverb(Voice &b) {
+    const int G = g_granularity;
+    const uint32_t q = b.params[1];
+    b.out.assign((size_t)G * 2, 0.f);
+    const uint32_t id = q ? rd32(q) : 0;
+    if (id != 0x01015CE7u && id != 0x01025CE7u) return;
+    if (!b.reverb) b.reverb = std::make_unique<Reverb>(g_rate);
+    Reverb &r = *b.reverb;
+    const float room = rdf(q + 8), room_hf = rdf(q + 12), decay = std::max(0.1f, rdf(q + 16));
+    const float hf_ratio = std::clamp(rdf(q + 20), 0.1f, 2.f), refl = rdf(q + 24), refl_delay = std::clamp(rdf(q + 28), 0.f, 0.3f);
+    const float rev = rdf(q + 32), rev_delay = std::clamp(rdf(q + 36), 0.f, 0.1f), dry = mb_gain(std::clamp(rdf(q + 72), -10000.f, 0.f));
+    const float late = mb_gain(std::clamp(room + rev, -10000.f, 2000.f)), early = mb_gain(std::clamp(room + refl, -10000.f, 1000.f));
+    // Amortecimento: razão HF < 1 escurece a cauda; fRoomHF filtra a entrada (passa-baixas de 1 polo).
+    const float damp = std::clamp(1.f - hf_ratio * 0.8f, 0.f, 0.7f);
+    const float hf_in = std::clamp(mb_gain(std::clamp(room_hf, -10000.f, 0.f)), 0.05f, 1.f);
+    const size_t prelen = r.pre.size() / 2;
+    const size_t d_early = std::min(prelen - 1, (size_t)(refl_delay * g_rate) + 1);
+    const size_t d_late = std::min(prelen - 1, (size_t)((refl_delay + rev_delay) * g_rate) + 1);
+    for (int i = 0; i < G; i++) {
+        for (int c = 0; c < 2; c++) {
+            float x = b.in[2 * i + c];
+            r.hf_state[c] += hf_in * (x - r.hf_state[c]);
+            r.pre[2 * r.pw + c] = r.hf_state[c];
+        }
+        const size_t pe = (r.pw + prelen - d_early) % prelen, pl = (r.pw + prelen - d_late) % prelen;
+        for (int c = 0; c < 2; c++) {
+            const float in = r.pre[2 * pl + c] * 0.015f;
+            float acc = 0;
+            for (int k = 0; k < Reverb::kCombs; k++) {
+                std::vector<float> &buf = r.comb[c][k];
+                size_t &ix = r.ci[c][k];
+                const float y = buf[ix];
+                const float fb = std::pow(10.f, -3.f * (float)buf.size() / (decay * g_rate)); // T60
+                r.damp_state[c][k] = y * (1.f - damp) + r.damp_state[c][k] * damp;
+                buf[ix] = in + r.damp_state[c][k] * fb;
+                ix = (ix + 1) % buf.size();
+                acc += y;
+            }
+            for (int k = 0; k < Reverb::kAll; k++) {
+                std::vector<float> &buf = r.ap[c][k];
+                size_t &ix = r.ai[c][k];
+                const float bo = buf[ix];
+                buf[ix] = acc + bo * 0.5f;
+                acc = bo - acc;
+                ix = (ix + 1) % buf.size();
+            }
+            b.out[2 * i + c] = acc * 3.f * late + r.pre[2 * pe + c] * early * 0.5f + b.in[2 * i + c] * dry;
+        }
+        r.pw = (r.pw + 1) % prelen;
+    }
+}
+
+// Compressor do bus (módulo 1, SceNgsCompressorParams id 0x01015CE1/0x01025CE1): razão +8, limiar dB
+// +12, ataque ms +16, soltura ms +20, ganho de compensação dB +24, ligação estéreo +28, modo pico +32.
+// Sem parâmetros, repassa.
+void run_compressor(Voice &b) {
+    b.out = b.in;
+    const uint32_t q = b.params[1];
+    const uint32_t id = q ? rd32(q) : 0;
+    if (g_log) {
+        static int n = 0;
+        if (n++ % 3000 == 0) {
+            float pk = 0;
+            for (float x : b.in) pk = std::max(pk, std::fabs(x));
+            logf("vitart: NGS compressor id 0x%08x: %.3g %.3g %.3g %.3g %.3g %u %u %.3g; pico da entrada %.3f", id, rdf(q + 8),
+                 rdf(q + 12), rdf(q + 16), rdf(q + 20), rdf(q + 24), rd32(q + 28), rd32(q + 32), rdf(q + 36), pk);
+        }
+    }
+    // Sem parâmetros (o GoW nunca os define) vale o padrão: limitador suave que segura a soma das vozes
+    // antes do master (−6 dB, 4:1, ataque 5 ms, soltura 100 ms, estéreo ligado). Sem isso o master satura.
+    const bool set = id == 0x01015CE1u || id == 0x01025CE1u;
+    const float ratio = set ? std::max(1.f, rdf(q + 8)) : 4.f, thr = set ? rdf(q + 12) : -6.f;
+    const float att = std::exp(-1.f / ((set ? std::max(0.1f, rdf(q + 16)) : 5.f) * 0.001f * g_rate));
+    const float rel = std::exp(-1.f / ((set ? std::max(1.f, rdf(q + 20)) : 100.f) * 0.001f * g_rate));
+    const float makeup = set ? std::pow(10.f, rdf(q + 24) / 20.f) : 1.f;
+    const bool link = set ? rd32(q + 28) != 0 : true;
+    const int G = g_granularity;
+    for (int i = 0; i < G; i++) {
+        float lv[2] = {std::fabs(b.in[2 * i]), std::fabs(b.in[2 * i + 1])};
+        if (link) lv[0] = lv[1] = std::max(lv[0], lv[1]);
+        for (int c = 0; c < 2; c++) {
+            float &e = b.comp_env[c];
+            e = lv[c] > e ? att * e + (1 - att) * lv[c] : rel * e + (1 - rel) * lv[c];
+            const float db = 20.f * std::log10(std::max(e, 1e-6f));
+            const float over = db - thr;
+            const float gr = over > 0 ? over * (1.f - 1.f / ratio) : 0.f;
+            b.out[2 * i + c] = b.in[2 * i + c] * std::pow(10.f, -gr / 20.f) * makeup;
+        }
+    }
 }
 
 void mix_into(Voice &dst, const Voice &src, const Patch &p) {
@@ -519,6 +696,24 @@ VT_HLE(sceNgsVoiceSetParamsBlock) {
         const uint32_t module = rd32(p), size = rd32(p + 12);
         if (module < 8 && v->params[module] && size >= 8 && size <= kParamBytes)
             std::memcpy(ptr<void>(v->params[module]), ptr<void>(p + 8), size);
+        if (g_log && module < 8) {
+            static std::map<uint64_t, int> seen;
+            const uint32_t id = rd32(p + 8);
+            int &n = seen[(uint64_t)v->kind << 40 | (uint64_t)module << 32 | id];
+            if (n++ < 3 && module > 0) {
+                char buf[512];
+                int o = std::snprintf(buf, sizeof buf, "vitart: NGS parâmetros tipo %d módulo %u id 0x%08x (%u bytes):", (int)v->kind,
+                                      module, id, size);
+                for (uint32_t k = 16; k < size && k < 8 + 4 * 24 && o < 480; k += 4) {
+                    const float f = rdf(p + k);
+                    if (f == f && std::fabs(f) < 1e6f && std::fabs(f) > 1e-6f)
+                        o += std::snprintf(buf + o, sizeof buf - o, " %.3g", (double)f);
+                    else
+                        o += std::snprintf(buf + o, sizeof buf - o, " #%x", rd32(p + k));
+                }
+                logf("%s", buf);
+            }
+        }
         else
             errors++;
         if (size < 8) break;
@@ -582,7 +777,7 @@ VT_HLE(sceNgsVoiceResume) {
     ret(ctx, SCE_OK);
 }
 VT_HLE(sceNgsVoiceKeyOff) {
-    // Sem envelope de liberação: a voz termina no próximo update (com o callback de fim).
+    // A voz entra na soltura do envelope no próximo update e termina ao fim dela (callback de fim).
     std::lock_guard<std::mutex> g(g_mutex);
     auto v = voice_of(arg(ctx, 0));
     if (!v) return ret(ctx, NGS_ERROR_INVALID_ARG);
@@ -640,6 +835,14 @@ VT_HLE(sceNgsPatchCreateRouting) {
     {
         std::lock_guard<std::mutex> g(g_mutex);
         g_patches[h] = p;
+        if (g_log) {
+            static std::map<uint32_t, int> seen;
+            auto s = voice_of(p.src), d = voice_of(p.dst);
+            const uint32_t k = (s ? s->kind : 9) << 16 | p.out_index << 8 | (d ? d->kind : 9) << 4 | p.in_index;
+            if (seen[k]++ == 0)
+                logf("vitart: NGS patch: tipo %d saída %d -> tipo %d entrada %d", s ? (int)s->kind : -1, p.out_index,
+                     d ? (int)d->kind : -1, p.in_index);
+        }
     }
     wr32(out, h);
     ret(ctx, SCE_OK);
@@ -669,6 +872,13 @@ VT_HLE(sceNgsVoicePatchSetVolumesMatrix) {
     auto it = g_patches.find(arg(ctx, 0));
     if (it == g_patches.end() || !arg(ctx, 1)) return ret(ctx, NGS_ERROR_INVALID_ARG);
     std::memcpy(it->second.m, ptr<void>(arg(ctx, 1)), 16);
+    if (g_log) {
+        static int n = 0;
+        auto s = voice_of(it->second.src);
+        if (n < 12 && s && it->second.out_index == 1)
+            n++, logf("vitart: NGS matriz saída 1 (tipo %d): %.3f %.3f %.3f %.3f", (int)s->kind, it->second.m[0][0],
+                      it->second.m[0][1], it->second.m[1][0], it->second.m[1][1]);
+    }
     ret(ctx, SCE_OK);
 }
 VT_HLE(sceNgsAT9GetSectionDetails) {
@@ -706,11 +916,16 @@ VT_HLE(sceNgsSystemUpdate) {
     // 1. Fontes ativas: decodificam um grão (callbacks com o mutex solto).
     for (auto &v : voices) {
         if (!is_source(*v) || !(v->state & ST_ACTIVE) || (v->state & ST_PAUSED)) continue;
-        bool finished = v->key_off;
-        if (!finished) finished = render_source(ctx, lock, *v);
+        bool finished = false, cut = false;
+        if (v->key_off && !v->releasing) {
+            // Key-off: a soltura do envelope esmaece a voz; sem soltura, ela para já.
+            v->releasing = true, v->rel_ms = 0, v->rel_from = v->env_level;
+            if (release_ms(*v) == 0) finished = cut = true;
+        }
+        if (!finished) finished = render_source(ctx, lock, *v) || v->env_done;
         v->updates++;
         if (finished) {
-            if (v->key_off) v->has_out = false;
+            if (cut) v->has_out = false;
             v->state = 0;
             v->key_off = false;
             invoke(ctx, lock, *v, v->fin_cb, v->fin_ud, v->kind == K_SCREAM_AT9 ? kAt9Id : kPlayerId, 0, 0, 0);
@@ -721,7 +936,8 @@ VT_HLE(sceNgsSystemUpdate) {
     auto deliver = [&](const Voice &src) {
         if (!src.has_out) return;
         for (auto &[h, p] : g_patches) {
-            if (p.src != src.handle || p.out_index != 0) continue;
+            // Saída 0 = seco; nas fontes, a saída 1 é o envio (para o reverb) com o mesmo sinal.
+            if (p.src != src.handle || p.out_index > (is_source(src) ? 1 : 0)) continue;
             auto d = voice_of(p.dst);
             if (d) mix_into(*d, src, p);
         }
@@ -746,14 +962,38 @@ VT_HLE(sceNgsSystemUpdate) {
             Voice &b = *busses[i];
             done[i] = progress = true;
             b.updates++;
-            if (b.kind == K_REVERB) continue; // sem reverb ainda: não devolve nada
-            b.out = b.in;
+            if (b.kind == K_REVERB) {
+                if (g_log) {
+                    static int n = 0;
+                    if (n++ % 2000 == 0) {
+                        char buf[400];
+                        int o = std::snprintf(buf, sizeof buf, "vitart: NGS reverb id 0x%08x:", rd32(b.params[1]));
+                        for (uint32_t k = 8; k < 8 + 4 * 18 && o < 380; k += 4)
+                            o += std::snprintf(buf + o, sizeof buf - o, " %.3g", (double)rdf(b.params[1] + k));
+                        float pk = 0;
+                        for (float x : b.in) pk = std::max(pk, std::fabs(x));
+                        logf("%s; pico da entrada %.3f", buf, pk);
+                    }
+                }
+                run_reverb(b);
+                b.has_out = true;
+                deliver(b);
+                continue;
+            }
+            if (b.kind == K_COMPRESSOR || b.kind == K_SIDECHAIN)
+                run_compressor(b);
+            else
+                b.out = b.in;
             b.has_out = true;
             if (b.kind == K_MASTER) {
                 b.master_pcm.resize((size_t)G * 2);
                 static int peak = 0, updates = 0;
                 for (int k = 0; k < G * 2; k++) {
-                    const float s = b.in[k] * 32768.f;
+                    // Saturação suave acima de 0,9 (no lugar do corte seco em 1,0).
+                    float x = b.in[k];
+                    const float ax = std::fabs(x);
+                    if (ax > 0.9f) x = std::copysign(0.9f + 0.1f * std::tanh((ax - 0.9f) / 0.1f), x);
+                    const float s = x * 32767.f;
                     b.master_pcm[k] = (int16_t)(s > 32767.f ? 32767 : s < -32768.f ? -32768 : (int)s);
                     peak = (std::max)(peak, std::abs((int)b.master_pcm[k]));
                 }

@@ -114,6 +114,15 @@ static void host_submit(AudioPort &p, const int16_t *src) {
     }
 }
 static std::mutex g_audio_mutex;
+// Blocos ainda na fila do waveOut (enviados e não tocados).
+static int host_pending(const AudioPort &p) {
+    const HostOut *h = p.host.get();
+    if (!h || !h->wo) return -1;
+    int n = 0;
+    for (const WAVEHDR &hd : h->hdr)
+        if ((hd.dwFlags & WHDR_PREPARED) && !(hd.dwFlags & WHDR_DONE)) n++;
+    return n;
+}
 static std::map<int, AudioPort> g_ports;
 static int g_next_port = 0;
 
@@ -161,6 +170,8 @@ VT_HLE(sceAudioOutGetRestSample) {
     auto it = g_ports.find((int)arg(ctx, 0));
     if (it == g_ports.end()) return ret(ctx, 0x80260105u);
     const AudioPort &p = it->second;
+    const int pend = host_pending(p);
+    if (pend >= 0 && p.host->started) return ret(ctx, (uint32_t)std::min<int>(pend, 1) * p.len);
     const auto now = std::chrono::steady_clock::now();
     if (p.next <= now) return ret(ctx, 0);
     const uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(p.next - now).count();
@@ -168,6 +179,22 @@ VT_HLE(sceAudioOutGetRestSample) {
     ret(ctx, (uint32_t)(rest < p.len ? rest : p.len));
 }
 VT_HLE(sceAudioOutOutput) {
+    // Com saída no host, a placa de som é o relógio: espera enquanto houver 3 blocos na fila (~30 ms a
+    // 512 amostras). Sem placa (VITART_MUTE ou waveOut indisponível), cadência pelo relógio do PC.
+    for (int spins = 0; spins < 200; spins++) {
+        int pend;
+        bool started;
+        {
+            std::lock_guard<std::mutex> g(g_audio_mutex);
+            auto it = g_ports.find((int)arg(ctx, 0));
+            if (it == g_ports.end()) break;
+            pend = host_pending(it->second);
+            started = it->second.host && it->second.host->started;
+        }
+        if (pend < 0 || !started || pend < 3) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    bool device_clock = false;
     std::chrono::steady_clock::time_point wake;
     {
         std::lock_guard<std::mutex> g(g_audio_mutex);
@@ -180,6 +207,7 @@ VT_HLE(sceAudioOutOutput) {
         wake = p.next;
         p.next += std::chrono::microseconds((uint64_t)p.len * 1000000ull / p.freq);
         if (const uint32_t buf = arg(ctx, 1)) host_submit(p, ptr<int16_t>(buf));
+        device_clock = p.host && p.host->started;
         static const bool alog = getenv("VITART_AUDIO_LOG") != nullptr;
         if (alog && p.outputs % 1000 == 0) {
             MMTIME mt{};
@@ -192,7 +220,7 @@ VT_HLE(sceAudioOutOutput) {
             p.peak = 0;
         }
     }
-    std::this_thread::sleep_until(wake);
+    if (!device_clock) std::this_thread::sleep_until(wake);
     ret(ctx, SCE_OK);
 }
 
