@@ -63,6 +63,9 @@ constexpr VkFormat kColor = VK_FORMAT_R8G8B8A8_UNORM, kDepth = VK_FORMAT_D32_SFL
 constexpr VkImageAspectFlags kDepthAspects = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
 
 Stats g_stats;
+float g_aniso = 1.f;                         // anisotropia máxima dos samplers (1 = desligada)
+VkPipelineCache g_pcache = VK_NULL_HANDLE;   // persistido em vk_pipeline_cache.bin
+bool g_pcache_dirty = false;
 VkQueryPool g_qpool = VK_NULL_HANDLE;
 double g_ts_period = 1.0; // ns por tique de timestamp
 uint64_t now_ns() {
@@ -73,6 +76,20 @@ struct Timer {
     explicit Timer(uint64_t &a) : acc(a) {}
     ~Timer() { acc += now_ns() - t0; }
 };
+
+constexpr const char *kPcacheFile = "vk_pipeline_cache.bin";
+void save_pcache() {
+    if (!g_pcache || !g_pcache_dirty) return;
+    size_t n = 0;
+    if (vkGetPipelineCacheData(g_dev, g_pcache, &n, nullptr) != VK_SUCCESS || !n) return;
+    std::vector<char> data(n);
+    if (vkGetPipelineCacheData(g_dev, g_pcache, &n, data.data()) != VK_SUCCESS) return;
+    if (FILE *f = std::fopen(kPcacheFile, "wb")) {
+        std::fwrite(data.data(), 1, n, f);
+        std::fclose(f);
+        g_pcache_dirty = false;
+    }
+}
 
 bool fail(const char *what, VkResult r) {
     char b[160];
@@ -439,6 +456,10 @@ VkSampler sampler_for(const Texture &t) {
     sci.maxLod = mipped ? VK_LOD_CLAMP_NONE : 0.25f;
     sci.mipmapMode = (t.mip_filter & 1) ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
     sci.mipLodBias = mipped ? ((float)(t.lod_bias & 63) - 31.f) / 8.f : 0.f;
+    if (mipped && g_aniso > 1.f && (t.min & 1)) {
+        sci.anisotropyEnable = VK_TRUE;
+        sci.maxAnisotropy = g_aniso;
+    }
     VkSampler smp = VK_NULL_HANDLE;
     if (vkCreateSampler(g_dev, &sci, nullptr, &smp) != VK_SUCCESS) smp = g_sampler;
     return g_samplers[key] = smp;
@@ -646,7 +667,8 @@ VkPipeline pipeline(const Draw &d, VkShaderModule vs, VkShaderModule fs) {
     pci.layout = g_layout;
     pci.renderPass = g_rp;
     VkPipeline p = VK_NULL_HANDLE;
-    if (vkCreateGraphicsPipelines(g_dev, VK_NULL_HANDLE, 1, &pci, nullptr, &p) != VK_SUCCESS) p = VK_NULL_HANDLE;
+    if (vkCreateGraphicsPipelines(g_dev, g_pcache, 1, &pci, nullptr, &p) != VK_SUCCESS) p = VK_NULL_HANDLE;
+    g_pcache_dirty = true;
     return g_pipes[key] = p;
 }
 
@@ -816,6 +838,8 @@ bool present(uint32_t addr) {
     pi.pSwapchains = &g_swap;
     pi.pImageIndices = &idx;
     vkQueuePresentKHR(g_queue, &pi);
+    static uint32_t presents = 0;
+    if (++presents % 300 == 0) save_pcache();
     return true;
 }
 
@@ -870,6 +894,19 @@ bool init(bool validation, bool window) {
     dci.pQueueCreateInfos = &qci;
     VkPhysicalDeviceFeatures feats{};
     feats.vertexPipelineStoresAndAtomics = VK_TRUE; // só usado pelo modo de depuração do vértice
+    {
+        // Filtro anisotrópico (VITART_VK_ANISO, padrão 16) nas texturas com mipmap e filtro linear.
+        VkPhysicalDeviceFeatures have{};
+        vkGetPhysicalDeviceFeatures(g_phys, &have);
+        VkPhysicalDeviceProperties pp;
+        vkGetPhysicalDeviceProperties(g_phys, &pp);
+        const char *e = getenv("VITART_VK_ANISO");
+        const float want = e ? (float)std::atof(e) : 16.f;
+        if (have.samplerAnisotropy && want > 1.f) {
+            feats.samplerAnisotropy = VK_TRUE;
+            g_aniso = std::min(want, pp.limits.maxSamplerAnisotropy);
+        }
+    }
     dci.pEnabledFeatures = &feats;
     const char *dext = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     if (window) {
@@ -956,6 +993,24 @@ bool init(bool validation, bool window) {
     pli.setLayoutCount = 3;
     pli.pSetLayouts = g_dsl;
     VKC(vkCreatePipelineLayout(g_dev, &pli, nullptr, &g_layout));
+    {
+        // Cache de pipelines em disco: sem ele cada pipeline compila de novo a cada sessão (engasgos).
+        std::vector<char> data;
+        if (FILE *f = std::fopen(kPcacheFile, "rb")) {
+            std::fseek(f, 0, SEEK_END);
+            data.resize((size_t)std::max(0L, std::ftell(f)));
+            std::fseek(f, 0, SEEK_SET);
+            data.resize(std::fread(data.data(), 1, data.size(), f));
+            std::fclose(f);
+        }
+        VkPipelineCacheCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+        ci.initialDataSize = data.size();
+        ci.pInitialData = data.empty() ? nullptr : data.data();
+        if (vkCreatePipelineCache(g_dev, &ci, nullptr, &g_pcache) != VK_SUCCESS) {
+            ci.initialDataSize = 0, ci.pInitialData = nullptr; // arquivo de outro driver: começa vazio
+            if (vkCreatePipelineCache(g_dev, &ci, nullptr, &g_pcache) != VK_SUCCESS) g_pcache = VK_NULL_HANDLE;
+        }
+    }
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
@@ -1236,6 +1291,8 @@ void shutdown() {
     if (!g_dev) return;
     frame_flush(true);
     vkDeviceWaitIdle(g_dev);
+    save_pcache();
+    if (g_pcache) vkDestroyPipelineCache(g_dev, g_pcache, nullptr);
     for (auto dp : g_dpools) vkDestroyDescriptorPool(g_dev, dp, nullptr);
     vkUnmapMemory(g_dev, g_ring.mem);
     destroy(g_ring);
