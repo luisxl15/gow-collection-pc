@@ -1,0 +1,9 @@
+{
+  "_comentario": "Plano de link do eboot (Vita) para o vitart: mesmas bases do gow1 para libc e libfios2 (as DLLs são as mesmas).",
+  "modules": [
+    {"name": "eboot",     "elf": "elf/eboot.elf",     "base": "0x81000000"},
+    {"name": "libc",     "elf": "elf/libc.elf",     "base": "0x82000000"},
+    {"name": "libfios2", "elf": "elf/libfios2.elf", "base": "0x82100000"}
+  ],
+  "hle_var_base": "0x80F00000"
+}

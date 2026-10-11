@@ -488,6 +488,7 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
         std::array<uint32_t, 4> w;
         std::memcpy(w.data(), ptr<uint32_t>(c.textures[i]), 16);
         const gxmtex::Info info = gxmtex::describe(w.data());
+        if (census()) g_census["textura tipo " + std::to_string(info.type) + " base " + std::to_string(info.base >> 24)]++;
         gvk::Texture t;
         t.binding = i;
         // Palavra 0: endereçamento v em 3..5, u em 6..8, filtro de minificação em 10..11, de magnificação em 12..13.
@@ -736,14 +737,25 @@ VT_HLE(sceGxmShaderPatcherRegisterProgram) {
     if (rd32(prog) != 0x00505847u) // "GXP\0"
         logf("vitart: RegisterProgram: 0x%08x não começa com GXP", prog);
     // O jogo registra o mesmo programa várias vezes: um id por programa basta.
-    const std::lock_guard<std::mutex> lock(g_gxm_mutex);
-    uint32_t &id = g_id_of_program[prog];
-    if (!id) {
-        id = new_object(0x10, "gxm:program-id");
-        g_program_ids[id] = prog;
+    bool fresh = false;
+    {
+        const std::lock_guard<std::mutex> lock(g_gxm_mutex);
+        uint32_t &id = g_id_of_program[prog];
+        if (!id) {
+            id = new_object(0x10, "gxm:program-id");
+            g_program_ids[id] = prog;
+            fresh = true;
+        }
+        wr32(id, prog);
+        wr32(arg(ctx, 2), id);
     }
-    wr32(id, prog);
-    wr32(arg(ctx, 2), id);
+    // SPIR-V carregado no registro (no carregamento da fase, não no 1º desenho); sem cache, o .gxp vai
+    // para spv/miss já aqui, então uma passagem pelo boot colhe o conjunto inteiro de shaders.
+    if (fresh && vk_on()) {
+        const std::lock_guard<std::mutex> lock(g_vk_mutex);
+        g_spv.erase(prog); // endereço reaproveitado por outro programa
+        spv_of(prog);
+    }
     ret(ctx, SCE_OK);
 }
 VT_HLE(sceGxmShaderPatcherUnregisterProgram) { ret(ctx, SCE_OK); }

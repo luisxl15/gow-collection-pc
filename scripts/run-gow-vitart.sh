@@ -19,5 +19,5 @@ done
   -I"$HERE/third_party/libatrac9/src" -I"${VULKAN_SDK:-C:/VulkanSDK/latest}/Include" -o "$RT/vitart.exe" \
   "$HERE"/runtime/vitart/*.cpp "$AT9OBJ"/*.o "${VULKAN_SDK:-C:/VulkanSDK/latest}/Lib/vulkan-1.lib" || exit 1
 cd "$RT" && timeout "$SECS" ./vitart.exe --app "$APP" --data "$DATA" --hle-vars link.hlevars.txt --log "$LOG" "$@" \
-  gow1.dll libc.dll libfios2.dll > /dev/null 2>&1
+  ${GAME:-gow1}.dll libc.dll libfios2.dll > /dev/null 2>&1
 echo "rc=$?"
