@@ -319,11 +319,15 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
     const uint32_t kind = prim >> 26; // 0 triângulos, 3 faixa, 4 leque (linhas e pontos ficam de fora)
     const uint32_t isz = (itype & 0x01000000u) ? 4 : 2;
     std::vector<uint32_t> idx(icount);
-    uint32_t maxi = 0;
+    uint32_t maxi = 0, mini = UINT32_MAX;
     for (uint32_t i = 0; i < icount; i++) {
         idx[i] = isz == 4 ? rd32(idata + 4 * i) : *ptr<uint16_t>(idata + 2 * i);
         if (idx[i] > maxi) maxi = idx[i];
+        if (idx[i] < mini) mini = idx[i];
     }
+    // Só a faixa de vértices usada vai para a GPU: índices rebaseados pelo menor.
+    for (auto &i : idx) i -= mini;
+    maxi -= mini;
     std::vector<uint32_t> tris;
     if (kind == 0)
         tris.assign(idx.begin(), idx.begin() + icount / 3 * 3);
@@ -348,9 +352,14 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
             const uint32_t st = d[0] | (d[1] << 8), off = d[2] | (d[3] << 8), fmt = d[4], comps = d[5], reg = d[6] | (d[7] << 8);
             if (reg != locs[k] || st >= 16 || !c.streams[st]) continue;
             const uint32_t stride = *reinterpret_cast<const uint16_t *>(&vp->streams[4 * st]);
-            for (uint32_t v = 0; v < nv; v++) {
-                const uint8_t *src = ptr<uint8_t>(c.streams[st] + v * stride + off);
-                for (uint32_t ch = 0; ch < comps && ch < 4; ch++) attrs[(k * nv + v) * 4 + ch] = attr_value(src, fmt, ch);
+            const uint8_t *base = ptr<uint8_t>(c.streams[st] + mini * stride + off);
+            float *dst = &attrs[k * nv * 4];
+            const uint32_t nc = comps < 4 ? comps : 4;
+            if (fmt == 9) { // float: cópia direta
+                for (uint32_t v = 0; v < nv; v++) std::memcpy(dst + 4 * v, base + (size_t)v * stride, 4 * nc);
+            } else {
+                for (uint32_t v = 0; v < nv; v++)
+                    for (uint32_t ch = 0; ch < nc; ch++) dst[4 * v + ch] = attr_value(base + (size_t)v * stride, fmt, ch);
             }
             break;
         }
