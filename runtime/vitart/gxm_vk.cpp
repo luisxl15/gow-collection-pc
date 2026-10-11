@@ -56,7 +56,10 @@ VkSwapchainKHR g_swap = VK_NULL_HANDLE;
 std::vector<VkImage> g_swap_images;
 VkExtent2D g_swap_extent{};
 VkSemaphore g_acquired = VK_NULL_HANDLE, g_rendered = VK_NULL_HANDLE;
-constexpr VkFormat kColor = VK_FORMAT_R8G8B8A8_UNORM, kDepth = VK_FORMAT_D32_SFLOAT;
+// Profundidade com stencil (o GXM usa DF32 + S8): a vista de amostragem só tem a profundidade, a de
+// anexo tem os dois aspectos.
+constexpr VkFormat kColor = VK_FORMAT_R8G8B8A8_UNORM, kDepth = VK_FORMAT_D32_SFLOAT_S8_UINT;
+constexpr VkImageAspectFlags kDepthAspects = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
 
 Stats g_stats;
 VkQueryPool g_qpool = VK_NULL_HANDLE;
@@ -129,6 +132,7 @@ struct Image {
     VkImage img = VK_NULL_HANDLE;
     VkDeviceMemory mem = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
+    VkImageView att_view = VK_NULL_HANDLE; // profundidade: vista de anexo (profundidade + stencil)
     uint32_t w = 0, h = 0;
     VkFormat fmt = kColor;
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -160,11 +164,16 @@ bool make_image(Image &im, uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFla
     vi.format = fmt;
     vi.subresourceRange = {(VkImageAspectFlags)(fmt == kDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), 0, 1, 0, 1};
     VKC(vkCreateImageView(g_dev, &vi, nullptr, &im.view));
+    if (fmt == kDepth) {
+        vi.subresourceRange.aspectMask = kDepthAspects;
+        VKC(vkCreateImageView(g_dev, &vi, nullptr, &im.att_view));
+    }
     return true;
 }
 
 void destroy(Image &im) {
     if (im.view) vkDestroyImageView(g_dev, im.view, nullptr);
+    if (im.att_view) vkDestroyImageView(g_dev, im.att_view, nullptr);
     if (im.img) vkDestroyImage(g_dev, im.img, nullptr);
     if (im.mem) vkFreeMemory(g_dev, im.mem, nullptr);
     im = {};
@@ -179,7 +188,7 @@ void barrier(Image &im, VkImageLayout to) {
     b.newLayout = to;
     b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.image = im.img;
-    b.subresourceRange = {(VkImageAspectFlags)(im.fmt == kDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), 0, 1, 0, 1};
+    b.subresourceRange = {(VkImageAspectFlags)(im.fmt == kDepth ? kDepthAspects : VK_IMAGE_ASPECT_COLOR_BIT), 0, 1, 0, 1};
     vkCmdPipelineBarrier(g_cur, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
                          nullptr, 1, &b);
     im.layout = to;
@@ -335,7 +344,7 @@ bool get_target(uint32_t addr, uint32_t w, uint32_t h, Target *&out) {
     if (!make_image(t.depth, w, h, kDepth,
                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT))
         return false;
-    VkImageView views[2] = {t.color.view, t.depth.view};
+    VkImageView views[2] = {t.color.view, t.depth.att_view};
     VkFramebufferCreateInfo fi{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
     fi.renderPass = g_rp;
     fi.attachmentCount = 2;
@@ -353,7 +362,7 @@ bool get_target(uint32_t addr, uint32_t w, uint32_t h, Target *&out) {
     VkImageSubresourceRange cr{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     vkCmdClearColorImage(g_cmd, t.color.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &cc, 1, &cr);
     VkClearDepthStencilValue dc{1.0f, 0};
-    VkImageSubresourceRange dr{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    VkImageSubresourceRange dr{kDepthAspects, 0, 1, 0, 1};
     vkCmdClearDepthStencilImage(g_cmd, t.depth.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &dc, 1, &dr);
     barrier(t.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     barrier(t.depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
@@ -378,6 +387,33 @@ struct Snap {
 std::map<std::pair<uint32_t, bool>, Snap> g_snaps;
 Image g_white;
 
+// Samplers por combinação de filtro e endereçamento do jogo (são poucas).
+std::map<uint32_t, VkSampler> g_samplers;
+VkSamplerAddressMode addr_mode(uint32_t m) {
+    switch (m) {
+    case 0: case 4: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    case 1: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    case 5: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    default: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; // clamp, mirror clamp e as bordas
+    }
+}
+VkSampler sampler_for(const Texture &t) {
+    const uint32_t key = (t.mag & 1) | (t.min & 1) << 1 | (t.addr_u & 7) << 2 | (t.addr_v & 7) << 5;
+    auto it = g_samplers.find(key);
+    if (it != g_samplers.end()) return it->second;
+    VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    sci.magFilter = (t.mag & 1) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    sci.minFilter = (t.min & 1) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    sci.addressModeU = addr_mode(t.addr_u);
+    sci.addressModeV = addr_mode(t.addr_v);
+    sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+    sci.maxLod = 0.25f;
+    VkSampler smp = VK_NULL_HANDLE;
+    if (vkCreateSampler(g_dev, &sci, nullptr, &smp) != VK_SUCCESS) smp = g_sampler;
+    return g_samplers[key] = smp;
+}
+
 // Grava o envio no quadro atual (o chamador já reservou os bytes no anel).
 bool upload_texture(Image &im, uint32_t w, uint32_t h, const uint8_t *rgba) {
     if (!make_image(im, w, h, kColor, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
@@ -397,7 +433,18 @@ bool upload_texture(Image &im, uint32_t w, uint32_t h, const uint8_t *rgba) {
 
 std::unordered_map<uint64_t, VkShaderModule> g_modules;
 
+// O chamador mantém o SPIR-V vivo e no mesmo endereço (cache por programa): o ponteiro basta como
+// chave rápida; o hash do conteúdo (caro: KB por desenho) só na primeira vez.
+std::unordered_map<const void *, VkShaderModule> g_modules_by_ptr;
+VkShaderModule module_by_content(const uint32_t *code, uint32_t size);
+
 VkShaderModule module(const uint32_t *code, uint32_t size) {
+    auto pit = g_modules_by_ptr.find(code);
+    if (pit != g_modules_by_ptr.end()) return pit->second;
+    return g_modules_by_ptr[code] = module_by_content(code, size);
+}
+
+VkShaderModule module_by_content(const uint32_t *code, uint32_t size) {
     const uint64_t h = fnv(code, size);
     auto it = g_modules.find(h);
     if (it != g_modules.end()) return it->second;
@@ -429,12 +476,28 @@ VkBlendOp blend_op(uint32_t f) {
     }
 }
 
-std::map<std::tuple<VkShaderModule, VkShaderModule, uint32_t, uint32_t, uint32_t, uint32_t>, VkPipeline> g_pipes;
+std::map<std::tuple<VkShaderModule, VkShaderModule, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>, VkPipeline> g_pipes;
+
+// Função e operações de uma face em 12 bits (máscaras e referência são estado dinâmico).
+uint32_t stencil_bits(const Stencil &st) { return (st.func & 7) | (st.fail & 7) << 3 | (st.zfail & 7) << 6 | (st.zpass & 7) << 9; }
+bool stencil_used(const Draw &d) {
+    auto idle = [](const Stencil &st) { return st.func == 7 && !st.fail && !st.zfail && !st.zpass; };
+    return d.stencil && !(idle(d.front) && idle(d.back));
+}
+VkStencilOpState stencil_state(const Stencil &st) {
+    VkStencilOpState o{};
+    o.failOp = (VkStencilOp)(st.fail & 7);
+    o.depthFailOp = (VkStencilOp)(st.zfail & 7);
+    o.passOp = (VkStencilOp)(st.zpass & 7);
+    o.compareOp = (VkCompareOp)(st.func & 7);
+    return o;
+}
 
 VkPipeline pipeline(const Draw &d, VkShaderModule vs, VkShaderModule fs) {
     const uint32_t blend = d.has_blend ? d.blend : 0xFFFFFFFFu;
     const uint32_t depth = d.depth_func | (d.depth_write ? 8u : 0u);
-    auto key = std::make_tuple(vs, fs, d.attr_count, blend, depth, d.cull);
+    const uint32_t sten = stencil_used(d) ? (1u << 24 | stencil_bits(d.front) | stencil_bits(d.back) << 12) : 0;
+    auto key = std::make_tuple(vs, fs, d.attr_count, blend, depth, d.cull, sten);
     auto it = g_pipes.find(key);
     if (it != g_pipes.end()) return it->second;
     Timer tm(g_stats.pipe_ns);
@@ -461,7 +524,8 @@ VkPipeline pipeline(const Draw &d, VkShaderModule vs, VkShaderModule fs) {
     VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     rs.polygonMode = VK_POLYGON_MODE_FILL;
     rs.cullMode = VK_CULL_MODE_NONE; // o sentido da face com viewport invertido ainda não foi medido
-    rs.frontFace = VK_FRONT_FACE_CLOCKWISE;
+    static const bool cw_front = getenv("VITART_VK_FRONT_CW") != nullptr; // depuração: inverte a face da frente
+    rs.frontFace = cw_front ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rs.lineWidth = 1.0f;
     VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
@@ -471,6 +535,11 @@ VkPipeline pipeline(const Draw &d, VkShaderModule vs, VkShaderModule fs) {
     ds.depthTestEnable = nodepth ? VK_FALSE : VK_TRUE;
     ds.depthWriteEnable = d.depth_write ? VK_TRUE : VK_FALSE;
     ds.depthCompareOp = (VkCompareOp)(d.depth_func & 7);
+    if (sten) {
+        ds.stencilTestEnable = VK_TRUE;
+        ds.front = stencil_state(d.front);
+        ds.back = stencil_state(d.back);
+    }
     VkPipelineColorBlendAttachmentState ba{};
     // VITART_VK_NOBLEND=1 (depuração): sem blend, para separar triângulo ausente de alfa 0.
     static const bool noblend = getenv("VITART_VK_NOBLEND") != nullptr;
@@ -492,9 +561,10 @@ VkPipeline pipeline(const Draw &d, VkShaderModule vs, VkShaderModule fs) {
     VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
     cb.attachmentCount = 1;
     cb.pAttachments = &ba;
-    VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkDynamicState dyn[5] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
+                             VK_DYNAMIC_STATE_STENCIL_WRITE_MASK, VK_DYNAMIC_STATE_STENCIL_REFERENCE};
     VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-    dy.dynamicStateCount = 2;
+    dy.dynamicStateCount = 5;
     dy.pDynamicStates = dyn;
     VkGraphicsPipelineCreateInfo pci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     pci.stageCount = 2;
@@ -597,15 +667,15 @@ bool is_depth(uint32_t addr) {
     return g_depth_owner.count(addr) != 0;
 }
 
-void begin_scene(uint32_t color_addr) {
+void begin_scene(uint32_t color_addr, uint8_t stencil) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     auto it = g_targets.find(color_addr);
     if (!g_dev || it == g_targets.end() || !frame_begin()) return;
     end_pass();
     Image &dep = it->second.depth;
     barrier(dep, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    VkClearDepthStencilValue dc{1.0f, 0};
-    VkImageSubresourceRange dr{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    VkClearDepthStencilValue dc{1.0f, stencil};
+    VkImageSubresourceRange dr{kDepthAspects, 0, 1, 0, 1};
     vkCmdClearDepthStencilImage(g_cmd, dep.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &dc, 1, &dr);
     barrier(dep, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     it->second.dver++;
@@ -768,6 +838,8 @@ bool init(bool validation, bool window) {
     at[0].initialLayout = at[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     at[1] = at[0];
     at[1].format = kDepth;
+    at[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    at[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
     at[1].initialLayout = at[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     VkAttachmentReference cref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     VkAttachmentReference dref{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
@@ -885,6 +957,11 @@ bool draw(const Draw &d) {
     for (size_t ti = 0; ti < d.textures.size(); ti++) {
         const Texture &t = d.textures[ti];
         if (t.binding >= kTexBindings) continue;
+        // Profundidade sempre por ponto (D32 não garante filtro linear).
+        static const char *smp_dbg = getenv("VITART_VK_SAMPLER"); // depuração: "depthlinear" ou "nearest"
+        img_info[t.binding].sampler = t.depth ? g_sampler_nearest : sampler_for(t);
+        if (smp_dbg && !strcmp(smp_dbg, "depthlinear")) img_info[t.binding].sampler = sampler_for(t);
+        if (smp_dbg && !strcmp(smp_dbg, "nearest")) img_info[t.binding].sampler = g_sampler_nearest;
         if (t.target_addr) {
             uint32_t owner = t.target_addr;
             if (t.depth) {
@@ -901,7 +978,6 @@ bool draw(const Draw &d) {
             const uint64_t ver = t.depth ? it->second.dver : it->second.cver;
             Snap &sn = g_snaps[{owner, t.depth}];
             Image &snap = sn.im;
-            if (t.depth) img_info[t.binding].sampler = g_sampler_nearest;
             if (snap.img && sn.ver == ver) {
                 img_info[t.binding].imageView = snap.view;
                 continue;
@@ -1006,6 +1082,12 @@ bool draw(const Draw &d) {
     vkCmdSetViewport(g_cmd, 0, 1, &vp);
     VkRect2D sc{{0, 0}, {d.target_w, d.target_h}};
     vkCmdSetScissor(g_cmd, 0, 1, &sc);
+    vkCmdSetStencilCompareMask(g_cmd, VK_STENCIL_FACE_FRONT_BIT, d.front.cmask);
+    vkCmdSetStencilCompareMask(g_cmd, VK_STENCIL_FACE_BACK_BIT, d.back.cmask);
+    vkCmdSetStencilWriteMask(g_cmd, VK_STENCIL_FACE_FRONT_BIT, d.front.wmask);
+    vkCmdSetStencilWriteMask(g_cmd, VK_STENCIL_FACE_BACK_BIT, d.back.wmask);
+    vkCmdSetStencilReference(g_cmd, VK_STENCIL_FACE_FRONT_BIT, d.front.ref);
+    vkCmdSetStencilReference(g_cmd, VK_STENCIL_FACE_BACK_BIT, d.back.ref);
     VkBuffer bufs[16];
     for (uint32_t k = 0; k < na; k++) bufs[k] = g_ring.buf;
     if (na) vkCmdBindVertexBuffers(g_cmd, 0, na, bufs, voff);
@@ -1086,6 +1168,8 @@ void shutdown() {
         destroy(kv.second.color), destroy(kv.second.depth);
     }
     destroy(g_white);
+    for (auto &kv : g_samplers)
+        if (kv.second != g_sampler) vkDestroySampler(g_dev, kv.second, nullptr);
     vkDestroySampler(g_dev, g_sampler, nullptr);
     vkDestroySampler(g_dev, g_sampler_nearest, nullptr);
     vkDestroyPipelineLayout(g_dev, g_layout, nullptr);

@@ -58,7 +58,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     const uint32_t version = r.u32(), ndraws = r.u32();
-    if (version != 2) {
+    if (version != 3) {
         std::fprintf(stderr, "versão %u não suportada\n", version);
         return 1;
     }
@@ -81,6 +81,11 @@ int main(int argc, char **argv) {
         const uint32_t valid = r.u32();
         d.prim = r.u32(), d.cull = r.u32(), d.has_blend = r.u32() != 0, d.blend = r.u32();
         d.depth_func = r.u32(), d.depth_write = r.u32() != 0;
+        d.stencil = r.u32() != 0;
+        for (gvk::Stencil *st : {&d.front, &d.back}) {
+            st->func = (uint8_t)r.u32(), st->fail = (uint8_t)r.u32(), st->zfail = (uint8_t)r.u32(), st->zpass = (uint8_t)r.u32();
+            st->cmask = (uint8_t)r.u32(), st->wmask = (uint8_t)r.u32(), st->ref = (uint8_t)r.u32();
+        }
         std::memcpy(d.vps, r.bytes(24), 24);
         d.target_addr = r.u32(), d.target_w = r.u32(), d.target_h = r.u32(), d.depth_addr = r.u32();
         d.vertex_count = r.u32(), d.attr_count = r.u32(), d.index_count = r.u32();
@@ -96,6 +101,9 @@ int main(int argc, char **argv) {
             tx.binding = r.u32();
             const uint32_t kind = r.u32();
             tx.target_addr = r.u32(), tx.width = r.u32(), tx.height = r.u32();
+            const uint32_t w0 = r.u32();
+            tx.addr_v = (uint8_t)((w0 >> 3) & 7), tx.addr_u = (uint8_t)((w0 >> 6) & 7);
+            tx.min = (uint8_t)((w0 >> 10) & 3), tx.mag = (uint8_t)((w0 >> 12) & 3);
             tx.depth = kind == 2;
             if (kind == 0) tx.rgba = r.bytes((size_t)tx.width * tx.height * 4);
             d.textures.push_back(tx);
@@ -106,6 +114,9 @@ int main(int argc, char **argv) {
             continue;
         }
         d.debug_vs = (int)i == debug_draw;
+        // REPLAY_SKIP_SHELL=1 (depuração): pula as cascas (stencil "diferente" sem escrita no stencil).
+        static const bool skip_shell = getenv("REPLAY_SKIP_SHELL") != nullptr;
+        if (skip_shell && d.stencil && d.front.func == 5 && d.front.wmask == 0) continue;
         const bool ok_draw = gvk::draw(d);
         if (d.debug_vs) {
             const auto &o = gvk::debug_vs_output();

@@ -3,6 +3,7 @@
 // afins ficam sob o diretório de dados (--data).
 #include "vitart.h"
 
+#include <cctype>
 #include <cstdarg>
 #include <cstdio>
 #include <filesystem>
@@ -38,6 +39,15 @@ static std::string host_path(const std::string &p) {
     return data_path() + "/" + dev + "/" + rest;
 }
 
+// VITART_SKIP_VIDEOS=1: os vídeos Bink (.bk2) aparecem como inexistentes, e o jogo segue sem tocá-los.
+static bool skipped_video(const std::string &path) {
+    static const bool skip = getenv("VITART_SKIP_VIDEOS") && *getenv("VITART_SKIP_VIDEOS") == '1';
+    if (!skip || path.size() < 4) return false;
+    std::string ext = path.substr(path.size() - 4);
+    for (char &c : ext) c = (char)std::tolower((unsigned char)c);
+    return ext == ".bk2";
+}
+
 struct File {
     int fd = -1;
     std::string path;
@@ -62,6 +72,10 @@ static void fill_stat(uint32_t st, const fs::path &p) {
 VT_HLE(sceIoOpen) {
     const std::string path = gstr(arg(ctx, 0));
     const uint32_t flags = arg(ctx, 1);
+    if (skipped_video(path)) {
+        logf("vitart: vídeo pulado: %s", path.c_str());
+        return ret(ctx, SCE_ERROR_ERRNO_ENOENT);
+    }
     const std::string hp = host_path(path);
     int of = _O_BINARY;
     const uint32_t acc = flags & 3;
@@ -169,6 +183,7 @@ VT_HLE(sceIoDevctl) { ret(ctx, 0); }
 VT_HLE(sceIoIoctl) { ret(ctx, 0); }
 VT_HLE(sceIoChstat) { ret(ctx, 0); }
 VT_HLE(sceIoGetstat) {
+    if (skipped_video(gstr(arg(ctx, 0)))) return ret(ctx, SCE_ERROR_ERRNO_ENOENT);
     const fs::path p = host_path(gstr(arg(ctx, 0)));
     std::error_code ec;
     if (!fs::exists(p, ec)) return ret(ctx, SCE_ERROR_ERRNO_ENOENT);

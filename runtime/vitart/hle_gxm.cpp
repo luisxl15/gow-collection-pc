@@ -53,6 +53,7 @@ struct Context {
     uint32_t vuniform = 0, funiform = 0; // último default uniform buffer reservado
     uint32_t viewport_r[6] = {}, viewport_s[6] = {}; // argumentos crus (ABI de float ainda a confirmar)
     uint32_t depth_func = 7, depth_write = 1, cull = 0, two_sided = 0;
+    gvk::Stencil stencil_front, stencil_back; // estado de stencil por face (frente/verso)
     bool in_scene = false;
     Scene scene;
 };
@@ -203,6 +204,15 @@ static void dump_draw(Context &c, uint32_t prim, uint32_t itype, uint32_t idata,
         c.viewport_s[3], c.viewport_s[4], c.viewport_s[5]);
     const uint32_t blend = fp && fp->blend.size() == 4 ? *reinterpret_cast<const uint32_t *>(fp->blend.data()) : 0;
     const uint32_t cs = c.scene.color_surface;
+    {
+        const uint32_t dsurf = c.scene.depth_surface;
+        const uint32_t fmt = dsurf ? rd32(dsurf) : 0;
+        const bool has = dsurf && (fmt == 0x00022000u || fmt == 0x00066000u || fmt == 0x000EE000u || fmt == 0x01266000u ||
+                                   rd32(dsurf + 12) != 0);
+        const gvk::Stencil &f = c.stencil_front, &bk = c.two_sided ? c.stencil_back : c.stencil_front;
+        fprintf(g_draws_json, ",\"st\":[%d,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]", has ? 1 : 0, f.func, f.fail, f.zfail,
+                f.zpass, f.cmask, f.wmask, f.ref, bk.func, bk.fail, bk.zfail, bk.zpass, bk.cmask, bk.wmask, bk.ref);
+    }
     fprintf(g_draws_json, ",\"blend\":%u,\"hasblend\":%d,\"outfmt\":%u,\"depth\":[%u,%u],\"cull\":%u,\"cs\":[%u,%u,%u,%u,%u],\"ds\":%u}\n",
         blend, fp && !fp->blend.empty() ? 1 : 0, fp ? fp->output_format : 0, c.depth_func, c.depth_write, c.cull,
         cs ? rd32(cs) : 0, cs ? rd32(cs + 8) : 0, cs ? rd32(cs + 12) : 0, cs ? rd32(cs + 16) : 0, cs ? rd32(cs + 20) : 0,
@@ -393,6 +403,14 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
     std::memcpy(d.vps, c.viewport_s, sizeof d.vps);
     d.target_w = rd32(cs + 8), d.target_h = rd32(cs + 12), d.target_addr = rd32(cs + 20);
     d.depth_addr = c.scene.depth_surface ? rd32(c.scene.depth_surface + 8) : 0;
+    // Stencil só existe se a superfície tem o plano S8 (formato com S8 ou ponteiro de stencil).
+    if (c.scene.depth_surface) {
+        const uint32_t fmt = rd32(c.scene.depth_surface);
+        d.stencil = fmt == 0x00022000u || fmt == 0x00066000u || fmt == 0x000EE000u || fmt == 0x01266000u ||
+                    rd32(c.scene.depth_surface + 12) != 0;
+    }
+    d.front = c.stencil_front;
+    d.back = c.two_sided ? c.stencil_back : c.stencil_front;
     d.vertex_count = nv;
     d.attr_count = (uint32_t)locs.size();
     d.attrs = attrs.data();
@@ -411,6 +429,9 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
         const gxmtex::Info info = gxmtex::describe(w.data());
         gvk::Texture t;
         t.binding = i;
+        // Palavra 0: endereçamento v em 3..5, u em 6..8, filtro de minificação em 10..11, de magnificação em 12..13.
+        t.addr_v = (uint8_t)((w[0] >> 3) & 7), t.addr_u = (uint8_t)((w[0] >> 6) & 7);
+        t.min = (uint8_t)((w[0] >> 10) & 3), t.mag = (uint8_t)((w[0] >> 12) & 3);
         t.width = info.width, t.height = info.height;
         if (gvk::is_target(info.data)) {
             t.target_addr = info.data;
@@ -1058,10 +1079,23 @@ VT_HLE(sceGxmSetFrontDepthFunc) { if (auto c = context_of(arg(ctx, 0))) c->depth
 VT_HLE(sceGxmSetBackDepthFunc) {}
 VT_HLE(sceGxmSetFrontDepthWriteEnable) { if (auto c = context_of(arg(ctx, 0))) c->depth_write = arg(ctx, 1); }
 VT_HLE(sceGxmSetBackDepthWriteEnable) {}
-VT_HLE(sceGxmSetFrontStencilFunc) {}
-VT_HLE(sceGxmSetBackStencilFunc) {}
-VT_HLE(sceGxmSetFrontStencilRef) {}
-VT_HLE(sceGxmSetBackStencilRef) {}
+// (context, func, stencilFail, depthFail, depthPass, compareMask, writeMask): func em bits 25..27, as
+// operações e as funções na mesma ordem do Vulkan.
+static void set_stencil(arc_ctx *ctx, bool front) {
+    auto c = context_of(arg(ctx, 0));
+    if (!c) return;
+    gvk::Stencil &st = front ? c->stencil_front : c->stencil_back;
+    st.func = (uint8_t)((arg(ctx, 1) >> 25) & 7);
+    st.fail = (uint8_t)(arg(ctx, 2) & 7);
+    st.zfail = (uint8_t)(arg(ctx, 3) & 7);
+    st.zpass = (uint8_t)(arg(ctx, 4) & 7);
+    st.cmask = (uint8_t)arg(ctx, 5);
+    st.wmask = (uint8_t)arg(ctx, 6);
+}
+VT_HLE(sceGxmSetFrontStencilFunc) { set_stencil(ctx, true); }
+VT_HLE(sceGxmSetBackStencilFunc) { set_stencil(ctx, false); }
+VT_HLE(sceGxmSetFrontStencilRef) { if (auto c = context_of(arg(ctx, 0))) c->stencil_front.ref = (uint8_t)arg(ctx, 1); }
+VT_HLE(sceGxmSetBackStencilRef) { if (auto c = context_of(arg(ctx, 0))) c->stencil_back.ref = (uint8_t)arg(ctx, 1); }
 VT_HLE(sceGxmSetFrontPolygonMode) {}
 VT_HLE(sceGxmSetUserMarker) { ret(ctx, SCE_OK); }
 

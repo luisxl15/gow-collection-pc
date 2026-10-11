@@ -21,6 +21,16 @@ struct Texture {
     uint32_t width = 1, height = 1;
     const uint8_t *rgba = nullptr; // width*height*4
     uint64_t key = 0;              // != 0: identifica o conteúdo (evita o hash dos pixels a cada desenho)
+    // Amostragem pedida pelo jogo (palavra 0 do SceGxmTexture): SceGxmTextureFilter (0 ponto, 1 linear)
+    // e SceGxmTextureAddrMode de u e v.
+    uint8_t mag = 1, min = 1, addr_u = 0, addr_v = 0;
+};
+
+// Estado de stencil de uma face (valores do GXM já decodificados; mesma ordem do Vulkan).
+struct Stencil {
+    uint8_t func = 7;                   // SceGxmStencilFunc >> 25 (7 = sempre)
+    uint8_t fail = 0, zfail = 0, zpass = 0; // SceGxmStencilOp (0 = manter)
+    uint8_t cmask = 0xFF, wmask = 0xFF, ref = 0;
 };
 
 struct Draw {
@@ -29,6 +39,8 @@ struct Draw {
     uint32_t blend = 0;     // SceGxmBlendInfo
     uint32_t depth_func = 7; // SceGxmDepthFunc (mesma ordem do VkCompareOp)
     bool depth_write = false;
+    bool stencil = false;   // a superfície de profundidade tem stencil
+    Stencil front, back;
     float vps[6] = {};      // x_off, x_escala, y_off, y_escala, z_off, z_escala
     uint32_t target_addr = 0, target_w = 0, target_h = 0, depth_addr = 0;
     uint32_t vertex_count = 0, attr_count = 0;
@@ -53,7 +65,7 @@ bool is_target(uint32_t addr);
 bool is_depth(uint32_t addr);
 // Início de cena do GXM: a profundidade do alvo volta ao valor de fundo (1,0), a não ser que a
 // superfície peça "force load". Sem isso a profundidade de uma cena vaza para a seguinte.
-void begin_scene(uint32_t color_addr);
+void begin_scene(uint32_t color_addr, uint8_t stencil = 0);
 void shutdown();
 // Grava o desenho no quadro atual (os desenhos são executados em ordem em end_frame).
 bool draw(const Draw &d);

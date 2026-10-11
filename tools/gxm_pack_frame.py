@@ -10,13 +10,14 @@ profundidade, viewport, alvo). Formato (little-endian):
     "GXMF" u32 versão u32 n_desenhos
     por desenho:
       u32 válido, prim, cull, tem_blend, blend, função_prof, escreve_prof
+      u32 tem_stencil, frente[7], verso[7]  (função, falha, falha_prof, passa, máscara_cmp, máscara_escr, ref)
       f32 vps[6]                      (x_off, x_escala, y_off, y_escala, z_off, z_escala)
       u32 alvo_end, alvo_l, alvo_a, prof_end
       u32 n_vértices, n_atributos, n_índices
       f32 atributos[n_atributos][n_vértices][4]; u32 índices[n_índices]
       u32 n, bytes (uniforms de vértice); u32 n, bytes (uniforms de fragmento)
       u32 n, SPIR-V do vértice; u32 n, SPIR-V do fragmento
-      u32 n_texturas; por textura: u32 binding, tipo, endereço, l, a [, rgba[l*a*4] se tipo 0]
+      u32 n_texturas; por textura: u32 binding, tipo, endereço, l, a, palavra0 [, rgba[l*a*4] se tipo 0]
         tipo 0 = pixels a seguir, 1 = alvo de cor deste quadro, 2 = superfície de profundidade
 """
 import json
@@ -33,7 +34,7 @@ import gxm_tex_dump as tx  # noqa: E402
 from vitarecomp.usse.decode import Program  # noqa: E402
 from vitarecomp.usse.translate import Unsupported, translate  # noqa: E402
 
-VERSION = 2
+VERSION = 3
 
 
 def main():
@@ -111,6 +112,7 @@ def main():
         dwrite = int(dr["depth"][1] == 0)
         ds = dr.get("ds") or 0
         parts.append(struct.pack("<7I", int(valid), dr["prim"], dr["cull"], dr["hasblend"], dr["blend"], dfunc, dwrite))
+        parts.append(struct.pack("<15I", *(dr.get("st") or [0, 7, 0, 0, 0, 255, 255, 0, 7, 0, 0, 0, 255, 255, 0])))
         parts.append(struct.pack("<6I", *dr["vps"]))
         parts.append(struct.pack("<4I", addr, w, h, ds))
         parts.append(struct.pack("<3I", nv, len(locs), len(tris)))
@@ -123,9 +125,10 @@ def main():
         for t in dr["tex"] or []:
             unit, words = t[0], t[1:5]
             desc = tx.describe(words)
+            smp = struct.pack("<I", words[0])  # palavra 0: filtros e endereçamento
             if desc["data"] in targets or desc["data"] in depths:
                 kind = 1 if desc["data"] in targets else 2
-                texs.append(struct.pack("<5I", unit, kind, desc["data"], desc["width"], desc["height"]))
+                texs.append(struct.pack("<5I", unit, kind, desc["data"], desc["width"], desc["height"]) + smp)
                 continue
             key = tuple(words)
             if key not in texcache:
@@ -140,7 +143,7 @@ def main():
                     img = np.concatenate([img, np.full(img.shape[:2] + (1,), 255, np.uint8)], 2)
                 texcache[key] = img
             img = texcache[key]
-            texs.append(struct.pack("<5I", unit, 0, 0, img.shape[1], img.shape[0]) + img.tobytes())
+            texs.append(struct.pack("<5I", unit, 0, 0, img.shape[1], img.shape[0]) + smp + img.tobytes())
         parts.append(struct.pack("<I", len(texs)))
         parts.extend(texs)
     with open(out, "wb") as f:
