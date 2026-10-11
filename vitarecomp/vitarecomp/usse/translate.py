@@ -130,9 +130,78 @@ class Translator:
         finally:
             self.cur_pred = None
 
+    def _target(self, ins, i):
+        f = ins.f
+        off = f["br_off"]
+        if f["br_type"] and off >> 19:
+            off -= 1 << 20
+        return i + off if f["br_type"] else off
+
+    def _overlapping(self, code):
+        """True se a fase tem desvios para a frente que se cruzam (não viram ifs aninhados)."""
+        merges, skip_to = [], -1
+        for i, ins in enumerate(code):
+            while merges and merges[-1] == i:
+                merges.pop()
+            if i < skip_to or ins.op != "br":
+                continue
+            target = self._target(ins, i)
+            if target <= i or target > len(code) or ins.f["save_link"] or ins.f["exception"]:
+                return False  # o caminho normal acusa
+            if merges and target > merges[-1]:
+                return True
+            if O.predicate(ins) is None:
+                skip_to = target
+                continue
+            merges.append(target)
+        return False
+
+    def run_flags(self, code, second):
+        """Desvios que se cruzam: cada br guarda em uma variável se foi tomado, e cada trecho de instruções
+        roda num if com "nenhum desvio que me cobre foi tomado" (cobre = br antes de mim com alvo depois)."""
+        b = self.b
+        flags = {}
+        for i, ins in enumerate(code):
+            if ins.op == "br":
+                t = self._target(ins, i)
+                if t <= i or t > len(code) or ins.f["save_link"] or ins.f["exception"]:
+                    raise Unsupported("br para %d (de %d)" % (t, i))
+                flags[i] = (b.variable(self.f32, S.SCPrivate, "skip%d" % i), t)
+        for var, _ in flags.values():
+            b.store(var, self.const(0))
+        merge, cover = None, ()
+        for i, ins in enumerate(code):
+            c = tuple(k for k, (_, t) in flags.items() if k < i < t)
+            if c != cover:
+                if merge is not None:
+                    b.body += b.inst(249, merge) + b.inst(248, merge)
+                    merge = None
+                cover = c
+                if c:
+                    cond = None
+                    for k in c:
+                        clear = b.emit(180, self.boolt, b.load(self.f32, flags[k][0]), self.const(0))
+                        cond = clear if cond is None else b.emit(167, self.boolt, cond, clear)  # OpLogicalAnd
+                    body, merge = b.id(), b.id()
+                    b.body += b.inst(247, merge, 0) + b.inst(250, cond, body, merge) + b.inst(248, body)
+            if ins.op != "br":
+                self.instr(ins, second)
+                continue
+            pr = O.predicate(ins)
+            if pr is None:
+                b.store(flags[i][0], self.const(1))
+            else:
+                pv = b.load(self.f32, b.chain(S.SCPrivate, self.f32, self.preds, b.const(self.i32, pr[0])))
+                taken = b.emit(182 if not pr[1] else 180, self.boolt, pv, self.const(0))
+                b.store(flags[i][0], b.emit(169, self.f32, taken, self.const(1), self.const(0)))  # OpSelect
+        if merge is not None:
+            b.body += b.inst(249, merge) + b.inst(248, merge)
+
     def run(self, code, second):
         """Emite uma fase. Desvios só para a frente (br relativo): o trecho pulado vira um if estruturado,
         executado quando o predicado do desvio é falso; desvio incondicional apaga o trecho."""
+        if self._overlapping(code):
+            return self.run_flags(code, second)
         b = self.b
         merges = []  # (índice de destino, rótulo de junção), aninhados
         skip_to = -1
