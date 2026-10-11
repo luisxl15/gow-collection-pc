@@ -2,6 +2,7 @@
 // entrada (SceCtrl, SceTouch, SceMotion), exibição, relógio (SceRtc, libc), tubos de mensagem, Fios
 // overlays, NP, troféus, AppUtil e diálogos comuns. Assinaturas e layouts das estruturas: vita-headers.
 #include "vitart.h"
+#include "host_input.h"
 
 #include <chrono>
 #include <ctime>
@@ -197,7 +198,8 @@ VT_HLE(sceAudioOutOutput) {
 
 // =================================================================== entrada
 // Controle pelo teclado do host: setas = direcional, Z/X/A/S = cruz/círculo/quadrado/triângulo,
-// Q/W = L/R, Enter = start, Backspace = select. Analógicos centrados.
+// Q/W = L/R, Enter = start, Backspace = select. Controles (XInput, DualShock 4, DualSense) em
+// host_input.cpp: botões somados ao teclado, analógicos do controle.
 static uint32_t keyboard_buttons() {
     uint32_t b = 0;
 #ifdef _WIN32
@@ -243,13 +245,14 @@ static void ctrl_read(arc_ctx *ctx) {
     // (port, SceCtrlData *data, count): 0x20 bytes por amostra.
     const uint32_t data = arg(ctx, 1);
     const int count = (int)arg(ctx, 2) > 0 ? (int)arg(ctx, 2) : 1;
-    const uint32_t buttons = keyboard_buttons() | scripted_buttons();
+    const hostin::State pad = hostin::poll(); // XInput, DualShock 4 e DualSense
+    const uint32_t buttons = keyboard_buttons() | scripted_buttons() | pad.buttons;
     for (int i = 0; i < count; ++i) {
         const uint32_t d = data + 0x20u * i;
         std::memset(ptr<void>(d), 0, 0x20);
         wr64(d, now_us_sys());
         wr32(d + 8, buttons);
-        for (int s = 0; s < 4; ++s) ptr<uint8_t>(d)[12 + s] = 128;
+        ptr<uint8_t>(d)[12] = pad.lx, ptr<uint8_t>(d)[13] = pad.ly, ptr<uint8_t>(d)[14] = pad.rx, ptr<uint8_t>(d)[15] = pad.ry;
     }
     ret(ctx, (uint32_t)count);
 }

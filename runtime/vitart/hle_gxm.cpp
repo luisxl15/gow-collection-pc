@@ -348,24 +348,23 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
     const uint64_t t_idx0 = now_ns();
     const uint32_t kind = prim >> 26; // 0 triângulos, 3 faixa, 4 leque (linhas e pontos ficam de fora)
     const uint32_t isz = (itype & 0x01000000u) ? 4 : 2;
-    std::vector<uint32_t> idx(icount);
+    // Os índices do jogo vão para a GPU como estão (16 ou 32 bits), com a topologia nativa (lista, faixa,
+    // leque); só a faixa de vértices usada é enviada e o deslocamento vira o vertexOffset do desenho.
+    if (kind != 0 && kind != 3 && kind != 4) return;
+    const uint32_t nidx = kind == 0 ? icount / 3 * 3 : icount;
+    if (nidx < 3) return;
     uint32_t maxi = 0, mini = UINT32_MAX;
-    for (uint32_t i = 0; i < icount; i++) {
-        idx[i] = isz == 4 ? rd32(idata + 4 * i) : *ptr<uint16_t>(idata + 2 * i);
-        if (idx[i] > maxi) maxi = idx[i];
-        if (idx[i] < mini) mini = idx[i];
+    if (isz == 4) {
+        const uint32_t *ix = ptr<uint32_t>(idata);
+        for (uint32_t i = 0; i < nidx; i++) maxi = std::max(maxi, ix[i]), mini = std::min(mini, ix[i]);
+    } else {
+        const uint16_t *ix = ptr<uint16_t>(idata);
+        uint32_t lo = 0xFFFF, hi = 0;
+        for (uint32_t i = 0; i < nidx; i++) hi = std::max<uint32_t>(hi, ix[i]), lo = std::min<uint32_t>(lo, ix[i]);
+        maxi = hi, mini = lo;
     }
-    // Só a faixa de vértices usada vai para a GPU: índices rebaseados pelo menor.
-    for (auto &i : idx) i -= mini;
     maxi -= mini;
-    std::vector<uint32_t> tris;
-    if (kind == 0)
-        tris.assign(idx.begin(), idx.begin() + icount / 3 * 3);
-    else if (kind == 3)
-        for (uint32_t i = 0; i + 2 < icount; i++) tris.insert(tris.end(), {idx[i], idx[i + 1], idx[i + 2]});
-    else if (kind == 4)
-        for (uint32_t i = 1; i + 1 < icount; i++) tris.insert(tris.end(), {idx[0], idx[i], idx[i + 1]});
-    if (tris.empty() || maxi > (1u << 20)) return;
+    if (maxi > (1u << 20)) return;
     const uint32_t nv = maxi + 1;
 
     const uint64_t t_attr0 = now_ns();
@@ -465,8 +464,11 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
     d.attrs = attrs.data();
     d.raw_streams = std::move(raw_streams);
     d.raw_attrs = std::move(raw_attrs);
-    d.indices = tris.data();
-    d.index_count = (uint32_t)tris.size();
+    d.index_data = ptr<void>(idata);
+    d.index_size = isz;
+    d.vertex_offset = -(int32_t)mini;
+    d.topology = kind == 3 ? 1 : kind == 4 ? 2 : 0;
+    d.index_count = nidx;
     const uint32_t vsize = rd32(vp->program + 0x64) * 4, fsize = rd32(fp->program + 0x64) * 4;
     if (c.vuniform && vsize) d.vert_uniforms = ptr<uint8_t>(c.vuniform), d.vert_uniforms_size = vsize;
     if (c.funiform && fsize) d.frag_uniforms = ptr<uint8_t>(c.funiform), d.frag_uniforms_size = fsize;

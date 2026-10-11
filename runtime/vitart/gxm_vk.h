@@ -63,7 +63,12 @@ struct Draw {
     // Caminho cru: se raw_attrs não está vazio, attrs é ignorado (locations sem atributo ficam sem binding).
     std::vector<VertexStream> raw_streams;
     std::vector<VertexAttr> raw_attrs;
-    const uint32_t *indices = nullptr;
+    const uint32_t *indices = nullptr; // lista de triângulos u32 (replay)
+    // Índices do jogo sem conversão: se index_data != nullptr, indices é ignorado.
+    const void *index_data = nullptr;
+    uint32_t index_size = 4;  // 2 ou 4 bytes
+    int32_t vertex_offset = 0; // somado a cada índice (rebase da faixa de vértices)
+    uint32_t topology = 0;     // 0 lista, 1 faixa, 2 leque
     uint32_t index_count = 0;
     const uint8_t *vert_uniforms = nullptr; uint32_t vert_uniforms_size = 0;
     const uint8_t *frag_uniforms = nullptr; uint32_t frag_uniforms_size = 0;

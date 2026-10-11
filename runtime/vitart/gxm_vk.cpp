@@ -613,7 +613,7 @@ VkPipeline pipeline(const Draw &d, VkShaderModule vs, VkShaderModule fs) {
     const uint32_t depth = d.depth_func | (d.depth_write ? 8u : 0u);
     const uint32_t sten = stencil_used(d) ? (1u << 24 | stencil_bits(d.front) | stencil_bits(d.back) << 12) : 0;
     // Layout dos vértices crus entra na chave (strides, e por atributo location/stream/offset/formato).
-    uint64_t layout = d.raw_attrs.empty() ? d.attr_count : 0x8000000000000000ull;
+    uint64_t layout = (d.raw_attrs.empty() ? d.attr_count : 0x8000000000000000ull) ^ ((uint64_t)(d.topology & 3) << 58);
     for (const VertexStream &st : d.raw_streams) layout = (layout ^ st.stride) * 1099511628211ull;
     for (const VertexAttr &a : d.raw_attrs)
         layout = (layout ^ (a.location | a.stream << 5 | a.offset << 10 | a.fmt << 20 | a.comps << 25)) * 1099511628211ull;
@@ -643,7 +643,8 @@ VkPipeline pipeline(const Draw &d, VkShaderModule vs, VkShaderModule fs) {
     vi.vertexAttributeDescriptionCount = (uint32_t)attrs.size();
     vi.pVertexAttributeDescriptions = attrs.data();
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    ia.topology = d.topology == 1 ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
+                  : d.topology == 2 ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
     vp.viewportCount = vp.scissorCount = 1;
     VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
@@ -1128,7 +1129,7 @@ bool draw(const Draw &d) {
         for (const VertexStream &st : d.raw_streams) vbytes += st.size + 16;
     else
         vbytes = (VkDeviceSize)na * d.vertex_count * 16;
-    VkDeviceSize need = vbytes + (VkDeviceSize)d.index_count * 4 + d.vert_uniforms_size +
+    VkDeviceSize need = vbytes + (VkDeviceSize)d.index_count * (d.index_data ? d.index_size : 4) + 8 + d.vert_uniforms_size +
                         d.frag_uniforms_size + 64 * 1024;
     std::vector<uint64_t> keys(d.textures.size());
     for (size_t i = 0; i < d.textures.size(); i++) {
@@ -1220,7 +1221,8 @@ bool draw(const Draw &d) {
     for (uint32_t k = 0; k < na; k++)
         voff[k] = raw ? ring_put(d.raw_streams[k].data, d.raw_streams[k].size, 16)
                       : ring_put(d.attrs + (size_t)k * d.vertex_count * 4, (VkDeviceSize)d.vertex_count * 16, 16);
-    const VkDeviceSize ioff = ring_put(d.indices, (VkDeviceSize)d.index_count * 4, 4);
+    const VkDeviceSize ioff = d.index_data ? ring_put(d.index_data, (VkDeviceSize)d.index_count * d.index_size, 4)
+                                           : ring_put(d.indices, (VkDeviceSize)d.index_count * 4, 4);
     const VkDeviceSize vuoff = ring_put(d.vert_uniforms, d.vert_uniforms_size, g_ssbo_align);
     const VkDeviceSize dbgoff = d.debug_vs ? ring_put(nullptr, (VkDeviceSize)d.vertex_count * 16, 4) : 0;
     const VkDeviceSize fuoff = ring_put(d.frag_uniforms, d.frag_uniforms_size, g_ssbo_align);
@@ -1289,8 +1291,9 @@ bool draw(const Draw &d) {
     VkBuffer bufs[16];
     for (uint32_t k = 0; k < na; k++) bufs[k] = g_ring.buf;
     if (na) vkCmdBindVertexBuffers(g_cmd, 0, na, bufs, voff);
-    vkCmdBindIndexBuffer(g_cmd, g_ring.buf, ioff, VK_INDEX_TYPE_UINT32);
-    vkCmdDrawIndexed(g_cmd, d.index_count, 1, 0, 0, 0);
+    vkCmdBindIndexBuffer(g_cmd, g_ring.buf, ioff,
+                         d.index_data && d.index_size == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+    vkCmdDrawIndexed(g_cmd, d.index_count, 1, 0, d.index_data ? d.vertex_offset : 0, 0);
     if (d.debug_vs) {
         if (!frame_flush(true)) return false;
         g_debug_vs.assign(reinterpret_cast<const float *>(g_ring_ptr + dbgoff),
