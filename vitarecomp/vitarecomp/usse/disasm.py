@@ -204,9 +204,14 @@ def lower(ins, second=False):
         s2 = O.src12(f["src2_n"], f["src2_bank"], f["src2_bank_ext"], False, 7, second)
         if s1.bank == O.IMM:
             s1.num *= 4
+        else:
+            return None  # índice em registrador (base 0x10000 a descontar): não aparece no jogo, sem teste
+        # Sem moe_expand o hardware soma 4 bytes ao endereço (medido: os ossos só batem com +4; todos os
+        # 3.500 vldst do GoW têm moe_expand = 0).
+        adj = O.Operand(O.IMM, 0 if f["moe_expand"] else 4)
         bank = O.SA if second else (O.PA if f["dest_bank_primattr"] else O.TEMP)
         d = O.Operand(bank, f["dest_n"])
-        return ("vldst", d, f["mask_count"] + 1, [s0, s1, s2])
+        return ("vldst", d, f["mask_count"] + 1, [s0, s1, s2, adj])
     if ins.op == "vdual":
         return lower_vdual(f, second)
     if ins.op == "kill":

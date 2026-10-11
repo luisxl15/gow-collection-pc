@@ -263,7 +263,9 @@ class Translator:
                 if op.bank not in BANK_VAR:
                     raise Unsupported("banco %s" % op.bank)
                 return b.emit(S.OpBitcast, u32, self.regs.read(BANK_VAR[op.bank], op.num))
-            addr = b.emit(S.OpIAdd, u32, b.emit(S.OpIAdd, u32, word(srcs[0]), word(srcs[1])), word(srcs[2]))
+            addr = word(srcs[0])
+            for op in srcs[1:]:
+                addr = b.emit(S.OpIAdd, u32, addr, word(op))
             idx = b.emit(194, u32, addr, b.const(u32, 2))  # bytes -> palavras
             vals = []
             for k in range(m):

@@ -164,7 +164,7 @@ class Machine:
                 if op.bank == O.IMM:
                     return op.num
                 return int(self.r[op.bank][op.num:op.num + 1].view(np.uint32)[0])
-            addr = (word(srcs[0]) + word(srcs[1]) + word(srcs[2])) & 0xFFFFFFFF
+            addr = sum(word(op) for op in srcs) & 0xFFFFFFFF
             vals = np.frombuffer(self.memory, np.float32, m, addr) if self.memory is not None else np.zeros(m, np.float32)
             self.r[d.bank][d.num:d.num + m] = vals
             return
