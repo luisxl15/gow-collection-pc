@@ -244,6 +244,7 @@ const int16_t kHevag[14][4] = {
     {13133, -7680, 0, 0},   {12028, -7680, 0, 0},     {10764, -7680, 0, 0},       {9359, -7680, 0, 0},
     {13064, -4075, -2824, 1877}, {5333, 2999, 775, -1132}};
 uint64_t g_hevag_unknown = 0, g_hevag_frames = 0;
+uint64_t g_comp_samples = 0, g_comp_reduced = 0, g_clip_samples = 0; // diagnóstico do volume do mix
 void hevag_frame(const uint8_t *f, int32_t h[4], int16_t *out, int stride) {
     unsigned coef = (f[0] >> 4) | (f[1] & 0xF0);
     const int shift = 20 - (f[0] & 15), flag = f[1] & 15;
@@ -732,6 +733,7 @@ void run_compressor(Voice &b) {
             const float db = 20.f * std::log10(std::max(e, 1e-6f));
             const float over = db - thr;
             const float gr = over > 0 ? over * (1.f - 1.f / ratio) : 0.f;
+            g_comp_samples++, g_comp_reduced += gr > 1.f;
             b.out[2 * i + c] = b.in[2 * i + c] * std::pow(10.f, -gr / 20.f) * makeup;
         }
     }
@@ -1169,7 +1171,7 @@ VT_HLE(sceNgsSystemUpdate) {
                     // Saturação suave acima de 0,9 (no lugar do corte seco em 1,0).
                     float x = b.in[k];
                     const float ax = std::fabs(x);
-                    if (ax > 0.9f) x = std::copysign(0.9f + 0.1f * std::tanh((ax - 0.9f) / 0.1f), x);
+                    if (ax > 0.9f) x = std::copysign(0.9f + 0.1f * std::tanh((ax - 0.9f) / 0.1f), x), g_clip_samples++;
                     const float s = x * 32767.f;
                     b.master_pcm[k] = (int16_t)(s > 32767.f ? 32767 : s < -32768.f ? -32768 : (int)s);
                     peak = (std::max)(peak, std::abs((int)b.master_pcm[k]));
@@ -1177,8 +1179,10 @@ VT_HLE(sceNgsSystemUpdate) {
                 if (g_log && ++updates % 500 == 0) {
                     int active = 0;
                     for (auto &v : voices) active += is_source(*v) && (v->state & ST_ACTIVE);
-                    logf("vitart: NGS: %d updates, %d vozes fonte ativas, pico do master %d; HE-ADPCM %llu quadros, %llu com coeficiente desconhecido",
-                         updates, active, peak, (unsigned long long)g_hevag_frames, (unsigned long long)g_hevag_unknown);
+                    logf("vitart: NGS: %d updates, %d vozes fonte ativas, pico do master %d; HE-ADPCM %llu quadros, %llu com coeficiente desconhecido; compressor reduzindo >1 dB em %.1f%% das amostras, saturação suave em %.3f%%",
+                         updates, active, peak, (unsigned long long)g_hevag_frames, (unsigned long long)g_hevag_unknown,
+                         g_comp_samples ? 100.0 * g_comp_reduced / g_comp_samples : 0.0, 100.0 * g_clip_samples / (500.0 * G * 2));
+                    g_comp_samples = g_comp_reduced = g_clip_samples = 0;
                     peak = 0;
                 }
             }

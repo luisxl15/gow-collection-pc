@@ -30,3 +30,13 @@ Não existe codificador livre de ATRAC9, então o arquivo do Vita fica intacto e
 4. O PS2 de cada arquivo em uso é decodificado inteiro para PCM (cache LRU de poucos arquivos).
 
 Liga e desliga por opção (`VITART_PS2_AUDIO=<iso>`), para comparar os dois.
+
+## Efeitos sonoros (medido em 11/10)
+
+- Os 16 VAG do `r_perma.wad_psp2` são **idênticos byte a byte** aos do `R_PERM.WAD` do PS2, e 41 de 60
+  trechos de 2 KB do banco Scream principal (SBlk v9 no Vita, v3 no PS2) também. Os efeitos já tocam
+  as amostras do PS2; não há o que trocar neles.
+- Nosso HE-ADPCM decodifica esses quadros como PS-ADPCM exato (coeficientes do PS2 ×128): 0 quadros
+  com coeficiente desconhecido em 351 mil.
+- Mix (VITART_NGS_LOG): saturação suave em 0,004–0,05% das amostras; o limitador corta >1 dB em 1–6%
+  só nos picos de combate. O mix não distorce.
