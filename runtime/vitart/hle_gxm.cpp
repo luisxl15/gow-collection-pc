@@ -387,6 +387,7 @@ static void vk_draw(Context &c, uint32_t prim, uint32_t itype, uint32_t idata, u
             if (!it->second) continue;
             keep.push_back(it->second);
             t.rgba = it->second->data();
+            t.key = reinterpret_cast<uint64_t>(it->second.get());
         }
         d.textures.push_back(t);
     }

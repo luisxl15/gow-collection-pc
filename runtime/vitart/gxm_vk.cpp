@@ -1,14 +1,16 @@
 // Renderizador Vulkan dos desenhos do GXM (ver gxm_vk.h).
 //
-// Primeira versão, voltada à correção: cada desenho grava e submete o próprio command buffer e espera a
-// GPU. Isso torna trivial a leitura de um alvo como textura no mesmo quadro (o alvo é copiado para uma
-// imagem amostrável no momento do desenho, sem laço de realimentação). Otimizar vem depois de a imagem
-// estar certa.
+// Os desenhos de um quadro vão para um único command buffer, com vértices, índices, uniforms e texturas
+// num anel de upload mapeado e um pool de descritores por quadro. O render pass fica aberto enquanto o
+// alvo não muda. Ler um alvo como textura no mesmo quadro grava uma cópia para uma imagem amostrável no
+// próprio fluxo (sem laço de realimentação e sem esperar a GPU). A espera só acontece ao apresentar, ao
+// ler um alvo ou quando o anel enche.
 #include "gxm_vk.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#pragma comment(lib, "user32.lib")
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 
@@ -189,6 +191,83 @@ struct Target {
 };
 std::map<uint32_t, Target> g_targets;
 
+// ------------------------------------------------------------- quadro em gravação
+bool g_recording = false, g_pending = false;
+Target *g_open = nullptr; // alvo com render pass aberto
+Buffer g_ring;
+uint8_t *g_ring_ptr = nullptr;
+VkDeviceSize g_ring_off = 0, g_ssbo_align = 256;
+constexpr VkDeviceSize kRingSize = 256ull << 20;
+VkDescriptorPool g_dpool = VK_NULL_HANDLE;
+uint32_t g_draws_in_frame = 0;
+constexpr uint32_t kMaxDrawsPerFrame = 2048;
+std::vector<Image> g_transient; // cópias de alvos lidas como textura: vivem até o fim do quadro
+
+void end_pass() {
+    if (g_open) {
+        vkCmdEndRenderPass(g_cmd);
+        g_open = nullptr;
+    }
+}
+
+bool frame_wait() {
+    if (g_pending) {
+        VKC(vkWaitForFences(g_dev, 1, &g_fence, VK_TRUE, UINT64_MAX));
+        g_pending = false;
+        for (auto &im : g_transient) destroy(im);
+        g_transient.clear();
+    }
+    return true;
+}
+
+bool frame_begin() {
+    if (g_recording) return true;
+    if (!frame_wait()) return false;
+    g_ring_off = 0;
+    g_draws_in_frame = 0;
+    VKC(vkResetDescriptorPool(g_dev, g_dpool, 0));
+    if (!begin_cmd()) return false;
+    g_recording = true;
+    return true;
+}
+
+bool frame_flush(bool wait) {
+    if (g_recording) {
+        end_pass();
+        VKC(vkEndCommandBuffer(g_cmd));
+        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &g_cmd;
+        VKC(vkResetFences(g_dev, 1, &g_fence));
+        VKC(vkQueueSubmit(g_queue, 1, &si, g_fence));
+        g_pending = true;
+        g_recording = false;
+    }
+    return !wait || frame_wait();
+}
+
+// Garante espaço no anel e no pool para um desenho; se faltar, fecha o quadro e começa outro.
+bool frame_reserve(VkDeviceSize bytes) {
+    if (bytes > kRingSize) {
+        g_err = "upload maior que o anel";
+        return false;
+    }
+    if (!frame_begin()) return false;
+    if (g_ring_off + bytes <= kRingSize && g_draws_in_frame < kMaxDrawsPerFrame) return true;
+    return frame_flush(true) && frame_begin();
+}
+
+VkDeviceSize ring_put(const void *data, VkDeviceSize n, VkDeviceSize align) {
+    g_ring_off = (g_ring_off + align - 1) & ~(align - 1);
+    const VkDeviceSize at = g_ring_off, len = n ? n : 16;
+    if (data && n)
+        std::memcpy(g_ring_ptr + at, data, n);
+    else
+        std::memset(g_ring_ptr + at, 0, len);
+    g_ring_off += len;
+    return at;
+}
+
 bool get_target(uint32_t addr, uint32_t w, uint32_t h, Target *&out) {
     auto it = g_targets.find(addr);
     if (it != g_targets.end()) {
@@ -212,7 +291,8 @@ bool get_target(uint32_t addr, uint32_t w, uint32_t h, Target *&out) {
     fi.layers = 1;
     VKC(vkCreateFramebuffer(g_dev, &fi, nullptr, &t.fb));
     // Estado inicial: cor 0 e profundidade 1 (o jogo limpa com desenhos próprios).
-    if (!begin_cmd()) return false;
+    if (!frame_begin()) return false;
+    end_pass();
     barrier(t.color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     barrier(t.depth, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkClearColorValue cc{};
@@ -223,7 +303,6 @@ bool get_target(uint32_t addr, uint32_t w, uint32_t h, Target *&out) {
     vkCmdClearDepthStencilImage(g_cmd, t.depth.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &dc, 1, &dr);
     barrier(t.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     barrier(t.depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-    if (!submit_wait()) return false;
     out = &(g_targets[addr] = t);
     return true;
 }
@@ -239,22 +318,20 @@ std::unordered_map<uint64_t, Image> g_textures;
 std::map<uint32_t, uint32_t> g_depth_owner; // superfície de profundidade -> alvo de cor que a usa
 Image g_white;
 
+// Grava o envio no quadro atual (o chamador já reservou os bytes no anel).
 bool upload_texture(Image &im, uint32_t w, uint32_t h, const uint8_t *rgba) {
     if (!make_image(im, w, h, kColor, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
         return false;
-    Buffer staging;
-    if (!make_buffer(staging, (VkDeviceSize)w * h * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rgba))
-        return false;
-    if (!begin_cmd()) return false;
+    const VkDeviceSize at = ring_put(rgba, (VkDeviceSize)w * h * 4, 16);
+    end_pass();
     barrier(im, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkBufferImageCopy c{};
+    c.bufferOffset = at;
     c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     c.imageExtent = {w, h, 1};
-    vkCmdCopyBufferToImage(g_cmd, staging.buf, im.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+    vkCmdCopyBufferToImage(g_cmd, g_ring.buf, im.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
     barrier(im, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    bool ok = submit_wait();
-    destroy(staging);
-    return ok;
+    return true;
 }
 
 std::unordered_map<uint64_t, VkShaderModule> g_modules;
@@ -455,6 +532,7 @@ bool is_depth(uint32_t addr) {
 bool present(uint32_t addr) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (!g_dev) return false;
+    if (!frame_flush(true)) return false;
     if (!g_swap && !g_hwnd && !create_window()) return false;
     if (!g_swap) return false;
     MSG msg;
@@ -631,9 +709,40 @@ bool init(bool validation, bool window) {
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     VKC(vkCreateSampler(g_dev, &sci, nullptr, &g_sampler_nearest));
     const uint8_t white[4] = {255, 255, 255, 255};
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(g_phys, &props);
+    g_ssbo_align = props.limits.minStorageBufferOffsetAlignment > 16 ? props.limits.minStorageBufferOffsetAlignment : 16;
+    {
+        VkBufferCreateInfo ci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        ci.size = kRingSize;
+        ci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                   VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        VKC(vkCreateBuffer(g_dev, &ci, nullptr, &g_ring.buf));
+        VkMemoryRequirements req;
+        vkGetBufferMemoryRequirements(g_dev, g_ring.buf, &req);
+        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        ai.allocationSize = req.size;
+        ai.memoryTypeIndex = mem_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        VKC(vkAllocateMemory(g_dev, &ai, nullptr, &g_ring.mem));
+        VKC(vkBindBufferMemory(g_dev, g_ring.buf, g_ring.mem, 0));
+        g_ring.size = kRingSize;
+        void *p;
+        VKC(vkMapMemory(g_dev, g_ring.mem, 0, kRingSize, 0, &p));
+        g_ring_ptr = static_cast<uint8_t *>(p);
+    }
+    {
+        VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 * kMaxDrawsPerFrame},
+                                      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kTexBindings * kMaxDrawsPerFrame}};
+        VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        dpi.maxSets = 3 * kMaxDrawsPerFrame;
+        dpi.poolSizeCount = 2;
+        dpi.pPoolSizes = ps;
+        VKC(vkCreateDescriptorPool(g_dev, &dpi, nullptr, &g_dpool));
+    }
     // A janela nasce na primeira apresentação: as mensagens só chegam à thread que a criou, e quem
     // apresenta é a thread de vídeo, não a que inicializa.
-    return upload_texture(g_white, 1, 1, white);
+    if (!frame_reserve(64) || !upload_texture(g_white, 1, 1, white)) return false;
+    return frame_flush(true);
 }
 
 bool draw(const Draw &d) {
@@ -649,15 +758,26 @@ bool draw(const Draw &d) {
         g_err = "pipeline recusado";
         return false;
     }
+    const uint32_t na = d.attr_count < 16 ? d.attr_count : 16;
+    VkDeviceSize need = (VkDeviceSize)na * d.vertex_count * 16 + (VkDeviceSize)d.index_count * 4 + d.vert_uniforms_size +
+                        d.frag_uniforms_size + 64 * 1024;
+    std::vector<uint64_t> keys(d.textures.size());
+    for (size_t i = 0; i < d.textures.size(); i++) {
+        const Texture &t = d.textures[i];
+        if (t.target_addr || !t.rgba) continue;
+        keys[i] = t.key ? t.key : fnv(t.rgba, (size_t)t.width * t.height * 4, fnv(&t.width, 8));
+        if (!g_textures.count(keys[i])) need += (VkDeviceSize)t.width * t.height * 4 + 16;
+    }
+    if (!frame_reserve(need)) return false;
     Target *tgt;
     if (!get_target(d.target_addr, d.target_w, d.target_h, tgt)) return false;
     if (d.depth_addr) g_depth_owner[d.depth_addr] = d.target_addr;
 
     // Texturas: imagens enviadas (cache por conteúdo) ou cópia de um alvo deste quadro.
-    std::vector<Image> snapshots;
     VkDescriptorImageInfo img_info[kTexBindings];
     for (auto &ii : img_info) ii = {g_sampler, g_white.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    for (const Texture &t : d.textures) {
+    for (size_t ti = 0; ti < d.textures.size(); ti++) {
+        const Texture &t = d.textures[ti];
         if (t.binding >= kTexBindings) continue;
         if (t.target_addr) {
             uint32_t owner = t.target_addr;
@@ -675,7 +795,7 @@ bool draw(const Draw &d) {
             Image snap;
             if (!make_image(snap, src.w, src.h, src.fmt, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
                 return false;
-            if (!begin_cmd()) return false;
+            end_pass();
             barrier(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
             barrier(snap, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             VkImageCopy c{};
@@ -685,14 +805,13 @@ bool draw(const Draw &d) {
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
             barrier(src, back);
             barrier(snap, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            if (!submit_wait()) return false;
-            snapshots.push_back(snap);
+            g_transient.push_back(snap);
             img_info[t.binding].imageView = snap.view;
             if (t.depth) img_info[t.binding].sampler = g_sampler_nearest;
             continue;
         }
         if (!t.rgba) continue;
-        const uint64_t h = fnv(t.rgba, (size_t)t.width * t.height * 4, fnv(&t.width, 8));
+        const uint64_t h = keys[ti];
         auto it = g_textures.find(h);
         if (it == g_textures.end()) {
             Image im;
@@ -702,32 +821,24 @@ bool draw(const Draw &d) {
         img_info[t.binding].imageView = it->second.view;
     }
 
-    Buffer vb[16], ib, vu, fu;
-    const uint32_t na = d.attr_count < 16 ? d.attr_count : 16;
+    VkDeviceSize voff[16];
     for (uint32_t k = 0; k < na; k++)
-        if (!make_buffer(vb[k], (VkDeviceSize)d.vertex_count * 16, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                         d.attrs + (size_t)k * d.vertex_count * 4))
-            return false;
-    if (!make_buffer(ib, (VkDeviceSize)d.index_count * 4, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, d.indices)) return false;
-    if (!make_buffer(vu, d.vert_uniforms_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, d.vert_uniforms)) return false;
-    if (!make_buffer(fu, d.frag_uniforms_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, d.frag_uniforms)) return false;
+        voff[k] = ring_put(d.attrs + (size_t)k * d.vertex_count * 4, (VkDeviceSize)d.vertex_count * 16, 16);
+    const VkDeviceSize ioff = ring_put(d.indices, (VkDeviceSize)d.index_count * 4, 4);
+    const VkDeviceSize vuoff = ring_put(d.vert_uniforms, d.vert_uniforms_size, g_ssbo_align);
+    const VkDeviceSize fuoff = ring_put(d.frag_uniforms, d.frag_uniforms_size, g_ssbo_align);
+    const VkDeviceSize vurange = d.vert_uniforms_size ? d.vert_uniforms_size : 16;
+    const VkDeviceSize furange = d.frag_uniforms_size ? d.frag_uniforms_size : 16;
+    g_draws_in_frame++;
 
-    VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4},
-                                  {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kTexBindings}};
-    VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpi.maxSets = 3;
-    dpi.poolSizeCount = 2;
-    dpi.pPoolSizes = ps;
-    VkDescriptorPool pool;
-    VKC(vkCreateDescriptorPool(g_dev, &dpi, nullptr, &pool));
     VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    dai.descriptorPool = pool;
+    dai.descriptorPool = g_dpool;
     dai.descriptorSetCount = 3;
     dai.pSetLayouts = g_dsl;
     VkDescriptorSet sets[3];
     VKC(vkAllocateDescriptorSets(g_dev, &dai, sets));
-    VkDescriptorBufferInfo bi[4] = {{vu.buf, 0, VK_WHOLE_SIZE}, {vu.buf, 0, VK_WHOLE_SIZE},
-                                    {fu.buf, 0, VK_WHOLE_SIZE}, {fu.buf, 0, VK_WHOLE_SIZE}};
+    VkDescriptorBufferInfo bi[4] = {{g_ring.buf, vuoff, vurange}, {g_ring.buf, vuoff, vurange},
+                                    {g_ring.buf, fuoff, furange}, {g_ring.buf, fuoff, furange}};
     VkWriteDescriptorSet w[5]{};
     for (int i = 0; i < 4; i++) {
         w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -744,12 +855,15 @@ bool draw(const Draw &d) {
     w[4].pImageInfo = img_info;
     vkUpdateDescriptorSets(g_dev, 5, w, 0, nullptr);
 
-    if (!begin_cmd()) return false;
-    VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    rbi.renderPass = g_rp;
-    rbi.framebuffer = tgt->fb;
-    rbi.renderArea = {{0, 0}, {d.target_w, d.target_h}};
-    vkCmdBeginRenderPass(g_cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+    if (g_open != tgt) {
+        end_pass();
+        VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        rbi.renderPass = g_rp;
+        rbi.framebuffer = tgt->fb;
+        rbi.renderArea = {{0, 0}, {d.target_w, d.target_h}};
+        vkCmdBeginRenderPass(g_cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+        g_open = tgt;
+    }
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 3, sets, 0, nullptr);
     // Viewport do GXM: tela = deslocamento + escala * ndc. No Vulkan, x = desl - escala, largura = 2 * escala
@@ -760,23 +874,17 @@ bool draw(const Draw &d) {
     vkCmdSetViewport(g_cmd, 0, 1, &vp);
     VkRect2D sc{{0, 0}, {d.target_w, d.target_h}};
     vkCmdSetScissor(g_cmd, 0, 1, &sc);
-    VkDeviceSize offs[16] = {};
     VkBuffer bufs[16];
-    for (uint32_t k = 0; k < na; k++) bufs[k] = vb[k].buf;
-    if (na) vkCmdBindVertexBuffers(g_cmd, 0, na, bufs, offs);
-    vkCmdBindIndexBuffer(g_cmd, ib.buf, 0, VK_INDEX_TYPE_UINT32);
+    for (uint32_t k = 0; k < na; k++) bufs[k] = g_ring.buf;
+    if (na) vkCmdBindVertexBuffers(g_cmd, 0, na, bufs, voff);
+    vkCmdBindIndexBuffer(g_cmd, g_ring.buf, ioff, VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexed(g_cmd, d.index_count, 1, 0, 0, 0);
-    vkCmdEndRenderPass(g_cmd);
-    const bool ok = submit_wait();
-    vkDestroyDescriptorPool(g_dev, pool, nullptr);
-    for (uint32_t k = 0; k < na; k++) destroy(vb[k]);
-    destroy(ib), destroy(vu), destroy(fu);
-    for (auto &s : snapshots) destroy(s);
-    return ok;
+    return true;
 }
 
 void end_frame() {
-    if (g_dev) vkDeviceWaitIdle(g_dev);
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    if (g_dev) frame_flush(true);
 }
 
 std::vector<uint32_t> targets() {
@@ -787,6 +895,7 @@ std::vector<uint32_t> targets() {
 
 bool read_target(uint32_t addr, std::vector<uint8_t> &rgba, uint32_t &w, uint32_t &h) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    if (!frame_flush(true)) return false;
     auto it = g_targets.find(addr);
     if (it == g_targets.end()) return false;
     Image &im = it->second.color;
@@ -813,7 +922,11 @@ bool read_target(uint32_t addr, std::vector<uint8_t> &rgba, uint32_t &w, uint32_
 void shutdown() {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (!g_dev) return;
+    frame_flush(true);
     vkDeviceWaitIdle(g_dev);
+    vkDestroyDescriptorPool(g_dev, g_dpool, nullptr);
+    vkUnmapMemory(g_dev, g_ring.mem);
+    destroy(g_ring);
     if (g_swap) vkDestroySwapchainKHR(g_dev, g_swap, nullptr);
     if (g_acquired) vkDestroySemaphore(g_dev, g_acquired, nullptr);
     if (g_rendered) vkDestroySemaphore(g_dev, g_rendered, nullptr);
