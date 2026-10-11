@@ -49,6 +49,9 @@ bool present(uint32_t addr);
 bool window_closed();
 bool is_target(uint32_t addr);
 bool is_depth(uint32_t addr);
+// Início de cena do GXM: a profundidade do alvo volta ao valor de fundo (1,0), a não ser que a
+// superfície peça "force load". Sem isso a profundidade de uma cena vaza para a seguinte.
+void begin_scene(uint32_t color_addr);
 void shutdown();
 // Grava o desenho no quadro atual (os desenhos são executados em ordem em end_frame).
 bool draw(const Draw &d);

@@ -17,6 +17,7 @@
 #include <mutex>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
@@ -402,11 +403,15 @@ VkPipeline pipeline(const Draw &d, VkShaderModule vs, VkShaderModule fs) {
     VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
     VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-    ds.depthTestEnable = VK_TRUE;
+    // VITART_VK_NODEPTH=1 (depuração): sem teste de profundidade, para separar geometria de profundidade.
+    static const bool nodepth = getenv("VITART_VK_NODEPTH") != nullptr;
+    ds.depthTestEnable = nodepth ? VK_FALSE : VK_TRUE;
     ds.depthWriteEnable = d.depth_write ? VK_TRUE : VK_FALSE;
     ds.depthCompareOp = (VkCompareOp)(d.depth_func & 7);
     VkPipelineColorBlendAttachmentState ba{};
-    if (d.has_blend) {
+    // VITART_VK_NOBLEND=1 (depuração): sem blend, para separar triângulo ausente de alfa 0.
+    static const bool noblend = getenv("VITART_VK_NOBLEND") != nullptr;
+    if (d.has_blend && !noblend) {
         const uint32_t b = d.blend;
         const uint32_t mask = b & 0xFF, cfunc = (b >> 8) & 15, afunc = (b >> 12) & 15;
         ba.colorWriteMask = ((mask & 2) ? VK_COLOR_COMPONENT_R_BIT : 0) | ((mask & 4) ? VK_COLOR_COMPONENT_G_BIT : 0) |
@@ -527,6 +532,19 @@ bool is_target(uint32_t addr) {
 bool is_depth(uint32_t addr) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     return g_depth_owner.count(addr) != 0;
+}
+
+void begin_scene(uint32_t color_addr) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    auto it = g_targets.find(color_addr);
+    if (!g_dev || it == g_targets.end() || !frame_begin()) return;
+    end_pass();
+    Image &dep = it->second.depth;
+    barrier(dep, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkClearDepthStencilValue dc{1.0f, 0};
+    VkImageSubresourceRange dr{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    vkCmdClearDepthStencilImage(g_cmd, dep.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &dc, 1, &dr);
+    barrier(dep, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 }
 
 bool present(uint32_t addr) {

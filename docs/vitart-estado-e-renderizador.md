@@ -173,3 +173,33 @@ O próximo marco não é cobertura, é **fidelidade**:
 Referência de ISA: as codificações de bits (`vitarecomp/usse/encodings.json`) foram extraídas da tabela do
 decodificador do Vita3K por `tools/usse_extract_encodings.py`. A semântica de cada instrução é implementada
 por nós; o Vita3K não entra no produto.
+
+## Renderizador Vulkan (11/10/2026)
+
+- `runtime/vitart/gxm_vk.cpp`: renderizador próprio. Um command buffer por quadro, anel de upload de
+  256 MB, alvos por endereço da superfície de cor, profundidade como textura, cópia de alvo para
+  render-to-texture, janela Win32 + swapchain.
+- Ao vivo: `VITART_VULKAN=1` (shaders do cache `VITART_SPV_DIR`, gerado por `tools/usse_build_cache.py`);
+  `VITART_VK_DUMP=N` grava o quadro N apresentado em PPM. Tela de título a 7,7 quadros/s.
+- Replay: `tools/gxm_pack_frame.py` -> `gxm_replay.exe` (`--limit N` para bisseção, `--passes`).
+- Depuração: `VITART_VK_NODEPTH=1`, `VITART_VK_NOBLEND=1`.
+- Início de cena (`sceGxmBeginScene`) devolve a profundidade do alvo ao fundo, salvo "force load".
+
+Medido no desempenho (média de 120 quadros): `vk_draw` 117 ms por quadro, dos quais só 35 ms no
+`gvk::draw`; os ~80 ms restantes são conversão de atributos e índices no HLE. Apresentar: 61 ms (espera
+da GPU). Próximos ganhos: converter atributos sem `attr_value` por componente, e não esperar a GPU na
+apresentação (dois quadros em voo).
+
+### Defeito aberto: buracos no rosto do Kratos (tela de título)
+
+A malha principal do rosto (desenho 69, 19.734 índices, programa de skinning 0x861544d0) sai com
+buracos grandes, e as passadas seguintes preenchem os buracos em manchas. Descartado, por medição:
+- textura (decodifica igual à referência; alfa 255 em todo texel);
+- teste de profundidade (buracos continuam com `VITART_VK_NODEPTH`), profundidade velha (uma passada
+  só) e LESS coplanar;
+- blend (continuam com `VITART_VK_NOBLEND`); o fragmento não tem `kill`;
+- osso fora do buffer (índice máximo 11 -> 992 de 1.248 bytes).
+O interpretador dá vértices sãos para os mesmos dados (nenhum w <= 0, z dentro de [0, w], sem NaN).
+Conclusão: faltam triângulos porque o SPIR-V do skinning diverge do interpretador em parte dos
+vértices. Próximo passo: comparar vértice a vértice a saída do vertex shader na GPU (gravar OUTPUT
+num storage buffer indexado por gl_VertexIndex) com o `interp.py`.

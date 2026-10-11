@@ -70,6 +70,9 @@ int main(int argc, char **argv) {
     for (int pass = 0; pass < passes; pass++) {
     r.p = first;
     drawn = skipped = failed = 0;
+    // Cada passada é um quadro novo: profundidade de volta ao fundo (o pacote não guarda as cenas; no
+    // quadro capturado cada alvo tem uma cena).
+    for (uint32_t addr : gvk::targets()) gvk::begin_scene(addr);
     // na última passada vale o --limit (bisseção); as anteriores rodam o quadro inteiro
     const int lim = pass == passes - 1 ? limit : 1 << 30;
     for (uint32_t i = 0; i < ndraws && r.ok; i++) {

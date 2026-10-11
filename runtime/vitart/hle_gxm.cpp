@@ -221,6 +221,11 @@ static std::mutex g_vk_mutex;
 static std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint32_t>>> g_spv; // programa -> SPIR-V
 static std::map<std::array<uint32_t, 4>, std::shared_ptr<std::vector<uint8_t>>> g_texcache;
 static uint64_t g_vk_draws = 0, g_vk_skipped = 0;
+// Tempo de CPU (ns) por etapa, zerado a cada relatório: onde o quadro gasta.
+static std::atomic<uint64_t> g_t_draw{0}, g_t_gvk{0}, g_t_present{0};
+static uint64_t now_ns() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 static bool vk_on() {
     if (g_vk < 0) {
@@ -287,7 +292,13 @@ static float attr_value(const uint8_t *p, uint32_t fmt, uint32_t i) {
 }
 static uint32_t attr_size(uint32_t fmt) { return fmt <= 1 || fmt == 4 || fmt == 5 ? 1 : fmt == 9 ? 4 : 2; }
 
+static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t idata, uint32_t icount);
 static void vk_draw(Context &c, uint32_t prim, uint32_t itype, uint32_t idata, uint32_t icount) {
+    const uint64_t t0 = now_ns();
+    vk_draw_impl(c, prim, itype, idata, icount);
+    g_t_draw += now_ns() - t0;
+}
+static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t idata, uint32_t icount) {
     std::shared_ptr<VertexProgram> vp;
     std::shared_ptr<FragmentProgram> fp;
     {
@@ -391,7 +402,10 @@ static void vk_draw(Context &c, uint32_t prim, uint32_t itype, uint32_t idata, u
         }
         d.textures.push_back(t);
     }
-    if (!gvk::draw(d))
+    const uint64_t tg = now_ns();
+    const bool drew = gvk::draw(d);
+    g_t_gvk += now_ns() - tg;
+    if (!drew)
         logf("vitart: desenho Vulkan falhou: %s", gvk::last_error());
     else
         g_vk_draws++;
@@ -417,7 +431,13 @@ void gxm_present(uint32_t fb) {
                  (unsigned long long)g_vk_draws, (unsigned long long)g_vk_skipped);
         }
     }
+    const uint64_t tp = now_ns();
     gvk::present(fb);
+    g_t_present += now_ns() - tp;
+    if (frame % 120 == 0) {
+        logf("vitart: tempo por quadro (média de 120): vk_draw %.1f ms (gvk::draw %.1f ms), apresentar %.1f ms",
+             g_t_draw.exchange(0) / 120e6, g_t_gvk.exchange(0) / 120e6, g_t_present.exchange(0) / 120e6);
+    }
     if (gvk::window_closed()) {
         logf("vitart: janela fechada (%llu desenhos Vulkan, %llu sem shader)", (unsigned long long)g_vk_draws,
              (unsigned long long)g_vk_skipped);
@@ -552,7 +572,12 @@ VT_HLE(sceGxmDepthStencilSurfaceInit) {
     wr32(s + 12, arg(ctx, 5));
     ret(ctx, SCE_OK);
 }
-VT_HLE(sceGxmDepthStencilSurfaceSetForceLoadMode) { ret(ctx, SCE_OK); }
+static std::set<uint32_t> g_force_load; // superfícies de profundidade com "force load" ligado
+VT_HLE(sceGxmDepthStencilSurfaceSetForceLoadMode) {
+    const std::lock_guard<std::mutex> lock(g_gxm_mutex);
+    if (arg(ctx, 1)) g_force_load.insert(arg(ctx, 0)); else g_force_load.erase(arg(ctx, 0));
+    ret(ctx, SCE_OK);
+}
 VT_HLE(sceGxmDepthStencilSurfaceSetForceStoreMode) { ret(ctx, SCE_OK); }
 
 // ============================================================ shader patcher
@@ -803,6 +828,14 @@ VT_HLE(sceGxmBeginScene) {
     if (!c) return ret(ctx, GXM_ERROR_INVALID_POINTER);
     c->in_scene = true;
     c->scene = Scene{ arg(ctx, 2), arg(ctx, 6), arg(ctx, 7), {} };
+    if (vk_on() && arg(ctx, 6)) {
+        bool load;
+        {
+            const std::lock_guard<std::mutex> lock(g_gxm_mutex);
+            load = g_force_load.count(arg(ctx, 7)) != 0;
+        }
+        if (!load) gvk::begin_scene(rd32(arg(ctx, 6) + 20));
+    }
     ret(ctx, SCE_OK);
 }
 VT_HLE(sceGxmEndScene) {
