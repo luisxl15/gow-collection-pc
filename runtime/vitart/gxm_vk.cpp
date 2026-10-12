@@ -66,10 +66,17 @@ Stats g_stats;
 // Resolução interna: os alvos do jogo são renderizados em escala x (VITART_VK_SCALE, padrão 2).
 // Viewport, scissor e o deslocamento de meio pixel escalam junto; texturas lidas de alvos usam
 // coordenadas normalizadas e não mudam.
+// Sem VITART_VK_SCALE, a escala acompanha o monitor: a altura nativa do GoW (408) vezes a escala cobre a
+// altura da tela (1080p -> 3, 1440p -> 4), e a apresentação reduz com filtro (supersampling).
 uint32_t render_scale() {
     static const uint32_t s = [] {
         const char *e = getenv("VITART_VK_SCALE");
-        const int v = e ? std::atoi(e) : 2;
+        int v = e ? std::atoi(e) : 0;
+        if (!v) {
+            const int mh = GetSystemMetrics(SM_CYSCREEN);
+            v = (mh + 407) / 408;
+            v = v < 2 ? 2 : v > 4 ? 4 : v;
+        }
         return (uint32_t)(v < 1 ? 1 : v > 8 ? 8 : v);
     }();
     return s;
@@ -769,57 +776,49 @@ bool vertex_format_ok(uint32_t fmt, uint32_t comps) {
     return c > 0;
 }
 
+static bool g_resized = false, g_fullscreen = false;
+static WINDOWPLACEMENT g_place{sizeof(WINDOWPLACEMENT)};
+// F11 ou Alt+Enter: tela cheia sem bordas no monitor da janela (e volta ao lugar anterior).
+static void toggle_fullscreen(HWND h) {
+    const LONG style = GetWindowLongW(h, GWL_STYLE);
+    if (!g_fullscreen) {
+        MONITORINFO mi{sizeof mi};
+        if (!GetWindowPlacement(h, &g_place) || !GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY), &mi)) return;
+        SetWindowLongW(h, GWL_STYLE, (style & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
+        SetWindowPos(h, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
+                     mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    } else {
+        SetWindowLongW(h, GWL_STYLE, (style & ~WS_POPUP) | WS_OVERLAPPEDWINDOW);
+        SetWindowPlacement(h, &g_place);
+        SetWindowPos(h, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    }
+    g_fullscreen = !g_fullscreen;
+    g_resized = true;
+}
+
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    if (m == WM_CLOSE) {
+    switch (m) {
+    case WM_CLOSE:
         g_closed = true;
         return 0;
+    case WM_SIZE:
+        g_resized = true;
+        break;
+    case WM_KEYDOWN:
+        if (w == VK_F11) return toggle_fullscreen(h), 0;
+        break;
+    case WM_SYSKEYDOWN:
+        if (w == VK_RETURN && (l & (1 << 29))) return toggle_fullscreen(h), 0; // Alt+Enter
+        break;
+    case WM_SYSCHAR:
+        if (w == VK_RETURN) return 0; // sem o bipe do Alt+Enter
+        break;
     }
     return DefWindowProcW(h, m, w, l);
 }
 
-static bool g_show_pending = false; // janela criada invisível (troca de módulo), mostrar após o 1º quadro
-static uint32_t g_presented = 0;
-static void handoff_show() {
-    if (!g_show_pending || ++g_presented < 2) return; // 2º quadro: o 1º já está na tela
-    g_show_pending = false;
-    ShowWindow(g_hwnd, SW_SHOW);
-    SetForegroundWindow(g_hwnd);
-    if (const char *ev = getenv("VITART_HANDOFF"))
-        if (HANDLE e = OpenEventA(EVENT_MODIFY_STATE, FALSE, ev)) SetEvent(e), CloseHandle(e);
-}
-
-static bool create_window() {
-    WNDCLASSW wc{};
-    wc.lpfnWndProc = wndproc;
-    wc.hInstance = GetModuleHandleW(nullptr);
-    wc.lpszClassName = L"vitart";
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    RegisterClassW(&wc);
-    RECT r{0, 0, 1440, 816}; // 2x o framebuffer de 720x408
-    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME, FALSE);
-    int x = CW_USEDEFAULT, y = CW_USEDEFAULT, w = r.right - r.left, h = r.bottom - r.top;
-    // Troca de módulo (menu -> jogo): a janela nasce invisível no lugar da anterior e só aparece depois
-    // do primeiro quadro; aí o processo anterior é avisado e fecha (sem janela nova piscando).
-    const char *wr = getenv("VITART_WINRECT");
-    const bool handoff = wr && std::sscanf(wr, "%d,%d,%d,%d", &x, &y, &w, &h) == 4;
-    g_show_pending = handoff;
-    g_hwnd = CreateWindowExW(0, L"vitart", L"God of War (vitart, Vulkan)",
-                             (WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME) | (handoff ? 0 : WS_VISIBLE), x, y, w, h, nullptr,
-                             nullptr, wc.hInstance, nullptr);
-    if (!g_hwnd) {
-        g_err = "CreateWindowEx falhou";
-        return false;
-    }
-    VkWin32SurfaceCreateInfoKHR si{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
-    si.hinstance = wc.hInstance;
-    si.hwnd = g_hwnd;
-    VKC(vkCreateWin32SurfaceKHR(g_inst, &si, nullptr, &g_surface));
-    VkBool32 ok = VK_FALSE;
-    vkGetPhysicalDeviceSurfaceSupportKHR(g_phys, g_qfam, g_surface, &ok);
-    if (!ok) {
-        g_err = "a fila não apresenta nesta superfície";
-        return false;
-    }
+// Swapchain do tamanho atual da janela (recriada ao redimensionar, entrar/sair da tela cheia, restaurar).
+static bool create_swapchain() {
     VkSurfaceCapabilitiesKHR caps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_phys, g_surface, &caps);
     uint32_t nf = 0;
@@ -830,6 +829,7 @@ static bool create_window() {
     for (auto &f : fmts)
         if (f.format == VK_FORMAT_B8G8R8A8_UNORM) fmt = f;
     g_swap_extent = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent : VkExtent2D{1440, 816};
+    if (!g_swap_extent.width || !g_swap_extent.height) return true; // minimizada: recria quando voltar
     VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
     ci.surface = g_surface;
     ci.minImageCount = caps.minImageCount + 1;
@@ -855,11 +855,62 @@ static bool create_window() {
             }
     }
     ci.clipped = VK_TRUE;
-    VKC(vkCreateSwapchainKHR(g_dev, &ci, nullptr, &g_swap));
+    ci.oldSwapchain = g_swap;
+    VkSwapchainKHR sw = VK_NULL_HANDLE;
+    VKC(vkCreateSwapchainKHR(g_dev, &ci, nullptr, &sw));
+    if (g_swap) vkDestroySwapchainKHR(g_dev, g_swap, nullptr);
+    g_swap = sw;
     uint32_t ni = 0;
     vkGetSwapchainImagesKHR(g_dev, g_swap, &ni, nullptr);
     g_swap_images.resize(ni);
     vkGetSwapchainImagesKHR(g_dev, g_swap, &ni, g_swap_images.data());
+    return true;
+}
+
+static bool g_show_pending = false; // janela criada invisível (troca de módulo), mostrar após o 1º quadro
+static uint32_t g_presented = 0;
+static void handoff_show() {
+    if (!g_show_pending || ++g_presented < 2) return; // 2º quadro: o 1º já está na tela
+    g_show_pending = false;
+    ShowWindow(g_hwnd, SW_SHOW);
+    SetForegroundWindow(g_hwnd);
+    if (const char *ev = getenv("VITART_HANDOFF"))
+        if (HANDLE e = OpenEventA(EVENT_MODIFY_STATE, FALSE, ev)) SetEvent(e), CloseHandle(e);
+}
+
+static bool create_window() {
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = wndproc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"vitart";
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    RegisterClassW(&wc);
+    RECT r{0, 0, 1440, 816}; // 2x o framebuffer de 720x408
+    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+    int x = CW_USEDEFAULT, y = CW_USEDEFAULT, w = r.right - r.left, h = r.bottom - r.top;
+    // Troca de módulo (menu -> jogo): a janela nasce invisível no lugar da anterior e só aparece depois
+    // do primeiro quadro; aí o processo anterior é avisado e fecha (sem janela nova piscando).
+    const char *wr = getenv("VITART_WINRECT");
+    const bool handoff = wr && std::sscanf(wr, "%d,%d,%d,%d", &x, &y, &w, &h) == 4;
+    g_show_pending = handoff;
+    g_hwnd = CreateWindowExW(0, L"vitart", L"God of War (vitart, Vulkan)",
+                             WS_OVERLAPPEDWINDOW | (handoff ? 0 : WS_VISIBLE), x, y, w, h, nullptr,
+                             nullptr, wc.hInstance, nullptr);
+    if (!g_hwnd) {
+        g_err = "CreateWindowEx falhou";
+        return false;
+    }
+    VkWin32SurfaceCreateInfoKHR si{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
+    si.hinstance = wc.hInstance;
+    si.hwnd = g_hwnd;
+    VKC(vkCreateWin32SurfaceKHR(g_inst, &si, nullptr, &g_surface));
+    VkBool32 ok = VK_FALSE;
+    vkGetPhysicalDeviceSurfaceSupportKHR(g_phys, g_qfam, g_surface, &ok);
+    if (!ok) {
+        g_err = "a fila não apresenta nesta superfície";
+        return false;
+    }
+    if (!create_swapchain()) return false;
     VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     VKC(vkCreateSemaphore(g_dev, &sci, nullptr, &g_acquired));
     VKC(vkCreateSemaphore(g_dev, &sci, nullptr, &g_rendered));
@@ -950,8 +1001,18 @@ bool present(uint32_t addr) {
     notice_tick();
     auto it = g_targets.find(addr);
     if (it == g_targets.end()) return false;
+    if (g_resized) {
+        g_resized = false;
+        vkDeviceWaitIdle(g_dev);
+        if (!create_swapchain()) return false;
+    }
+    if (!g_swap_extent.width || !g_swap_extent.height) return true; // minimizada
     uint32_t idx = 0;
     VkResult r = vkAcquireNextImageKHR(g_dev, g_swap, UINT64_MAX, g_acquired, VK_NULL_HANDLE, &idx);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+        g_resized = true;
+        return true;
+    }
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return fail("vkAcquireNextImageKHR", r);
     VKC(vkWaitForFences(g_dev, 1, &g_pfence, VK_TRUE, UINT64_MAX)); // apresentação anterior concluída
     VKC(vkResetCommandBuffer(g_pcmd, 0));
@@ -965,10 +1026,19 @@ bool present(uint32_t addr) {
     dst.fmt = VK_FORMAT_B8G8R8A8_UNORM;
     barrier(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     barrier(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    // Proporção do jogo preservada: a imagem ocupa o maior retângulo centrado; o resto fica preto.
+    const VkClearColorValue black{};
+    const VkImageSubresourceRange all{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdClearColorImage(g_pcmd, dst.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &all);
+    const double sw = g_swap_extent.width, sh = g_swap_extent.height, sa = (double)src.w / src.h;
+    int32_t dw = (int32_t)sw, dh = (int32_t)(sw / sa + 0.5);
+    if (dh > (int32_t)sh) dh = (int32_t)sh, dw = (int32_t)(sh * sa + 0.5);
+    const int32_t dx = ((int32_t)sw - dw) / 2, dy = ((int32_t)sh - dh) / 2;
     VkImageBlit b{};
     b.srcSubresource = b.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     b.srcOffsets[1] = {(int32_t)src.w, (int32_t)src.h, 1};
-    b.dstOffsets[1] = {(int32_t)g_swap_extent.width, (int32_t)g_swap_extent.height, 1};
+    b.dstOffsets[0] = {dx, dy, 0};
+    b.dstOffsets[1] = {dx + dw, dy + dh, 1};
     vkCmdBlitImage(g_pcmd, src.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
                    VK_FILTER_LINEAR);
     barrier(src, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -992,7 +1062,8 @@ bool present(uint32_t addr) {
     pi.swapchainCount = 1;
     pi.pSwapchains = &g_swap;
     pi.pImageIndices = &idx;
-    vkQueuePresentKHR(g_queue, &pi);
+    const VkResult pr = vkQueuePresentKHR(g_queue, &pi);
+    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) g_resized = true;
     handoff_show();
     static uint32_t presents = 0;
     if (++presents % 300 == 0) save_pcache();
