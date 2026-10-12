@@ -41,7 +41,9 @@ static uint32_t zalloc(uint32_t size, const char *what) {
 // O relógio continua sendo o da cadência acima; a fila do waveOut só amortece a variação. Começa em
 // pausa e só toca depois de kPrebuffer blocos, para não faltar amostra logo no início.
 struct HostOut {
-    static constexpr int kBufs = 8, kPrebuffer = 3;
+    // Fila de ~64 ms (6 blocos de 512 amostras): com 3 (~32 ms) qualquer atraso da thread de áudio
+    // esvaziava a fila e o som ficava picotado (vídeo do usuário: buracos de 17 ms a cada 50 ms).
+    static constexpr int kBufs = 16, kPrebuffer = 4, kTarget = 6;
     HWAVEOUT wo = nullptr;
     WAVEHDR hdr[kBufs]{};
     std::vector<int16_t> data[kBufs];
@@ -187,8 +189,11 @@ VT_HLE(sceAudioOutGetRestSample) {
     ret(ctx, (uint32_t)(rest < p.len ? rest : p.len));
 }
 VT_HLE(sceAudioOutOutput) {
-    // Com saída no host, a placa de som é o relógio: espera enquanto houver 3 blocos na fila (~30 ms a
-    // 512 amostras). Sem placa (VITART_MUTE ou waveOut indisponível), cadência pelo relógio do PC.
+    // Com saída no host, a placa de som é o relógio: espera enquanto houver kTarget blocos na fila
+    // (~64 ms a 512 amostras). Sem placa (VITART_MUTE ou waveOut indisponível), cadência pelo relógio do PC.
+    // A thread que alimenta o áudio (a mesma do update do NGS) roda com prioridade alta.
+    static thread_local bool raised = false;
+    if (!raised) raised = true, SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     for (int spins = 0; spins < 200; spins++) {
         int pend;
         bool started;
@@ -199,7 +204,7 @@ VT_HLE(sceAudioOutOutput) {
             pend = host_pending(it->second);
             started = it->second.host && it->second.host->started;
         }
-        if (pend < 0 || !started || pend < 3) break;
+        if (pend < 0 || !started || pend < HostOut::kTarget) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     bool device_clock = false;
