@@ -16,7 +16,7 @@ for c in "$HERE"/third_party/libatrac9/src/*.c; do
   [ "$o" -nt "$c" ] || "$CC" -std=c99 -O2 -w -D_CRT_SECURE_NO_WARNINGS -c "$c" -o "$o" || exit 1
 done
 "$CXX" -std=c++20 -O2 -g -w -D_CRT_SECURE_NO_WARNINGS -I"$HERE/runtime/arm" -I"$HERE/runtime/vitart" \
-  -I"$HERE/third_party/libatrac9/src" -I"${VULKAN_SDK:-C:/VulkanSDK/latest}/Include" -o "$RT/vitart.exe" \
+  -I"$HERE/third_party/libatrac9/src" -I"$HERE/third_party/stb" -I"${VULKAN_SDK:-C:/VulkanSDK/latest}/Include" -o "$RT/vitart.exe" \
   "$HERE"/runtime/vitart/*.cpp "$AT9OBJ"/*.o "${VULKAN_SDK:-C:/VulkanSDK/latest}/Lib/vulkan-1.lib" || exit 1
 cd "$RT" && timeout "$SECS" ./vitart.exe --app "$APP" --data "$DATA" --hle-vars link.hlevars.txt --log "$LOG" "$@" \
   ${GAME:-gow1}.dll libc.dll libfios2.dll > /dev/null 2>&1

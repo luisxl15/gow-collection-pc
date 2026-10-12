@@ -6,6 +6,11 @@
 #include "gxm_tex.h"
 #include "gxm_vk.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#define STBI_NO_STDIO_WARNINGS
+#include "stb_image.h"
+
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -235,7 +240,98 @@ struct TexEntry {
     std::shared_ptr<std::vector<uint8_t>> px;
     uint64_t hash = 0;
     uint32_t checked = UINT32_MAX;
+    uint32_t rw = 0, rh = 0; // tamanho do PNG do pack de texturas (0 = textura original)
 };
+
+// Pack de texturas (vitart-data/texpack/*/index.tsv, montado por tools/texpack_build.py a partir de um
+// pack do PCSX2): chave = FNV-1a 64 de (largura, altura) + os primeiros min(4096, nível base) bytes da
+// textura do Vita; valor = PNG em HD. Os PNGs decodificados passam de ~1,5 GB -> os parados há mais de
+// 10 s saem da memória (recarregam se voltarem à cena).
+static std::unordered_map<uint64_t, std::string> g_texpack;
+static uint64_t g_texpack_bytes = 0;
+static void texpack_load() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    if (getenv("VITART_NO_TEXPACK")) return;
+    std::error_code ec;
+    const std::filesystem::path root = std::filesystem::path(data_path()) / "texpack";
+    for (auto &dir : std::filesystem::directory_iterator(root, ec)) {
+        std::ifstream f(dir.path() / "index.tsv");
+        std::string line;
+        size_t n = 0;
+        while (std::getline(f, line)) {
+            const size_t tab = line.find('\t');
+            if (tab == std::string::npos) continue;
+            g_texpack[std::strtoull(line.substr(0, tab).c_str(), nullptr, 16)] = (dir.path() / line.substr(tab + 1)).string();
+            n++;
+        }
+        if (n) logf("vitart: pack de texturas %s: %zu texturas", dir.path().filename().string().c_str(), n);
+    }
+}
+static uint64_t fnv64(const uint8_t *p, size_t n, uint64_t h = 0xCBF29CE484222325ull) {
+    for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
+    return h;
+}
+// Assinatura 16x16 (luminância pré-multiplicada pelo alfa, e o alfa) de uma imagem RGBA.
+static std::vector<float> texsig(const uint8_t *px, uint32_t w, uint32_t h) {
+    std::vector<float> v(512, 0.f), n(256, 0.f);
+    for (uint32_t y = 0; y < h; y++)
+        for (uint32_t x = 0; x < w; x++) {
+            const uint8_t *p = px + 4 * ((size_t)y * w + x);
+            const int c = (int)(y * 16 / h) * 16 + (int)(x * 16 / w);
+            const float a = p[3] / 255.f;
+            v[c] += (0.299f * p[0] + 0.587f * p[1] + 0.114f * p[2]) * a, v[256 + c] += p[3], n[c] += 1.f;
+        }
+    for (int c = 0; c < 256; c++)
+        if (n[c] > 0) v[c] /= n[c], v[256 + c] /= n[c];
+    return v;
+}
+static float texsig_corr(const std::vector<float> &a, const std::vector<float> &b) {
+    double ma = 0, mb = 0;
+    for (size_t i = 0; i < a.size(); i++) ma += a[i], mb += b[i];
+    ma /= a.size(), mb /= b.size();
+    double sab = 0, saa = 0, sbb = 0;
+    for (size_t i = 0; i < a.size(); i++) sab += (a[i] - ma) * (b[i] - mb), saa += (a[i] - ma) * (a[i] - ma), sbb += (b[i] - mb) * (b[i] - mb);
+    if (saa < 1e-6 && sbb < 1e-6) return 1.f; // as duas lisas
+    return (float)(sab / std::sqrt(saa * sbb + 1e-9));
+}
+static std::unordered_map<uint64_t, bool> g_texpack_rejected; // chave -> PNG não parece a textura do Vita
+
+// PNG do pack para esta textura, se houver e se for a mesma imagem (o Vita redesenhou algumas, como o
+// HUD; o PS2 com o mesmo nome tinha outra arte e o PNG não encaixa). orig: a textura do Vita decodificada.
+static std::shared_ptr<std::vector<uint8_t>> texpack_find(const gxmtex::Info &info, size_t base_bytes,
+                                                          const std::vector<uint8_t> &orig, uint32_t &w, uint32_t &h) {
+    texpack_load();
+    if (g_texpack.empty() || !base_bytes) return nullptr;
+    const uint32_t wh[2] = {info.width, info.height};
+    const uint64_t key = fnv64(ptr<uint8_t>(info.data), std::min<size_t>(4096, base_bytes),
+                               fnv64(reinterpret_cast<const uint8_t *>(wh), 8));
+    auto it = g_texpack.find(key);
+    if (it == g_texpack.end() || g_texpack_rejected.count(key) || orig.empty()) return nullptr;
+    int x = 0, y = 0, c = 0;
+    stbi_uc *img = stbi_load(it->second.c_str(), &x, &y, &c, 4);
+    if (!img) {
+        logf("vitart: pack de texturas: não abriu %s", it->second.c_str());
+        return nullptr;
+    }
+    auto px = std::make_shared<std::vector<uint8_t>>(img, img + (size_t)x * y * 4);
+    stbi_image_free(img);
+    const float corr = texsig_corr(texsig(orig.data(), info.width, info.height), texsig(px->data(), (uint32_t)x, (uint32_t)y));
+    static int rejected = 0, accepted = 0;
+    if (corr < 0.7f) {
+        g_texpack_rejected[key] = true;
+        if (rejected++ < 8) logf("vitart: pack de texturas: %s recusado (não parece a textura do Vita, correlação %.2f)",
+                                 it->second.c_str(), corr);
+        return nullptr;
+    }
+    accepted++;
+    w = (uint32_t)x, h = (uint32_t)y;
+    g_texpack_bytes += px->size();
+    static int logged = 0;
+    if (logged++ < 5) logf("vitart: textura trocada pelo pack (%ux%u -> %dx%d)", info.width, info.height, x, y);
+    return px;
+}
 static std::map<std::array<uint32_t, 4>, TexEntry> g_texcache;
 static std::atomic<uint32_t> g_present_frame{0};
 static uint64_t content_hash(const uint8_t *p, size_t n, uint64_t h) {
@@ -512,8 +608,13 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
                 if (n) h = content_hash(ptr<uint8_t>(info.data), n, h);
                 if (info.base == 0x95000000u) h = content_hash(ptr<uint8_t>(info.palette), 1024, h);
                 if (!e.px || h != e.hash) {
+                    uint32_t rw = 0, rh = 0;
                     auto px = std::make_shared<std::vector<uint8_t>>();
-                    if (!n || !gxmtex::decode(ptr<uint8_t>(0), info, *px)) {
+                    const bool ok = n && gxmtex::decode(ptr<uint8_t>(0), info, *px);
+                    if (ok)
+                        if (auto hd = texpack_find(info, n, *px, rw, rh)) px = hd; // trocada pelo PNG em HD
+                    e.rw = rw, e.rh = rh;
+                    if (!ok) {
                         px.reset();
                         if (census()) {
                             char k[64];
@@ -529,6 +630,13 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
             keep.push_back(e.px);
             t.rgba = e.px->data();
             t.key = e.hash | 1;
+            if (e.rw) {
+                // HD do pack: tamanho do PNG e cadeia de mipmaps completa (sem cintilar de longe).
+                t.width = e.rw, t.height = e.rh;
+                uint32_t levels = 0;
+                while ((std::max(e.rw, e.rh) >> (levels + 1)) > 0) levels++;
+                t.mip_count = (uint8_t)std::min<uint32_t>(levels, 15), t.mip_filter = 1;
+            }
         }
         d.textures.push_back(t);
     }
@@ -544,6 +652,15 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
 
 void gxm_present(uint32_t fb) {
     if (g_vk != 1) return;
+    if (g_texpack_bytes > (1536ull << 20)) {
+        const std::lock_guard<std::mutex> lock(g_vk_mutex);
+        const uint32_t now = g_present_frame.load();
+        for (auto &[k, e] : g_texcache)
+            if (e.rw && e.px && now - e.checked > 300) {
+                g_texpack_bytes -= std::min<uint64_t>(g_texpack_bytes, e.px->size());
+                e.px.reset();
+            }
+    }
     static uint32_t frame = 0;
     static const uint32_t dump_at = getenv("VITART_VK_DUMP") ? (uint32_t)std::atoi(getenv("VITART_VK_DUMP")) : 0;
     if (++frame == dump_at || (dump_at && frame % (dump_at < 300 ? dump_at : 300) == 0)) {
