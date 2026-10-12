@@ -123,6 +123,10 @@ struct Patch {
     uint32_t src = 0, dst = 0;
     int32_t out_index = 0, out_sub = 0, in_index = 0;
     float m[2][2] = {};
+    // Matriz aplicada no grão anterior: a nova é alcançada em rampa linear dentro do grão (passo seco a
+    // cada mudança de volume/pan dava um estalo). prev_valid = false: a fonte acabou de começar (rampa de 0).
+    float prev[2][2] = {};
+    bool prev_valid = false;
 };
 
 std::mutex g_mutex;
@@ -739,17 +743,25 @@ void run_compressor(Voice &b) {
     }
 }
 
-void mix_into(Voice &dst, const Voice &src, const Patch &p) {
+void mix_into(Voice &dst, const Voice &src, Patch &p) {
     const int G = g_granularity;
     if (dst.in.size() != (size_t)G * 2) dst.in.assign((size_t)G * 2, 0.f);
-    float m00 = p.m[0][0], m01 = p.m[0][1], m10 = p.m[1][0], m11 = p.m[1][1];
-    if (src.channels == 1) m10 = m11 = 0.f;
-    if (dst.channels == 1) m01 = m11 = 0.f;
+    float m[2][2] = {{p.m[0][0], p.m[0][1]}, {p.m[1][0], p.m[1][1]}};
+    if (src.channels == 1) m[1][0] = m[1][1] = 0.f;
+    if (dst.channels == 1) m[0][1] = m[1][1] = 0.f;
+    float a[2][2];
+    for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 2; j++) a[i][j] = p.prev_valid ? p.prev[i][j] : 0.f;
+    const float inv = 1.f / G;
     for (int k = 0; k < G; k++) {
-        const float l = src.out[2 * k], r = src.out[2 * k + 1];
+        const float t = (k + 1) * inv, l = src.out[2 * k], r = src.out[2 * k + 1];
+        const float m00 = a[0][0] + (m[0][0] - a[0][0]) * t, m01 = a[0][1] + (m[0][1] - a[0][1]) * t;
+        const float m10 = a[1][0] + (m[1][0] - a[1][0]) * t, m11 = a[1][1] + (m[1][1] - a[1][1]) * t;
         dst.in[2 * k] += l * m00 + r * m10;
         dst.in[2 * k + 1] += l * m01 + r * m11;
     }
+    std::memcpy(p.prev, m, sizeof m);
+    p.prev_valid = true;
 }
 
 } // namespace
@@ -936,6 +948,8 @@ VT_HLE(sceNgsVoicePlay) {
     if (!(v->state & ST_ACTIVE)) {
         reset_source(*v);
         v->updates = 0;
+        for (auto &[h, p] : g_patches)
+            if (p.src == v->handle) p.prev_valid = false; // entra em rampa a partir do silêncio
     }
     v->state = ST_ACTIVE;
     v->key_off = false;
@@ -1099,12 +1113,13 @@ VT_HLE(sceNgsSystemUpdate) {
         if (v->key_off && !v->releasing) {
             // Key-off: a soltura do envelope esmaece a voz; sem soltura, ela para já.
             v->releasing = true, v->rel_ms = 0, v->rel_from = v->env_level;
-            if (release_ms(*v) == 0) finished = cut = true;
+            if (release_ms(*v) == 0) cut = true;
         }
-        if (!finished) finished = render_source(ctx, lock, *v) || v->env_done;
+        finished = render_source(ctx, lock, *v) || v->env_done || cut;
+        if (cut && v->has_out) // corte sem soltura: esmaece ao longo deste grão em vez de parar numa amostra
+            for (int k = 0; k < G; k++) v->out[2 * k] *= 1.f - (k + 1.f) / G, v->out[2 * k + 1] *= 1.f - (k + 1.f) / G;
         v->updates++;
         if (finished) {
-            if (cut) v->has_out = false;
             v->state = 0;
             v->key_off = false;
             invoke(ctx, lock, *v, v->fin_cb, v->fin_ud, v->kind == K_SCREAM_AT9 ? kAt9Id : kPlayerId, 0, 0, 0);

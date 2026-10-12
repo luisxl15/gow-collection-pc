@@ -46,7 +46,7 @@ struct HostOut {
     WAVEHDR hdr[kBufs]{};
     std::vector<int16_t> data[kBufs];
     int next = 0, queued = 0;
-    uint64_t dropped = 0, written = 0;
+    uint64_t dropped = 0, written = 0, underruns = 0; // underrun: a placa esvaziou a fila (estalo)
     bool started = false;
     ~HostOut() {
         if (!wo) return;
@@ -86,9 +86,11 @@ static void host_open(AudioPort &p) {
     waveOutPause(h->wo);
     p.host = h;
 }
+static int host_pending(const AudioPort &p);
 static void host_submit(AudioPort &p, const int16_t *src) {
     HostOut *h = p.host.get();
     if (!h || !h->wo) return;
+    if (h->started && host_pending(p) == 0) h->underruns++;
     WAVEHDR &hd = h->hdr[h->next];
     if (hd.dwFlags & WHDR_PREPARED) {
         if (!(hd.dwFlags & WHDR_DONE)) { // fila cheia: descarta este bloco
@@ -106,6 +108,8 @@ static void host_submit(AudioPort &p, const int16_t *src) {
         d[2 * i] = (int16_t)((l * p.vol[0]) >> 15);
         d[2 * i + 1] = (int16_t)((r * p.vol[1]) >> 15);
     }
+    static FILE *dump = getenv("VITART_AUDIO_DUMP") ? fopen(getenv("VITART_AUDIO_DUMP"), "wb") : nullptr;
+    if (dump) fwrite(d.data(), 2, d.size(), dump), fflush(dump); // PCM 16 bits estéreo do que vai à placa (diagnóstico)
     hd = {};
     hd.lpData = reinterpret_cast<LPSTR>(d.data());
     hd.dwBufferLength = (DWORD)(d.size() * 2);
@@ -213,14 +217,15 @@ VT_HLE(sceAudioOutOutput) {
         if (const uint32_t buf = arg(ctx, 1)) host_submit(p, ptr<int16_t>(buf));
         device_clock = p.host && p.host->started;
         static const bool alog = getenv("VITART_AUDIO_LOG") != nullptr;
-        if (alog && p.outputs % 1000 == 0) {
+        if (alog && p.outputs % 500 == 0) {
             MMTIME mt{};
             mt.wType = TIME_SAMPLES;
             HostOut *h = p.host.get();
             if (h && h->wo) waveOutGetPosition(h->wo, &mt, sizeof mt);
-            logf("vitart: porta de áudio %d: %llu saídas, pico %d, volume %d/%d, waveOut %s: %llu escritos, %llu descartados, posição %u amostras",
+            logf("vitart: porta de áudio %d: %llu saídas, pico %d, volume %d/%d, waveOut %s: %llu escritos, %llu descartados, %llu underruns, posição %u amostras",
                  (int)arg(ctx, 0), (unsigned long long)p.outputs, p.peak, p.vol[0], p.vol[1], h && h->wo ? "aberto" : "FECHADO",
-                 h ? (unsigned long long)h->written : 0ull, h ? (unsigned long long)h->dropped : 0ull, (unsigned)mt.u.sample);
+                 h ? (unsigned long long)h->written : 0ull, h ? (unsigned long long)h->dropped : 0ull,
+                 h ? (unsigned long long)h->underruns : 0ull, (unsigned)mt.u.sample);
             p.peak = 0;
         }
     }
