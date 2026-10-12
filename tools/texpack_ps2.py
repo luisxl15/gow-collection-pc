@@ -169,20 +169,27 @@ def main():
                 if len(parts) >= 2:
                     pack.add('-'.join(parts[:2]) if len(parts) >= 3 else parts[0])
     rows, hits, total = [], set(), 0
+    # GFX/PAL podem estar em outro WAD (o permanente, o da fase): índice global, primeiro que aparece.
+    wads = {}
+    glob_by = {}
     for wad in sorted(n for n in toc if n.endswith('.WAD')):
         size, lba = toc[wad]
         iso.seek(lba * 2048)
-        recs = walk(iso.read(size))
-        by_name = {name: body for tag, name, body in recs if tag == 30 and len(body) >= 4}
+        by = {name: body for tag, name, body in walk(iso.read(size)) if tag == 30 and len(body) >= 4}
+        wads[wad] = by
+        for name, body in by.items():
+            glob_by.setdefault(name, body)
+    for wad, by_name in wads.items():
         for name, body in by_name.items():
             if struct.unpack_from('<I', body, 0)[0] != 7 or len(body) < 88:
                 continue
             gname = body[4:28].split(b'\0')[0].decode('latin1')
             pname = body[28:52].split(b'\0')[0].decode('latin1')
-            g = gfx_parse(by_name.get(gname, b'\0' * 24))
+            g = gfx_parse(by_name.get(gname) or glob_by.get(gname, b'\0' * 24))
             if not g:
                 continue
-            p = gfx_parse(by_name[pname]) if pname in by_name else None
+            pb = by_name.get(pname) or glob_by.get(pname)
+            p = gfx_parse(pb) if pb else None
             for gi in range(len(g['data'])):
                 th = tex0hash(g, gi)
                 if not th:

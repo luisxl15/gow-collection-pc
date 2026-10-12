@@ -71,16 +71,46 @@ def toc(iso):
     p2 = part2_lba(iso)
     iso.seek(tlba * SECTOR)
     t = iso.read(tsize)
+    # A TOC lista primeiro os arquivos do PART1 e depois os do PART2: quando o setor volta para trás, mudou
+    # de parte. O sufixo \x01 marca a cópia que está na OUTRA parte (o jogo lê a mais perto da cabeça).
+    # Nenhuma regra de posição vale para todos (medido: WAD, VPK e VAG discordam), então cada entrada é
+    # conferida pelo conteúdo nas duas partes e fica a posição cujo cabeçalho combina com a extensão.
+    magic = {'WAD': b'\x78\x03\x00\x00', 'VPK': b' KPV', 'VAG': b'VAGp', 'PSS': b'\x00\x00\x01\xba'}
+
+    def valid(n, lba):
+        m = magic.get(n.rsplit('.', 1)[-1])
+        if m is None:
+            return None
+        iso.seek(lba * SECTOR)
+        return iso.read(4) == m
+
     out = {}
+    part, prev = 1, -1
     for i in range(0, len(t) - 23, 24):
         raw = t[i:i + 16].split(b'\0')[0].decode('latin1')
         size, sec = struct.unpack_from('<II', t, i + 16)
-        second = raw.endswith('\x01')
-        n = raw.rstrip('\x01')
-        if not n or (second and p2 is None):
+        if not raw:
             continue
-        if n not in out or (not second and out[n][2]):
-            out[n] = (size, (p2 if second else p1) + sec, second)
+        if sec < prev:
+            part = 2
+        prev = sec
+        copy = raw.endswith('\x01')
+        n = raw.rstrip('\x01')
+        if n in out and out[n][2]:
+            continue  # já tem posição conferida
+        cands = [p1 + sec] + ([p2 + sec] if p2 is not None else [])
+        chosen, ok = None, False
+        for lba in cands:
+            v = valid(n, lba)
+            if v:
+                chosen, ok = lba, True
+                break
+            if v is None and chosen is None:
+                chosen = (p2 if ((2 if part == 1 else 1) if copy else part) == 2 and p2 else p1) + sec
+        if chosen is None:
+            chosen = cands[0]
+        if n not in out or ok:
+            out[n] = (size, chosen, ok)
     return {n: (size, lba) for n, (size, lba, _) in out.items()}
 
 
