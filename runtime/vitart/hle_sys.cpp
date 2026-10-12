@@ -244,6 +244,7 @@ VT_HLE(sceAudioOutOutput) {
 // host_input.cpp: botões somados ao teclado, analógicos do controle.
 // Modo PS TV por padrão (o jogo tem caminho próprio, wad/_VitaTV, com L2/R2/L3/R3 no controle);
 // VITART_HANDHELD=1 volta ao portátil, em que L2/R2 eram gestos no painel traseiro.
+void video_skip_request(); // hle_io.cpp
 bool handheld_mode() {
     static const bool h = getenv("VITART_HANDHELD") && *getenv("VITART_HANDHELD") == '1';
     return h;
@@ -295,6 +296,12 @@ static void ctrl_read(arc_ctx *ctx) {
     const int count = (int)arg(ctx, 2) > 0 ? (int)arg(ctx, 2) : 1;
     const hostin::State pad = hostin::poll(); // XInput, DualShock 4 e DualSense
     uint32_t buttons = keyboard_buttons() | scripted_buttons() | pad.buttons;
+    {   // START apertado (borda): pede para pular a cena em vídeo, se houver uma tocando.
+        static bool start_was = false;
+        const bool start_now = (buttons & 0x8) != 0;
+        if (start_now && !start_was) video_skip_request();
+        start_was = start_now;
+    }
     if (handheld_mode()) { // portátil: sem L2/R2/L3/R3; L1/R1 são os bits 0x100/0x200
         if (buttons & 0x400) buttons |= 0x100;
         if (buttons & 0x800) buttons |= 0x200;

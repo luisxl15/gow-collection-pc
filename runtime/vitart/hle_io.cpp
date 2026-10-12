@@ -54,8 +54,52 @@ struct File {
     int fd = -1;
     std::string path;
     bool is_dir = false;
+    bool video = false;      // .bk2 (cena em vídeo)
+    uint32_t skip_gen = 0;   // pedidos de pular já existentes quando foi aberto
     fs::directory_iterator it, end;
 };
+// START durante um vídeo: as leituras seguintes do .bk2 aberto devolvem fim de arquivo e o Bink
+// encerra a cena (o portátil não tinha como pular; o usuário quer o START, nos dois jogos).
+static std::atomic<uint32_t> g_skip_gen{0};
+// Cabeçalho do vídeo aberto (Bink 2: quadros em +8, largura em +20, altura em +24).
+static std::atomic<uint32_t> g_video_open{0}, g_video_w{0}, g_video_h{0}, g_video_frames{0};
+// Pular a cena: acha na memória do jogo o HBINK do vídeo aberto ({Width, Height, Frames, FrameNum,
+// LastFrameNum, ...}, o começo da estrutura do Bink SDK) e faz Frames = FrameNum; o laço do jogo vê o
+// último quadro e fecha o vídeo do jeito normal. (Fim de arquivo congelava o decodificador.)
+void video_skip_request() {
+    g_skip_gen++;
+    const uint32_t w = g_video_w, h = g_video_h, frames = g_video_frames;
+    if (!g_video_open || !w || !h || !frames) return;
+    uint8_t *base = mem_base();
+    int hits = 0;
+    for (uint8_t *p = base; p < base + 0x100000000ull;) {
+        MEMORY_BASIC_INFORMATION mi{};
+        if (!VirtualQuery(p, &mi, sizeof mi)) break;
+        uint8_t *end = (uint8_t *)mi.BaseAddress + mi.RegionSize;
+        if (mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+            for (uint8_t *q = (uint8_t *)(((uintptr_t)p + 3) & ~(uintptr_t)3); q + 20 <= end; q += 4) {
+                uint32_t v[5];
+                std::memcpy(v, q, 20);
+                if (v[0] != w || v[1] != h || v[2] != frames) continue;
+                if (v[3] > frames || v[4] > frames) continue; // FrameNum/LastFrameNum plausíveis (0 no começo)
+                const uint32_t cut = v[3] + 1 < frames ? v[3] + 1 : frames;
+                std::memcpy(q + 8, &cut, 4);
+                logf("vitart: cena pulada com START (HBINK em 0x%08x: quadro %u de %u)", (uint32_t)(q - base), v[3], frames);
+                hits++;
+            }
+        }
+        p = end;
+    }
+    if (!hits) logf("vitart: START durante o vídeo, mas o HBINK (%ux%u, %u quadros) não foi achado", w, h, frames);
+}
+static bool is_video(const std::string &p) {
+    if (p.size() < 4) return false;
+    std::string e = p.substr(p.size() - 4);
+    for (char &c : e) c = (char)std::tolower((unsigned char)c);
+    return e == ".bk2";
+}
+// Leitura de um vídeo que o jogador mandou pular: fim de arquivo.
+static bool video_cut(uint32_t vfd);
 static std::mutex g_files_mutex;
 static std::unordered_map<uint32_t, File> g_files;
 static uint32_t g_next_fd = 0x00020001;
@@ -99,6 +143,15 @@ VT_HLE(sceIoOpen) {
     const uint32_t vfd = g_next_fd++;
     g_files[vfd].fd = fd;
     g_files[vfd].path = path;
+    g_files[vfd].video = is_video(path);
+    if (g_files[vfd].video) {
+        uint32_t hd[7] = {};
+        _lseeki64(fd, 0, SEEK_SET);
+        if (_read(fd, hd, sizeof hd) == (int)sizeof hd) g_video_frames = hd[2], g_video_w = hd[5], g_video_h = hd[6];
+        _lseeki64(fd, 0, SEEK_SET);
+        g_video_open++;
+    }
+    g_files[vfd].skip_gen = g_skip_gen.load();
     logf("vitart: sceIoOpen(%s, 0x%x) -> 0x%x", path.c_str(), flags, vfd);
     ret(ctx, vfd);
 }
@@ -112,11 +165,25 @@ static int host_fd(uint32_t vfd) {
     return it == g_files.end() ? -1 : it->second.fd;
 }
 
+static bool video_cut(uint32_t vfd) {
+    const std::lock_guard<std::mutex> lock(g_files_mutex);
+    auto it = g_files.find(vfd);
+    static const bool eof_cut = getenv("VITART_SKIP_EOF") != nullptr; // experimento: o Bink congela no fim de arquivo
+    if (!eof_cut || it == g_files.end() || !it->second.video || g_skip_gen.load() == it->second.skip_gen) return false;
+    static uint32_t logged = 0;
+    if (logged != it->second.skip_gen + 1) {
+        logged = it->second.skip_gen + 1;
+        logf("vitart: cena pulada com START: %s", it->second.path.c_str());
+    }
+    return true;
+}
+
 VT_HLE(sceIoClose) {
     const std::lock_guard<std::mutex> lock(g_files_mutex);
     auto it = g_files.find(arg(ctx, 0));
     if (it == g_files.end()) return ret(ctx, SCE_ERROR_ERRNO_EBADF);
     _close(it->second.fd);
+    if (it->second.video && g_video_open) g_video_open--;
     g_files.erase(it);
     ret(ctx, 0);
 }
@@ -139,6 +206,7 @@ static int pio(int fd, uint32_t buf, uint32_t n, int64_t off, bool write) {
 VT_HLE(sceIoRead) {
     const int fd = host_fd(arg(ctx, 0));
     if (fd < 0) return ret(ctx, SCE_ERROR_ERRNO_EBADF);
+    if (video_cut(arg(ctx, 0))) return ret(ctx, 0);
     commit_range(arg(ctx, 1), arg(ctx, 2));
     const int n = _read(fd, ptr<void>(arg(ctx, 1)), arg(ctx, 2));
     ret(ctx, n < 0 ? SCE_ERROR_ERRNO_EBADF : (uint32_t)n);
@@ -169,6 +237,7 @@ VT_HLE(sceIoPread) {
     const int fd = host_fd(arg(ctx, 0));
     if (fd < 0) return ret(ctx, SCE_ERROR_ERRNO_EBADF);
     const int64_t off = (int64_t)((uint64_t)arg(ctx, 4) | ((uint64_t)arg(ctx, 5) << 32));
+    if (video_cut(arg(ctx, 0))) return ret(ctx, 0);
     const int n = pio(fd, arg(ctx, 1), arg(ctx, 2), off, false);
     ret(ctx, n < 0 ? SCE_ERROR_ERRNO_EBADF : (uint32_t)n);
 }

@@ -546,7 +546,7 @@ void gxm_present(uint32_t fb) {
     if (g_vk != 1) return;
     static uint32_t frame = 0;
     static const uint32_t dump_at = getenv("VITART_VK_DUMP") ? (uint32_t)std::atoi(getenv("VITART_VK_DUMP")) : 0;
-    if (++frame == dump_at || (dump_at && frame % 300 == 0)) {
+    if (++frame == dump_at || (dump_at && frame % (dump_at < 300 ? dump_at : 300) == 0)) {
         // Quadro apresentado em PPM (RGB): medir a imagem sem captura de tela.
         std::vector<uint8_t> px;
         uint32_t w, h;
