@@ -1,6 +1,7 @@
 // Núcleo do vitart: memória do guest, carga dos módulos recompilados, ligação de imports, threads
 // e a sequência de partida do Vita (module_start das bibliotecas, depois a thread principal).
 #include "vitart.h"
+#include "gxm_vk.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -763,10 +764,27 @@ static std::string g_main_dll;            // DLL do módulo principal (a primeir
     }
     logf("vitart: LoadExec -> %s", cmd.c_str());
     if (g_logfile) fflush(g_logfile);
+    // Sem janela nova: o próximo processo cria a dele invisível no mesmo lugar, mostra depois do primeiro
+    // quadro e avisa por evento; enquanto isso esta janela continua na tela (o som deste processo para).
+    int x, y, w, h;
+    HANDLE ev = nullptr;
+    if (gvk::window_rect(x, y, w, h)) {
+        char buf[64];
+        std::snprintf(buf, sizeof buf, "%d,%d,%d,%d", x, y, w, h);
+        SetEnvironmentVariableA("VITART_WINRECT", buf);
+        std::snprintf(buf, sizeof buf, "vitart_handoff_%lu", GetCurrentProcessId());
+        ev = CreateEventA(nullptr, TRUE, FALSE, buf);
+        SetEnvironmentVariableA("VITART_HANDOFF", buf);
+    }
     STARTUPINFOA si{sizeof si};
     PROCESS_INFORMATION pi{};
     if (!CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi))
         fatal("LoadExec: CreateProcess falhou (%lu)", GetLastError());
+    audio_silence();
+    if (ev) {
+        HANDLE hs[2] = {ev, pi.hProcess};
+        WaitForMultipleObjects(2, hs, FALSE, 60000); // janela nova na tela (ou o processo novo morreu)
+    }
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     ExitProcess(0);

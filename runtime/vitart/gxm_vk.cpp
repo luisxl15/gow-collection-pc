@@ -777,6 +777,17 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 
+static bool g_show_pending = false; // janela criada invisível (troca de módulo), mostrar após o 1º quadro
+static uint32_t g_presented = 0;
+static void handoff_show() {
+    if (!g_show_pending || ++g_presented < 2) return; // 2º quadro: o 1º já está na tela
+    g_show_pending = false;
+    ShowWindow(g_hwnd, SW_SHOW);
+    SetForegroundWindow(g_hwnd);
+    if (const char *ev = getenv("VITART_HANDOFF"))
+        if (HANDLE e = OpenEventA(EVENT_MODIFY_STATE, FALSE, ev)) SetEvent(e), CloseHandle(e);
+}
+
 static bool create_window() {
     WNDCLASSW wc{};
     wc.lpfnWndProc = wndproc;
@@ -786,8 +797,15 @@ static bool create_window() {
     RegisterClassW(&wc);
     RECT r{0, 0, 1440, 816}; // 2x o framebuffer de 720x408
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME, FALSE);
-    g_hwnd = CreateWindowExW(0, L"vitart", L"God of War (vitart, Vulkan)", (WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME) | WS_VISIBLE,
-                             CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, nullptr, nullptr, wc.hInstance, nullptr);
+    int x = CW_USEDEFAULT, y = CW_USEDEFAULT, w = r.right - r.left, h = r.bottom - r.top;
+    // Troca de módulo (menu -> jogo): a janela nasce invisível no lugar da anterior e só aparece depois
+    // do primeiro quadro; aí o processo anterior é avisado e fecha (sem janela nova piscando).
+    const char *wr = getenv("VITART_WINRECT");
+    const bool handoff = wr && std::sscanf(wr, "%d,%d,%d,%d", &x, &y, &w, &h) == 4;
+    g_show_pending = handoff;
+    g_hwnd = CreateWindowExW(0, L"vitart", L"God of War (vitart, Vulkan)",
+                             (WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME) | (handoff ? 0 : WS_VISIBLE), x, y, w, h, nullptr,
+                             nullptr, wc.hInstance, nullptr);
     if (!g_hwnd) {
         g_err = "CreateWindowEx falhou";
         return false;
@@ -849,6 +867,13 @@ static bool create_window() {
 }
 
 bool window_closed() { return g_closed; }
+
+bool window_rect(int &x, int &y, int &w, int &h) {
+    RECT r;
+    if (!g_hwnd || !GetWindowRect(g_hwnd, &r)) return false;
+    x = r.left, y = r.top, w = r.right - r.left, h = r.bottom - r.top;
+    return true;
+}
 
 static std::wstring g_notice;
 static std::chrono::steady_clock::time_point g_notice_end;
@@ -968,6 +993,7 @@ bool present(uint32_t addr) {
     pi.pSwapchains = &g_swap;
     pi.pImageIndices = &idx;
     vkQueuePresentKHR(g_queue, &pi);
+    handoff_show();
     static uint32_t presents = 0;
     if (++presents % 300 == 0) save_pcache();
     return true;

@@ -88,8 +88,10 @@ static void host_open(AudioPort &p) {
     waveOutPause(h->wo);
     p.host = h;
 }
+static std::atomic<bool> g_silenced{false};
 static int host_pending(const AudioPort &p);
 static void host_submit(AudioPort &p, const int16_t *src) {
+    if (g_silenced) return;
     HostOut *h = p.host.get();
     if (!h || !h->wo) return;
     if (h->started && host_pending(p) == 0) h->underruns++;
@@ -134,6 +136,12 @@ static int host_pending(const AudioPort &p) {
     return n;
 }
 static std::map<int, AudioPort> g_ports;
+void audio_silence() {
+    g_silenced = true;
+    std::lock_guard<std::mutex> g(g_audio_mutex);
+    for (auto &[id, p] : g_ports)
+        if (p.host && p.host->wo) waveOutReset(p.host->wo);
+}
 static int g_next_port = 0;
 
 VT_HLE(sceAudioOutOpenPort) {

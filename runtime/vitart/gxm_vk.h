@@ -85,6 +85,8 @@ bool init(bool validation, bool window = false);
 // Mostra o alvo de cor no endereço dado na janela (escala para o tamanho da janela).
 bool present(uint32_t addr);
 bool window_closed();
+// Retângulo externo da janela (para a troca de módulo sem janela nova); false se ainda não há janela.
+bool window_rect(int &x, int &y, int &w, int &h);
 // Mouse sobre a janela como toque: posição normalizada (0..1) na área cliente e botão esquerdo apertado.
 bool pointer(float &nx, float &ny);
 // Aviso curto no título da janela (UTF-8), por alguns segundos, com o som de notificação do Windows.
