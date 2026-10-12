@@ -250,6 +250,16 @@ struct TexEntry {
 // 10 s saem da memória (recarregam se voltarem à cena).
 static std::unordered_map<uint64_t, std::string> g_texpack;
 static uint64_t g_texpack_bytes = 0;
+// Opção "HD Textures" do menu de pausa: desligada, as texturas voltam às do Vita (o cache é refeito).
+static std::atomic<bool> g_texpack_on{true}, g_texcache_flush{false};
+void texpack_set_enabled(bool on) {
+    if (g_texpack_on.exchange(on) != on) g_texcache_flush = true;
+}
+static void texpack_load();
+bool texpack_available() {
+    texpack_load();
+    return !g_texpack.empty();
+}
 static void texpack_load() {
     static bool done = false;
     if (done) return;
@@ -314,7 +324,7 @@ static std::condition_variable g_tp_sem_cv;
 static int g_tp_running = 0;
 static uint64_t texpack_key(const gxmtex::Info &info, size_t base_bytes) {
     texpack_load();
-    if (g_texpack.empty() || !base_bytes) return 0;
+    if (g_texpack.empty() || !base_bytes || !g_texpack_on) return 0;
     const uint32_t wh[2] = {info.width, info.height};
     const uint64_t key = fnv64(ptr<uint8_t>(info.data), std::min<size_t>(4096, base_bytes),
                                fnv64(reinterpret_cast<const uint8_t *>(wh), 8));
@@ -359,13 +369,27 @@ static std::shared_ptr<std::vector<uint8_t>> texpack_take(uint64_t key, const gx
     g_tp_jobs.erase(it);
     finished = true;
     if (!job->px || orig.empty()) return nullptr;
-    const float corr = texsig_corr(texsig(orig.data(), info.width, info.height), texsig(job->px->data(), job->w, job->h));
+    const std::vector<float> so = texsig(orig.data(), info.width, info.height), sp = texsig(job->px->data(), job->w, job->h);
+    const float corr = texsig_corr(so, sp);
     static int rejected = 0, logged = 0;
     if (corr < 0.7f) {
         g_texpack_rejected[key] = true;
         if (rejected++ < 8) logf("vitart: pack de texturas: %s recusado (não parece a textura do Vita, correlação %.2f)",
                                  g_texpack[key].c_str(), corr);
         return nullptr;
+    }
+    // Alfa na escala do Vita. O pack vem do PS2: lá 128 é opaco, e várias texturas de personagem usam o
+    // alfa para outra coisa (valor uniforme, p. ex. 93), enquanto o Vita tem o próprio valor; o shader do
+    // Vita lê o alfa como o Vita o gravou, e o PNG cru deixava inimigos e harpias meio transparentes.
+    // O alfa do PNG é escalado para ter a mesma média do da textura do Vita (cortes e bordas em HD ficam).
+    double mo = 0, mp = 0;
+    for (int c = 0; c < 256; c++) mo += so[256 + c], mp += sp[256 + c];
+    if (mp > 0.5 && std::fabs(mo / mp - 1.0) > 0.06) {
+        const double k = mo / mp;
+        uint8_t *px = job->px->data();
+        for (size_t i = 3, n = job->px->size(); i < n; i += 4) px[i] = (uint8_t)std::min(255.0, px[i] * k + 0.5);
+        static int fixed = 0;
+        if (fixed++ < 8) logf("vitart: pack de texturas: alfa de %s ajustado ao do Vita (x%.2f)", g_texpack[key].c_str(), k);
     }
     w = job->w, h = job->h;
     g_texpack_bytes += job->px->size();
@@ -695,8 +719,16 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
         g_vk_draws++;
 }
 
+void game_options_tick();
 void gxm_present(uint32_t fb) {
     if (g_vk != 1) return;
+    game_options_tick(); // opções do PC no menu de pausa do jogo (game_options.cpp)
+    if (g_texcache_flush.exchange(false)) {
+        const std::lock_guard<std::mutex> lock(g_vk_mutex);
+        g_texcache.clear(); // tudo é decodificado de novo no próximo uso, com ou sem o pack
+        g_texpack_bytes = 0;
+        logf("vitart: texturas HD %s", g_texpack_on ? "ligadas" : "desligadas");
+    }
     if (g_texpack_bytes > (1536ull << 20)) {
         const std::lock_guard<std::mutex> lock(g_vk_mutex);
         const uint32_t now = g_present_frame.load();

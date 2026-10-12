@@ -97,6 +97,10 @@ bool is_depth(uint32_t addr);
 // superfície peça "force load". Sem isso a profundidade de uma cena vaza para a seguinte.
 void begin_scene(uint32_t color_addr, uint8_t stencil = 0);
 void shutdown();
+// Resolução interna (múltiplo de 960x544): automática pelo monitor ou escolhida no menu do jogo.
+uint32_t render_scale();
+uint32_t auto_render_scale();
+bool set_render_scale(uint32_t s);
 // Grava o desenho no quadro atual (os desenhos são executados em ordem em end_frame).
 bool draw(const Draw &d);
 // Executa o quadro e espera a GPU.

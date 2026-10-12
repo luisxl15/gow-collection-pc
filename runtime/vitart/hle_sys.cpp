@@ -354,7 +354,16 @@ VT_HLE(sceDisplayWaitVblankStart) { wait_vblank(1); ret(ctx, SCE_OK); }
 VT_HLE(sceDisplayGetVcount) {
     ret(ctx, (uint32_t)((std::chrono::steady_clock::now() - g_vblank0) / VBLANK));
 }
-VT_HLE(sceDisplayWaitVblankStartMulti) { wait_vblank(arg(ctx, 0)); ret(ctx, SCE_OK); }
+// Opção de 60 FPS (game_options.cpp): o GoW1 espera 2 vblanks por quadro (30 FPS); com a taxa da lógica
+// do jogo também em 60, 1 vblank dá 60 FPS na velocidade certa.
+static std::atomic<bool> g_fps60{false};
+void display_set_fps60(bool on) { g_fps60 = on; }
+VT_HLE(sceDisplayWaitVblankStartMulti) {
+    uint32_t n = arg(ctx, 0);
+    if (n == 2 && g_fps60) n = 1;
+    wait_vblank(n);
+    ret(ctx, SCE_OK);
+}
 VT_HLE(sceDisplayWaitSetFrameBuf) { wait_vblank(1); ret(ctx, SCE_OK); }
 
 // =================================================================== relógio

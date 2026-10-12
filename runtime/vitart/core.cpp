@@ -329,7 +329,17 @@ uint32_t call_guest(arc_ctx *ctx, uint32_t addr, std::initializer_list<uint32_t>
     return ctx->r[0];
 }
 
+// Observadores de chamadas de import (antes da chamada; não mudam o resultado): p. ex. game_options.cpp
+// lê os FSCommand do menu do jogo na comparação de strings que o tratador dele faz.
+// Registro na inicialização estática (antes de qualquer thread do jogo).
+static std::vector<ImportWatch> &import_watch() {
+    static std::vector<ImportWatch> v;
+    return v;
+}
+void watch_import(ImportWatch w) { import_watch().push_back(w); }
+
 static void host_import(arc_ctx *ctx, uint32_t nid, uint32_t stub) {
+    for (ImportWatch w : import_watch()) w(ctx, stub);
     auto it = g_bindings.find(stub);
     if (it == g_bindings.end())
         fatal("chamada a stub de import desconhecido 0x%08x (NID 0x%08x)", stub, nid);

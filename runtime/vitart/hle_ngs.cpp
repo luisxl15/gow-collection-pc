@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <atomic>
 #include <deque>
 #include <map>
 #include <memory>
@@ -293,11 +294,23 @@ static FILE *g_iso = nullptr;
 static std::map<uint32_t, std::shared_ptr<Pcm>> g_cache;
 static std::deque<uint32_t> g_lru;
 
-static bool on() {
+static std::atomic<bool> g_user{true}; // opção "PS2 Audio" do menu de pausa (troca no meio da música)
+static bool available() {
     static const bool ok = [] {
-        const char *iso = getenv("VITART_PS2_AUDIO");
-        if (!iso || !*iso) return false;
-        g_iso = fopen(iso, "rb");
+        // ISO do iniciador (VITART_PS2_AUDIO) ou a lembrada em vitart_options.ini (ps2_iso=)
+        std::string iso = getenv("VITART_PS2_AUDIO") ? getenv("VITART_PS2_AUDIO") : "";
+        if (iso.empty())
+            if (FILE *ini = fopen((data_path() + "/vitart_options.ini").c_str(), "r")) {
+                char line[1024];
+                while (fgets(line, sizeof line, ini))
+                    if (!strncmp(line, "ps2_iso=", 8)) {
+                        iso = line + 8;
+                        while (!iso.empty() && (unsigned char)iso.back() < 32) iso.pop_back(); // fim de linha
+                    }
+                fclose(ini);
+            }
+        if (iso.empty()) return false;
+        g_iso = fopen(iso.c_str(), "rb");
         FILE *f = fopen((data_path() + "/ps2audio.idx").c_str(), "rb");
         uint32_t h[3] = {};
         if (!g_iso || !f || fread(h, 4, 3, f) != 3 || h[0] != 0x32535047u) {
@@ -315,6 +328,7 @@ static bool on() {
     }();
     return ok;
 }
+static bool on() { return g_user.load(std::memory_order_relaxed) && available(); }
 
 static uint32_t crc32(const uint8_t *p, size_t n) {
     static uint32_t t[256];
@@ -1210,6 +1224,12 @@ VT_HLE(sceNgsSystemUpdate) {
     lock.unlock();
     for (auto &[cb, rack] : rel) call_guest(ctx, cb, {rack});
     ret(ctx, SCE_OK);
+}
+
+// Opção "PS2 Audio" do menu de pausa.
+bool ps2audio_available() { return ps2a::available(); }
+void ps2audio_set_enabled(bool on) {
+    if (ps2a::g_user.exchange(on) != on) logf("vitart: áudio do PS2 %s", on ? "ligado" : "desligado (áudio do Vita)");
 }
 
 } // namespace vt

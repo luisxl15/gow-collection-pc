@@ -7,6 +7,8 @@
 #include <cstdarg>
 #include <cstdio>
 #include <filesystem>
+#include <memory>
+#include <vector>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -50,8 +52,51 @@ static bool skipped_video(const std::string &path) {
     return ext == ".bk2";
 }
 
+// Trocas dentro de um .psarc (mods do vitart, p. ex. o menu de pausa com as opções do PC): o arquivo
+// <dados>/mods/<nome>.psarc.vtpatch traz a TOC inteira já remendada (mesmo tamanho da original) e os
+// arquivos novos, que ficam "depois do fim" do psarc. O jogo (FIOS2) lê o psarc como sempre; o vitart
+// junta as três fontes na leitura. O psarc original não é tocado. Formato: "VTPP", u64 tamanho do psarc
+// original, u32 tamanho da TOC, u32 tamanho dos dados extras, TOC, extras (gerado por tools/psarc_patch.py).
+struct PsarcPatch {
+    uint64_t orig = 0;
+    std::vector<uint8_t> toc, extra;
+};
+static std::shared_ptr<PsarcPatch> psarc_patch(const std::string &hp) {
+    if (hp.size() < 6 || _stricmp(hp.c_str() + hp.size() - 6, ".psarc") != 0) return nullptr;
+    static const bool off = getenv("VITART_NO_MODS") != nullptr;
+    if (off) return nullptr;
+    static std::mutex m;
+    static std::unordered_map<std::string, std::shared_ptr<PsarcPatch>> cache; // carregado uma vez por psarc
+    const std::lock_guard<std::mutex> lock(m);
+    if (auto it = cache.find(hp); it != cache.end()) return it->second;
+    auto &slot = cache[hp];
+    const std::string name = fs::path(hp).filename().string();
+    const std::string pp = data_path() + "/mods/" + name + ".vtpatch";
+    FILE *f = fopen(pp.c_str(), "rb");
+    if (!f) return nullptr;
+    auto pt = std::make_shared<PsarcPatch>();
+    char magic[4] = {};
+    uint32_t tl = 0, el = 0;
+    bool ok = fread(magic, 1, 4, f) == 4 && !memcmp(magic, "VTPP", 4) && fread(&pt->orig, 8, 1, f) == 1 &&
+              fread(&tl, 4, 1, f) == 1 && fread(&el, 4, 1, f) == 1;
+    if (ok) {
+        pt->toc.resize(tl), pt->extra.resize(el);
+        ok = fread(pt->toc.data(), 1, tl, f) == tl && fread(pt->extra.data(), 1, el, f) == el;
+    }
+    fclose(f);
+    std::error_code ec;
+    if (!ok || fs::file_size(hp, ec) != pt->orig) {
+        logf("vitart: %s ignorado (não corresponde a este %s)", pp.c_str(), name.c_str());
+        return nullptr;
+    }
+    logf("vitart: mods em %s: TOC remendada, %u bytes de arquivos trocados", name.c_str(), el);
+    return slot = pt;
+}
+
 struct File {
     int fd = -1;
+    std::shared_ptr<PsarcPatch> patch; // psarc com trocas (ver acima)
+    int64_t pos = 0;                   // posição de leitura quando há trocas
     std::string path;
     bool is_dir = false;
     bool video = false;      // .bk2 (cena em vídeo)
@@ -111,8 +156,11 @@ static void fill_stat(uint32_t st, const fs::path &p) {
     const uint32_t mode = (dir ? 0x1000u : 0x2000u) | 0x01FFu; // SCE_S_IFDIR/IFREG + rwx
     wr32(st + 0, mode);
     wr32(st + 4, dir ? 0x10u : 0x20u);
-    if (!dir)
-        wr64(st + 8, (uint64_t)fs::file_size(p, ec));
+    if (!dir) {
+        uint64_t size = (uint64_t)fs::file_size(p, ec);
+        if (auto pt = psarc_patch(p.string())) size = pt->orig + pt->extra.size();
+        wr64(st + 8, size);
+    }
 }
 
 VT_HLE(sceIoOpen) {
@@ -144,6 +192,7 @@ VT_HLE(sceIoOpen) {
     g_files[vfd].fd = fd;
     g_files[vfd].path = path;
     g_files[vfd].video = is_video(path);
+    if (acc == 1) g_files[vfd].patch = psarc_patch(hp);
     if (g_files[vfd].video) {
         uint32_t hd[7] = {};
         _lseeki64(fd, 0, SEEK_SET);
@@ -203,10 +252,50 @@ static int pio(int fd, uint32_t buf, uint32_t n, int64_t off, bool write) {
     return (int)done;
 }
 
+// Leitura de um psarc com trocas: TOC remendada, psarc original e arquivos extras no fim.
+static int patched_read(int fd, const PsarcPatch &pt, uint32_t buf, uint32_t n, int64_t off) {
+    commit_range(buf, n);
+    uint8_t *dst = ptr<uint8_t>(buf);
+    const int64_t total = (int64_t)(pt.orig + pt.extra.size());
+    if (off >= total) return 0;
+    if (off + n > total) n = (uint32_t)(total - off);
+    uint32_t done = 0;
+    while (done < n) {
+        const int64_t o = off + done;
+        uint32_t chunk = n - done;
+        if (o < (int64_t)pt.toc.size()) {
+            chunk = (uint32_t)std::min<int64_t>(chunk, (int64_t)pt.toc.size() - o);
+            memcpy(dst + done, pt.toc.data() + o, chunk);
+        } else if (o >= (int64_t)pt.orig) {
+            memcpy(dst + done, pt.extra.data() + (o - pt.orig), chunk);
+        } else {
+            chunk = (uint32_t)std::min<int64_t>(chunk, (int64_t)pt.orig - o);
+            const int r = pio(fd, buf + done, chunk, o, false);
+            if (r <= 0) break;
+            chunk = (uint32_t)r;
+        }
+        done += chunk;
+    }
+    return (int)done;
+}
+static std::shared_ptr<PsarcPatch> file_patch(uint32_t vfd, int64_t **pos) {
+    const std::lock_guard<std::mutex> lock(g_files_mutex);
+    auto it = g_files.find(vfd);
+    if (it == g_files.end() || !it->second.patch) return nullptr;
+    *pos = &it->second.pos;
+    return it->second.patch;
+}
+
 VT_HLE(sceIoRead) {
     const int fd = host_fd(arg(ctx, 0));
     if (fd < 0) return ret(ctx, SCE_ERROR_ERRNO_EBADF);
     if (video_cut(arg(ctx, 0))) return ret(ctx, 0);
+    int64_t *pos = nullptr;
+    if (auto pt = file_patch(arg(ctx, 0), &pos)) {
+        const int n = patched_read(fd, *pt, arg(ctx, 1), arg(ctx, 2), *pos);
+        if (n > 0) *pos += n;
+        return ret(ctx, n < 0 ? SCE_ERROR_ERRNO_EBADF : (uint32_t)n);
+    }
     commit_range(arg(ctx, 1), arg(ctx, 2));
     const int n = _read(fd, ptr<void>(arg(ctx, 1)), arg(ctx, 2));
     ret(ctx, n < 0 ? SCE_ERROR_ERRNO_EBADF : (uint32_t)n);
@@ -230,6 +319,12 @@ VT_HLE(sceIoLseek) {
     if (fd < 0) return ret64(ctx, (uint64_t)(int64_t)(int32_t)SCE_ERROR_ERRNO_EBADF);
     const int64_t off = (int64_t)((uint64_t)arg(ctx, 2) | ((uint64_t)arg(ctx, 3) << 32));
     const int whence = (int)arg(ctx, 4);
+    int64_t *pos = nullptr;
+    if (auto pt = file_patch(arg(ctx, 0), &pos)) {
+        const int64_t base = whence == SEEK_SET ? 0 : whence == SEEK_CUR ? *pos : (int64_t)(pt->orig + pt->extra.size());
+        *pos = base + off;
+        return ret64(ctx, (uint64_t)*pos);
+    }
     ret64(ctx, (uint64_t)_lseeki64(fd, off, whence));
 }
 VT_HLE(sceIoPread) {
@@ -238,6 +333,11 @@ VT_HLE(sceIoPread) {
     if (fd < 0) return ret(ctx, SCE_ERROR_ERRNO_EBADF);
     const int64_t off = (int64_t)((uint64_t)arg(ctx, 4) | ((uint64_t)arg(ctx, 5) << 32));
     if (video_cut(arg(ctx, 0))) return ret(ctx, 0);
+    int64_t *pos = nullptr;
+    if (auto pt = file_patch(arg(ctx, 0), &pos)) {
+        const int n = patched_read(fd, *pt, arg(ctx, 1), arg(ctx, 2), off);
+        return ret(ctx, n < 0 ? SCE_ERROR_ERRNO_EBADF : (uint32_t)n);
+    }
     const int n = pio(fd, arg(ctx, 1), arg(ctx, 2), off, false);
     ret(ctx, n < 0 ? SCE_ERROR_ERRNO_EBADF : (uint32_t)n);
 }

@@ -68,7 +68,8 @@ Stats g_stats;
 // coordenadas normalizadas e não mudam.
 // Sem VITART_VK_SCALE, a escala acompanha o monitor: a altura nativa do GoW (408) vezes a escala cobre a
 // altura da tela (1080p -> 3, 1440p -> 4), e a apresentação reduz com filtro (supersampling).
-uint32_t render_scale() {
+uint32_t g_scale_override = 0; // escolhida no menu do jogo (set_render_scale)
+uint32_t scale_auto() {
     static const uint32_t s = [] {
         const char *e = getenv("VITART_VK_SCALE");
         int v = e ? std::atoi(e) : 0;
@@ -81,6 +82,7 @@ uint32_t render_scale() {
     }();
     return s;
 }
+uint32_t scale_now() { return g_scale_override ? g_scale_override : scale_auto(); }
 float g_aniso = 1.f;                         // anisotropia máxima dos samplers (1 = desligada)
 VkPipelineCache g_pcache = VK_NULL_HANDLE;   // persistido em vk_pipeline_cache.bin
 bool g_pcache_dirty = false;
@@ -437,7 +439,7 @@ bool get_target(uint32_t addr, uint32_t w, uint32_t h, Target *&out) {
         return true;
     }
     Target t;
-    w *= render_scale(), h *= render_scale();
+    w *= scale_now(), h *= scale_now();
     if (!make_image(t.color, w, h, kColor,
                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
         return false;
@@ -1459,7 +1461,7 @@ bool draw(const Draw &d) {
     // Sem compensar, toda passada de tela cheia lê entre texels: o quadro borra e a máscara de névoa
     // vaza 1 px além dos personagens (o contorno escuro). Medido no replay: +0,5 deixa nítido e sem halo.
     static const float halfpix = getenv("VITART_VK_HALFPIX") ? (float)std::atof(getenv("VITART_VK_HALFPIX")) : 0.5f;
-    const float rs = (float)render_scale();
+    const float rs = (float)scale_now();
     vp.x = (vp.x + halfpix) * rs, vp.y = (vp.y + halfpix) * rs, vp.width *= rs, vp.height *= rs;
     vp.minDepth = vp.minDepth < 0 ? 0 : (vp.minDepth > 1 ? 1 : vp.minDepth);
     vp.maxDepth = vp.maxDepth < 0 ? 0 : (vp.maxDepth > 1 ? 1 : vp.maxDepth);
@@ -1529,6 +1531,69 @@ bool read_target(uint32_t addr, std::vector<uint8_t> &rgba, uint32_t &w, uint32_
     std::memcpy(rgba.data(), p, rgba.size());
     vkUnmapMemory(g_dev, b.mem);
     destroy(b);
+    return true;
+}
+
+// Troca a resolução interna com o jogo rodando: cada alvo é recriado na escala nova e recebe a imagem
+// atual reduzida/ampliada com filtro (a tela de pausa não pisca); a profundidade volta limpa, as cópias
+// amostráveis e os conjuntos de textura que apontavam para as imagens velhas são refeitos sob demanda.
+uint32_t render_scale() { return scale_now(); }
+uint32_t auto_render_scale() { return scale_auto(); }
+bool set_render_scale(uint32_t s) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    s = s < 1 ? 1 : s > 8 ? 8 : s;
+    const uint32_t cur = scale_now();
+    if (s == cur) return true;
+    if (!g_dev || g_targets.empty()) {
+        g_scale_override = s;
+        return true;
+    }
+    if (!frame_flush(true)) return false;
+    vkDeviceWaitIdle(g_dev);
+    if (!begin_cmd()) return false;
+    std::vector<Image> old;
+    std::vector<VkFramebuffer> old_fb;
+    for (auto &kv : g_targets) {
+        Target &t = kv.second;
+        const uint32_t w = t.color.w / cur * s, h = t.color.h / cur * s;
+        Target n;
+        if (!make_image(n.color, w, h, kColor,
+                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
+            !make_image(n.depth, w, h, kDepth,
+                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT))
+            return false;
+        VkImageView views[2] = {n.color.view, n.depth.att_view};
+        VkFramebufferCreateInfo fi{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        fi.renderPass = g_rp;
+        fi.attachmentCount = 2;
+        fi.pAttachments = views;
+        fi.width = w, fi.height = h, fi.layers = 1;
+        VKC(vkCreateFramebuffer(g_dev, &fi, nullptr, &n.fb));
+        barrier(t.color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        barrier(n.color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageBlit b{};
+        b.srcSubresource = b.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        b.srcOffsets[1] = {(int32_t)t.color.w, (int32_t)t.color.h, 1};
+        b.dstOffsets[1] = {(int32_t)w, (int32_t)h, 1};
+        vkCmdBlitImage(g_cmd, t.color.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, n.color.img,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
+        barrier(n.depth, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkClearDepthStencilValue dc{1.0f, 0};
+        VkImageSubresourceRange dr{kDepthAspects, 0, 1, 0, 1};
+        vkCmdClearDepthStencilImage(g_cmd, n.depth.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &dc, 1, &dr);
+        barrier(n.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        barrier(n.depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        n.cver = t.cver + 1, n.dver = t.dver + 1;
+        old.push_back(t.color), old.push_back(t.depth), old_fb.push_back(t.fb);
+        t = n;
+    }
+    if (!submit_wait()) return false;
+    for (auto &im : old) destroy(im);
+    for (auto fb : old_fb) vkDestroyFramebuffer(g_dev, fb, nullptr);
+    for (auto &kv : g_snaps) destroy(kv.second.im);
+    g_snaps.clear();
+    g_tex_sets_stale = true;
+    g_scale_override = s;
     return true;
 }
 
