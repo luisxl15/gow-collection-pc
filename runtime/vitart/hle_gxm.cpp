@@ -241,6 +241,7 @@ struct TexEntry {
     uint64_t hash = 0;
     uint32_t checked = UINT32_MAX;
     uint32_t rw = 0, rh = 0; // tamanho do PNG do pack de texturas (0 = textura original)
+    uint64_t tp_key = 0;      // PNG do pack sendo decodificado em segundo plano
 };
 
 // Pack de texturas (vitart-data/texpack/*/index.tsv, montado por tools/texpack_build.py a partir de um
@@ -300,37 +301,76 @@ static std::unordered_map<uint64_t, bool> g_texpack_rejected; // chave -> PNG n�
 
 // PNG do pack para esta textura, se houver e se for a mesma imagem (o Vita redesenhou algumas, como o
 // HUD; o PS2 com o mesmo nome tinha outra arte e o PNG não encaixa). orig: a textura do Vita decodificada.
-static std::shared_ptr<std::vector<uint8_t>> texpack_find(const gxmtex::Info &info, size_t base_bytes,
-                                                          const std::vector<uint8_t> &orig, uint32_t &w, uint32_t &h) {
+// Decodificação dos PNGs em segundo plano (até 3 ao mesmo tempo): no primeiro uso aparece a textura
+// original e o HD entra quando fica pronto, sem engasgar a renderização ao entrar numa área nova.
+struct TexpackJob {
+    std::atomic<bool> done{false};
+    std::shared_ptr<std::vector<uint8_t>> px;
+    uint32_t w = 0, h = 0;
+};
+static std::unordered_map<uint64_t, std::shared_ptr<TexpackJob>> g_tp_jobs;
+static std::mutex g_tp_sem_mutex;
+static std::condition_variable g_tp_sem_cv;
+static int g_tp_running = 0;
+static uint64_t texpack_key(const gxmtex::Info &info, size_t base_bytes) {
     texpack_load();
-    if (g_texpack.empty() || !base_bytes) return nullptr;
+    if (g_texpack.empty() || !base_bytes) return 0;
     const uint32_t wh[2] = {info.width, info.height};
     const uint64_t key = fnv64(ptr<uint8_t>(info.data), std::min<size_t>(4096, base_bytes),
                                fnv64(reinterpret_cast<const uint8_t *>(wh), 8));
-    auto it = g_texpack.find(key);
-    if (it == g_texpack.end() || g_texpack_rejected.count(key) || orig.empty()) return nullptr;
-    int x = 0, y = 0, c = 0;
-    stbi_uc *img = stbi_load(it->second.c_str(), &x, &y, &c, 4);
-    if (!img) {
-        logf("vitart: pack de texturas: não abriu %s", it->second.c_str());
-        return nullptr;
-    }
-    auto px = std::make_shared<std::vector<uint8_t>>(img, img + (size_t)x * y * 4);
-    stbi_image_free(img);
-    const float corr = texsig_corr(texsig(orig.data(), info.width, info.height), texsig(px->data(), (uint32_t)x, (uint32_t)y));
-    static int rejected = 0, accepted = 0;
+    return g_texpack.count(key) && !g_texpack_rejected.count(key) ? key : 0;
+}
+static void texpack_start(uint64_t key) {
+    if (g_tp_jobs.count(key)) return;
+    auto job = std::make_shared<TexpackJob>();
+    g_tp_jobs[key] = job;
+    const std::string path = g_texpack[key];
+    std::thread([job, path] {
+        {
+            std::unique_lock<std::mutex> l(g_tp_sem_mutex);
+            g_tp_sem_cv.wait(l, [] { return g_tp_running < 3; });
+            g_tp_running++;
+        }
+        int x = 0, y = 0, c = 0;
+        if (stbi_uc *img = stbi_load(path.c_str(), &x, &y, &c, 4)) {
+            job->px = std::make_shared<std::vector<uint8_t>>(img, img + (size_t)x * y * 4);
+            job->w = (uint32_t)x, job->h = (uint32_t)y;
+            stbi_image_free(img);
+        } else {
+            logf("vitart: pack de texturas: não abriu %s", path.c_str());
+        }
+        {
+            std::lock_guard<std::mutex> l(g_tp_sem_mutex);
+            g_tp_running--;
+        }
+        g_tp_sem_cv.notify_one();
+        job->done = true;
+    }).detach();
+}
+// PNG pronto para a chave: valida pelo conteúdo contra a textura original e devolve o HD (ou nulo).
+static std::shared_ptr<std::vector<uint8_t>> texpack_take(uint64_t key, const gxmtex::Info &info,
+                                                          const std::vector<uint8_t> &orig, uint32_t &w, uint32_t &h,
+                                                          bool &finished) {
+    finished = false;
+    auto it = g_tp_jobs.find(key);
+    if (it == g_tp_jobs.end()) return finished = true, nullptr;
+    if (!it->second->done) return nullptr;
+    auto job = it->second;
+    g_tp_jobs.erase(it);
+    finished = true;
+    if (!job->px || orig.empty()) return nullptr;
+    const float corr = texsig_corr(texsig(orig.data(), info.width, info.height), texsig(job->px->data(), job->w, job->h));
+    static int rejected = 0, logged = 0;
     if (corr < 0.7f) {
         g_texpack_rejected[key] = true;
         if (rejected++ < 8) logf("vitart: pack de texturas: %s recusado (não parece a textura do Vita, correlação %.2f)",
-                                 it->second.c_str(), corr);
+                                 g_texpack[key].c_str(), corr);
         return nullptr;
     }
-    accepted++;
-    w = (uint32_t)x, h = (uint32_t)y;
-    g_texpack_bytes += px->size();
-    static int logged = 0;
-    if (logged++ < 5) logf("vitart: textura trocada pelo pack (%ux%u -> %dx%d)", info.width, info.height, x, y);
-    return px;
+    w = job->w, h = job->h;
+    g_texpack_bytes += job->px->size();
+    if (logged++ < 5) logf("vitart: textura trocada pelo pack (%ux%u -> %ux%u)", info.width, info.height, w, h);
+    return job->px;
 }
 static std::map<std::array<uint32_t, 4>, TexEntry> g_texcache;
 static std::atomic<uint32_t> g_present_frame{0};
@@ -608,12 +648,11 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
                 if (n) h = content_hash(ptr<uint8_t>(info.data), n, h);
                 if (info.base == 0x95000000u) h = content_hash(ptr<uint8_t>(info.palette), 1024, h);
                 if (!e.px || h != e.hash) {
-                    uint32_t rw = 0, rh = 0;
                     auto px = std::make_shared<std::vector<uint8_t>>();
                     const bool ok = n && gxmtex::decode(ptr<uint8_t>(0), info, *px);
+                    e.rw = e.rh = 0, e.tp_key = 0;
                     if (ok)
-                        if (auto hd = texpack_find(info, n, *px, rw, rh)) px = hd; // trocada pelo PNG em HD
-                    e.rw = rw, e.rh = rh;
+                        if (const uint64_t k = texpack_key(info, n)) texpack_start(k), e.tp_key = k; // HD em segundo plano
                     if (!ok) {
                         px.reset();
                         if (census()) {
@@ -626,10 +665,16 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
                     e.hash = h;
                 }
             }
+            if (e.tp_key && e.px) {
+                uint32_t rw = 0, rh = 0;
+                bool finished = false;
+                if (auto hd = texpack_take(e.tp_key, info, *e.px, rw, rh, finished)) e.px = hd, e.rw = rw, e.rh = rh;
+                if (finished) e.tp_key = 0;
+            }
             if (!e.px) continue;
             keep.push_back(e.px);
             t.rgba = e.px->data();
-            t.key = e.hash | 1;
+            t.key = (e.rw ? e.hash ^ 0x9E3779B97F4A7C15ull : e.hash) | 1; // HD do pack é outra textura na GPU
             if (e.rw) {
                 // HD do pack: tamanho do PNG e cadeia de mipmaps completa (sem cintilar de longe).
                 t.width = e.rw, t.height = e.rh;
