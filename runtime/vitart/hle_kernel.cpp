@@ -449,7 +449,8 @@ VT_HLE(sceKernelGetMemBlockInfoByAddr) {
         }
     ret(ctx, 0x80020024u);
 }
-VT_HLE(sceKernelIsPSVitaTV) { ret(ctx, 0); }
+bool handheld_mode();
+VT_HLE(sceKernelIsPSVitaTV) { ret(ctx, handheld_mode() ? 0 : 1); }
 
 // ====================================================================== tempo
 VT_HLE(sceKernelGetProcessTimeWide) { ret64(ctx, now_us()); }

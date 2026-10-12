@@ -34,8 +34,11 @@ namespace hostin {
 namespace {
 
 // Bits do SceCtrlData.
-constexpr uint32_t SELECT = 0x1, START = 0x8, UP = 0x10, RIGHT = 0x20, DOWN = 0x40, LEFT = 0x80, LTRIG = 0x100,
-                   RTRIG = 0x200, TRIANGLE = 0x1000, CIRCLE = 0x2000, CROSS = 0x4000, SQUARE = 0x8000;
+// Bits do SceCtrlData no modo PS TV (controle com L2/R2): L2/R2 = 0x100/0x200 (os L/R do portátil),
+// L1/R1 = 0x400/0x800, L3/R3 = 0x2/0x4. No modo portátil (VITART_HANDHELD=1) L1 e L2 viram 0x100.
+constexpr uint32_t SELECT = 0x1, L3 = 0x2, R3 = 0x4, START = 0x8, UP = 0x10, RIGHT = 0x20, DOWN = 0x40, LEFT = 0x80,
+                   L2 = 0x100, R2 = 0x200, L1 = 0x400, R1 = 0x800, TRIANGLE = 0x1000, CIRCLE = 0x2000, CROSS = 0x4000,
+                   SQUARE = 0x8000;
 
 // ---------------------------------------------------------------- XInput
 struct XInputGamepad {
@@ -167,8 +170,12 @@ void sony_state(const std::vector<uint8_t> &r, bool dualsense, State &s) {
     if (hat_btn & 0x20) s.buttons |= CROSS;
     if (hat_btn & 0x40) s.buttons |= CIRCLE;
     if (hat_btn & 0x80) s.buttons |= TRIANGLE;
-    if (misc & 0x05) s.buttons |= LTRIG; // L1 ou L2
-    if (misc & 0x0A) s.buttons |= RTRIG; // R1 ou R2
+    if (misc & 0x01) s.buttons |= L1;
+    if (misc & 0x02) s.buttons |= R1;
+    if (misc & 0x04) s.buttons |= L2;
+    if (misc & 0x08) s.buttons |= R2;
+    if (misc & 0x40) s.buttons |= L3;
+    if (misc & 0x80) s.buttons |= R3;
     if (misc & 0x10) s.buttons |= SELECT; // share / create
     if (misc & 0x20) s.buttons |= START;  // options
 }
@@ -206,8 +213,12 @@ State poll() {
             if (w & 0x0008) s.buttons |= RIGHT;
             if (w & 0x0010) s.buttons |= START;
             if (w & 0x0020) s.buttons |= SELECT;
-            if ((w & 0x0100) || g.bLeftTrigger > 64) s.buttons |= LTRIG;
-            if ((w & 0x0200) || g.bRightTrigger > 64) s.buttons |= RTRIG;
+            if (w & 0x0040) s.buttons |= L3;
+            if (w & 0x0080) s.buttons |= R3;
+            if (w & 0x0100) s.buttons |= L1; // LB
+            if (w & 0x0200) s.buttons |= R1; // RB
+            if (g.bLeftTrigger > 64) s.buttons |= L2;
+            if (g.bRightTrigger > 64) s.buttons |= R2;
             if (w & 0x1000) s.buttons |= CROSS;    // A
             if (w & 0x2000) s.buttons |= CIRCLE;   // B
             if (w & 0x4000) s.buttons |= SQUARE;   // X

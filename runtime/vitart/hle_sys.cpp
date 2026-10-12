@@ -232,13 +232,19 @@ VT_HLE(sceAudioOutOutput) {
 // Controle pelo teclado do host: setas = direcional, Z/X/A/S = cruz/círculo/quadrado/triângulo,
 // Q/W = L/R, Enter = start, Backspace = select. Controles (XInput, DualShock 4, DualSense) em
 // host_input.cpp: botões somados ao teclado, analógicos do controle.
+// Modo PS TV por padrão (o jogo tem caminho próprio, wad/_VitaTV, com L2/R2/L3/R3 no controle);
+// VITART_HANDHELD=1 volta ao portátil, em que L2/R2 eram gestos no painel traseiro.
+bool handheld_mode() {
+    static const bool h = getenv("VITART_HANDHELD") && *getenv("VITART_HANDHELD") == '1';
+    return h;
+}
 static uint32_t keyboard_buttons() {
     uint32_t b = 0;
 #ifdef _WIN32
     struct { int vk; uint32_t bit; } map[] = {
         { VK_BACK, 0x1 }, { VK_RETURN, 0x8 }, { VK_UP, 0x10 }, { VK_RIGHT, 0x20 }, { VK_DOWN, 0x40 },
-        { VK_LEFT, 0x80 }, { 'Q', 0x100 }, { 'W', 0x200 }, { 'S', 0x1000 }, { 'X', 0x2000 },
-        { 'Z', 0x4000 }, { 'A', 0x8000 },
+        { VK_LEFT, 0x80 }, { 'Q', 0x400 }, { 'W', 0x800 }, { 'E', 0x100 }, { 'R', 0x200 }, { 'C', 0x2 },
+        { 'V', 0x4 }, { 'S', 0x1000 }, { 'X', 0x2000 }, { 'Z', 0x4000 }, { 'A', 0x8000 },
     };
     for (auto &m : map)
         if (GetAsyncKeyState(m.vk) & 0x8000) b |= m.bit;
@@ -278,7 +284,12 @@ static void ctrl_read(arc_ctx *ctx) {
     const uint32_t data = arg(ctx, 1);
     const int count = (int)arg(ctx, 2) > 0 ? (int)arg(ctx, 2) : 1;
     const hostin::State pad = hostin::poll(); // XInput, DualShock 4 e DualSense
-    const uint32_t buttons = keyboard_buttons() | scripted_buttons() | pad.buttons;
+    uint32_t buttons = keyboard_buttons() | scripted_buttons() | pad.buttons;
+    if (handheld_mode()) { // portátil: sem L2/R2/L3/R3; L1/R1 são os bits 0x100/0x200
+        if (buttons & 0x400) buttons |= 0x100;
+        if (buttons & 0x800) buttons |= 0x200;
+        buttons &= ~0xC06u;
+    }
     for (int i = 0; i < count; ++i) {
         const uint32_t d = data + 0x20u * i;
         std::memset(ptr<void>(d), 0, 0x20);
