@@ -3,6 +3,7 @@
 // overlays, NP, troféus, AppUtil e diálogos comuns. Assinaturas e layouts das estruturas: vita-headers.
 #include "vitart.h"
 #include "host_input.h"
+#include "host_audio.h"
 #include "gxm_vk.h"
 
 #include <chrono>
@@ -35,117 +36,27 @@ static uint32_t zalloc(uint32_t size, const char *what) {
 }
 
 // =================================================================== SceAudio
-// Saída cadenciada: sceAudioOutOutput bloqueia até o tempo do bloco anterior passar, como o
-// hardware; o jogo usa isso como relógio da thread de áudio.
-// Saída no host: cada porta vira um fluxo waveOut estéreo de 16 bits (o Windows mistura os fluxos).
-// O relógio continua sendo o da cadência acima; a fila do waveOut só amortece a variação. Começa em
-// pausa e só toca depois de kPrebuffer blocos, para não faltar amostra logo no início.
-struct HostOut {
-    // Fila de ~64 ms (6 blocos de 512 amostras): com 3 (~32 ms) qualquer atraso da thread de áudio
-    // esvaziava a fila e o som ficava picotado (vídeo do usuário: buracos de 17 ms a cada 50 ms).
-    static constexpr int kBufs = 16, kPrebuffer = 4, kTarget = 6;
-    HWAVEOUT wo = nullptr;
-    WAVEHDR hdr[kBufs]{};
-    std::vector<int16_t> data[kBufs];
-    int next = 0, queued = 0;
-    uint64_t dropped = 0, written = 0, underruns = 0; // underrun: a placa esvaziou a fila (estalo)
-    bool started = false;
-    ~HostOut() {
-        if (!wo) return;
-        waveOutReset(wo);
-        for (auto &h : hdr)
-            if (h.dwFlags & WHDR_PREPARED) waveOutUnprepareHeader(wo, &h, sizeof h);
-        waveOutClose(wo);
-    }
-};
+// Saída pelo motor WASAPI de host_audio.cpp (um fluxo, uma fila por porta). A cadência do jogo vem da
+// placa: sceAudioOutOutput entrega o bloco e espera enquanto a fila da porta passar de kAhead quadros
+// além do próprio bloco (~21 ms + o bloco; com o buffer de 20 ms do WASAPI, ~50 ms do jogo ao alto-falante).
+// Sem placa (VITART_MUTE ou falha do WASAPI), cadência pelo relógio do PC, como o hardware.
+constexpr uint32_t kAhead = 1024;
 struct AudioPort {
     uint32_t len = 256, freq = 48000, mode = 1;
+    int host = 0; // porta no motor de som (0 = sem placa)
     uint64_t outputs = 0;
     int peak = 0; // maior amplitude enviada (diagnóstico)
     int vol[2] = { 32768, 32768 };
     std::chrono::steady_clock::time_point next{};
-    std::shared_ptr<HostOut> host;
 };
-static bool audio_muted() {
-    static const bool m = getenv("VITART_MUTE") != nullptr;
-    return m;
-}
-static void host_open(AudioPort &p) {
-    if (audio_muted()) return;
-    auto h = std::make_shared<HostOut>();
-    WAVEFORMATEX f{};
-    f.wFormatTag = WAVE_FORMAT_PCM;
-    f.nChannels = 2;
-    f.nSamplesPerSec = p.freq;
-    f.wBitsPerSample = 16;
-    f.nBlockAlign = 4;
-    f.nAvgBytesPerSec = p.freq * 4;
-    if (waveOutOpen(&h->wo, WAVE_MAPPER, &f, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
-        h->wo = nullptr;
-        logf("vitart: waveOut indisponível; porta de áudio sem som no host");
-        return;
-    }
-    waveOutPause(h->wo);
-    p.host = h;
-}
-static std::atomic<bool> g_silenced{false};
-static int host_pending(const AudioPort &p);
-static void host_submit(AudioPort &p, const int16_t *src) {
-    if (g_silenced) return;
-    HostOut *h = p.host.get();
-    if (!h || !h->wo) return;
-    if (h->started && host_pending(p) == 0) h->underruns++;
-    WAVEHDR &hd = h->hdr[h->next];
-    if (hd.dwFlags & WHDR_PREPARED) {
-        if (!(hd.dwFlags & WHDR_DONE)) { // fila cheia: descarta este bloco
-            h->dropped++;
-            return;
-        }
-        waveOutUnprepareHeader(h->wo, &hd, sizeof hd);
-    }
-    std::vector<int16_t> &d = h->data[h->next];
-    d.resize((size_t)p.len * 2);
-    const bool stereo = p.mode != 0;
-    for (uint32_t i = 0; i < p.len; i++) {
-        const int l = stereo ? src[2 * i] : src[i], r = stereo ? src[2 * i + 1] : src[i];
-        p.peak = (std::max)(p.peak, (std::max)(std::abs(l), std::abs(r)));
-        d[2 * i] = (int16_t)((l * p.vol[0]) >> 15);
-        d[2 * i + 1] = (int16_t)((r * p.vol[1]) >> 15);
-    }
-    static FILE *dump = getenv("VITART_AUDIO_DUMP") ? fopen(getenv("VITART_AUDIO_DUMP"), "wb") : nullptr;
-    if (dump) fwrite(d.data(), 2, d.size(), dump), fflush(dump); // PCM 16 bits estéreo do que vai à placa (diagnóstico)
-    hd = {};
-    hd.lpData = reinterpret_cast<LPSTR>(d.data());
-    hd.dwBufferLength = (DWORD)(d.size() * 2);
-    waveOutPrepareHeader(h->wo, &hd, sizeof hd);
-    if (waveOutWrite(h->wo, &hd, sizeof hd) == MMSYSERR_NOERROR) h->written++;
-    h->next = (h->next + 1) % HostOut::kBufs;
-    if (!h->started && ++h->queued >= HostOut::kPrebuffer) {
-        waveOutRestart(h->wo);
-        h->started = true;
-    }
-}
 static std::mutex g_audio_mutex;
-// Blocos ainda na fila do waveOut (enviados e não tocados).
-static int host_pending(const AudioPort &p) {
-    const HostOut *h = p.host.get();
-    if (!h || !h->wo) return -1;
-    int n = 0;
-    for (const WAVEHDR &hd : h->hdr)
-        if ((hd.dwFlags & WHDR_PREPARED) && !(hd.dwFlags & WHDR_DONE)) n++;
-    return n;
-}
-static std::map<int, AudioPort> g_ports;
-void audio_silence() {
-    g_silenced = true;
-    std::lock_guard<std::mutex> g(g_audio_mutex);
-    for (auto &[id, p] : g_ports)
-        if (p.host && p.host->wo) waveOutReset(p.host->wo);
-}
 static int g_next_port = 0;
+static std::map<int, AudioPort> g_ports;
+void audio_silence() { hostaudio::silence(); }
 
 VT_HLE(sceAudioOutOpenPort) {
     // (type, len, freq, mode)
+    const bool dev = hostaudio::start();
     std::lock_guard<std::mutex> g(g_audio_mutex);
     const int id = g_next_port++;
     AudioPort &p = g_ports[id];
@@ -153,7 +64,7 @@ VT_HLE(sceAudioOutOpenPort) {
     p.freq = arg(ctx, 2) ? arg(ctx, 2) : 48000;
     p.mode = arg(ctx, 3);
     p.next = std::chrono::steady_clock::now();
-    host_open(p);
+    if (dev) p.host = hostaudio::open_port(p.freq);
     logf("vitart: porta de áudio %d: tipo %u, %u amostras, %u Hz, %s (lr 0x%08x)", id, arg(ctx, 0), p.len, p.freq,
          p.mode ? "estéreo" : "mono", ctx->r[14]);
     ret(ctx, (uint32_t)id);
@@ -161,10 +72,12 @@ VT_HLE(sceAudioOutOpenPort) {
 VT_HLE(sceAudioOutReleasePort) {
     std::lock_guard<std::mutex> g(g_audio_mutex);
     auto it = g_ports.find((int)arg(ctx, 0));
-    if (getenv("VITART_AUDIO_LOG") && it != g_ports.end())
+    if (it == g_ports.end()) return ret(ctx, 0x80260105u);
+    if (getenv("VITART_AUDIO_LOG"))
         logf("vitart: porta de áudio %d liberada após %llu saídas, pico %d (lr 0x%08x)", (int)arg(ctx, 0),
              (unsigned long long)it->second.outputs, it->second.peak, ctx->r[14]);
-    g_ports.erase((int)arg(ctx, 0));
+    if (it->second.host) hostaudio::close_port(it->second.host);
+    g_ports.erase(it);
     ret(ctx, SCE_OK);
 }
 VT_HLE(sceAudioOutSetVolume) {
@@ -180,16 +93,12 @@ VT_HLE(sceAudioOutSetVolume) {
         }
     ret(ctx, SCE_OK);
 }
-// Amostras ainda não tocadas: o que falta do último bloco enviado, pelo mesmo relógio que cadencia
-// sceAudioOutOutput. O som do Bink (RADSS) lê isto como relógio; 0 fixo o fazia reiniciar a porta em
-// laço e o vídeo não andava.
 VT_HLE(sceAudioOutGetRestSample) {
     std::lock_guard<std::mutex> g(g_audio_mutex);
     auto it = g_ports.find((int)arg(ctx, 0));
     if (it == g_ports.end()) return ret(ctx, 0x80260105u);
     const AudioPort &p = it->second;
-    const int pend = host_pending(p);
-    if (pend >= 0 && p.host->started) return ret(ctx, (uint32_t)std::min<int>(pend, 1) * p.len);
+    if (p.host) return ret(ctx, std::min<uint32_t>(hostaudio::queued(p.host), p.len));
     const auto now = std::chrono::steady_clock::now();
     if (p.next <= now) return ret(ctx, 0);
     const uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(p.next - now).count();
@@ -197,25 +106,11 @@ VT_HLE(sceAudioOutGetRestSample) {
     ret(ctx, (uint32_t)(rest < p.len ? rest : p.len));
 }
 VT_HLE(sceAudioOutOutput) {
-    // Com saída no host, a placa de som é o relógio: espera enquanto houver kTarget blocos na fila
-    // (~64 ms a 512 amostras). Sem placa (VITART_MUTE ou waveOut indisponível), cadência pelo relógio do PC.
     // A thread que alimenta o áudio (a mesma do update do NGS) roda com prioridade alta.
     static thread_local bool raised = false;
     if (!raised) raised = true, SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-    for (int spins = 0; spins < 200; spins++) {
-        int pend;
-        bool started;
-        {
-            std::lock_guard<std::mutex> g(g_audio_mutex);
-            auto it = g_ports.find((int)arg(ctx, 0));
-            if (it == g_ports.end()) break;
-            pend = host_pending(it->second);
-            started = it->second.host && it->second.host->started;
-        }
-        if (pend < 0 || !started || pend < HostOut::kTarget) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    bool device_clock = false;
+    int host = 0;
+    uint32_t len = 0;
     std::chrono::steady_clock::time_point wake;
     {
         std::lock_guard<std::mutex> g(g_audio_mutex);
@@ -223,26 +118,33 @@ VT_HLE(sceAudioOutOutput) {
         if (it == g_ports.end()) return ret(ctx, 0x80260105u); // SCE_AUDIO_OUT_ERROR_INVALID_PORT
         AudioPort &p = it->second;
         p.outputs++;
+        host = p.host, len = p.len;
         const auto now = std::chrono::steady_clock::now();
         if (p.next < now - std::chrono::milliseconds(100)) p.next = now; // após uma pausa longa
         wake = p.next;
         p.next += std::chrono::microseconds((uint64_t)p.len * 1000000ull / p.freq);
-        if (const uint32_t buf = arg(ctx, 1)) host_submit(p, ptr<int16_t>(buf));
-        device_clock = p.host && p.host->started;
+        if (const uint32_t buf = arg(ctx, 1)) {
+            const int16_t *src = ptr<int16_t>(buf);
+            const bool stereo = p.mode != 0;
+            for (uint32_t i = 0; i < p.len * (stereo ? 2u : 1u); i++) p.peak = (std::max)(p.peak, std::abs((int)src[i]));
+            if (host) hostaudio::write(host, src, p.len, stereo, p.vol[0], p.vol[1]);
+        }
         static const bool alog = getenv("VITART_AUDIO_LOG") != nullptr;
         if (alog && p.outputs % 500 == 0) {
-            MMTIME mt{};
-            mt.wType = TIME_SAMPLES;
-            HostOut *h = p.host.get();
-            if (h && h->wo) waveOutGetPosition(h->wo, &mt, sizeof mt);
-            logf("vitart: porta de áudio %d: %llu saídas, pico %d, volume %d/%d, waveOut %s: %llu escritos, %llu descartados, %llu underruns, posição %u amostras",
-                 (int)arg(ctx, 0), (unsigned long long)p.outputs, p.peak, p.vol[0], p.vol[1], h && h->wo ? "aberto" : "FECHADO",
-                 h ? (unsigned long long)h->written : 0ull, h ? (unsigned long long)h->dropped : 0ull,
-                 h ? (unsigned long long)h->underruns : 0ull, (unsigned)mt.u.sample);
+            const hostaudio::Stats st = hostaudio::stats();
+            logf("vitart: porta de áudio %d: %llu saídas, pico %d, fila %u quadros; motor: %llu quadros, %llu faltas de dados, buffer %u ms",
+                 (int)arg(ctx, 0), (unsigned long long)p.outputs, p.peak, host ? hostaudio::queued(host) : 0,
+                 (unsigned long long)st.mixed, (unsigned long long)st.underruns, st.latency_ms);
             p.peak = 0;
         }
     }
-    if (!device_clock) std::this_thread::sleep_until(wake);
+    if (!host) {
+        std::this_thread::sleep_until(wake);
+        return ret(ctx, SCE_OK);
+    }
+    // Cadência pela placa: espera a fila da porta baixar (até ~200 ms, para não travar sem placa).
+    for (int spins = 0; spins < 200 && hostaudio::queued(host) > len + kAhead; spins++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     ret(ctx, SCE_OK);
 }
 
