@@ -297,8 +297,17 @@ static std::deque<uint32_t> g_lru;
 static std::atomic<bool> g_user{true}; // opção "PS2 Audio" do menu de pausa (troca no meio da música)
 static bool available() {
     static const bool ok = [] {
-        // ISO do iniciador (VITART_PS2_AUDIO) ou a lembrada em vitart_options.ini (ps2_iso=)
-        std::string iso = getenv("VITART_PS2_AUDIO") ? getenv("VITART_PS2_AUDIO") : "";
+        // Sons extraídos (tools/ps2_audio_extract.py): <dados>/ps2audio.bin + ps2audio_files.idx, sem ISO.
+        // Sem eles: a ISO do iniciador (VITART_PS2_AUDIO) ou a lembrada em vitart_options.ini (ps2_iso=).
+        std::string iso, idx = data_path() + "/ps2audio.idx";
+        if (FILE *b = fopen((data_path() + "/ps2audio.bin").c_str(), "rb")) {
+            fclose(b);
+            if (FILE *x = fopen((data_path() + "/ps2audio_files.idx").c_str(), "rb")) {
+                fclose(x);
+                iso = data_path() + "/ps2audio.bin", idx = data_path() + "/ps2audio_files.idx";
+            }
+        }
+        if (iso.empty() && getenv("VITART_PS2_AUDIO")) iso = getenv("VITART_PS2_AUDIO");
         if (iso.empty())
             if (FILE *ini = fopen((data_path() + "/vitart_options.ini").c_str(), "r")) {
                 char line[1024];
@@ -311,7 +320,7 @@ static bool available() {
             }
         if (iso.empty()) return false;
         g_iso = fopen(iso.c_str(), "rb");
-        FILE *f = fopen((data_path() + "/ps2audio.idx").c_str(), "rb");
+        FILE *f = fopen(idx.c_str(), "rb");
         uint32_t h[3] = {};
         if (!g_iso || !f || fread(h, 4, 3, f) != 3 || h[0] != 0x32535047u) {
             logf("vitart: áudio do PS2: ISO ou índice (ps2audio.idx) indisponível");
@@ -323,7 +332,7 @@ static bool available() {
         fread(g_files.data(), sizeof(File), g_files.size(), f);
         fread(g_keys.data(), sizeof(Key), g_keys.size(), f);
         fclose(f);
-        logf("vitart: áudio do PS2 ligado: %zu arquivos, %zu superquadros", g_files.size(), g_keys.size());
+        logf("vitart: áudio do PS2 ligado: %zu arquivos, %zu superquadros (de %s)", g_files.size(), g_keys.size(), iso.c_str());
         return true;
     }();
     return ok;

@@ -70,22 +70,77 @@ def vita_key(gxt, ti, poff):
     return k
 
 
+def _unit(x):
+    x = x - x.mean()
+    n = float(np.linalg.norm(x))
+    return (x / n if n > 1e-3 else x * 0), n
+
+
 def signature(rgba):
-    """Assinatura 16x16: luminância pré-multiplicada pelo alfa e alfa (512 valores) + cor média."""
+    """Assinatura 16x16: luminância e alfa normalizados CADA UM (média 0, norma 1), cor média e o
+    contraste da luminância. (Juntos num vetor só, o alfa quase sempre 255 dominava e tudo parecia igual.)"""
     im = Image.fromarray(rgba, 'RGBA').resize((16, 16), Image.BOX)
     a = np.asarray(im, dtype=np.float32)
-    al = a[..., 3] / 255.0
-    lum = (0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2]) * al
-    v = np.concatenate([lum.ravel(), a[..., 3].ravel()])
-    v = v - v.mean()
-    nrm = np.linalg.norm(v)
-    col = (a[..., :3] * al[..., None]).reshape(-1, 3).mean(0)
-    return (v / nrm if nrm > 1e-3 else v), col, nrm
+    lum = (0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2]).ravel()
+    vl, nl = _unit(lum)
+    va, na = _unit(a[..., 3].ravel())
+    col = a[..., :3].reshape(-1, 3).mean(0)
+    return (vl, va, na), col, nl
+
+
+def _detail_and_rgb(rgba):
+    """32x32: os três canais (pré-multiplicados pelo alfa) e a energia de detalhe (imagem - borrada)."""
+    im = Image.fromarray(rgba, 'RGBA').resize((32, 32), Image.BOX)
+    a = np.asarray(im, dtype=np.float32)
+    rgb = a[..., :3] * (a[..., 3:] / 255.0)
+    lum = rgb @ np.array([0.299, 0.587, 0.114], np.float32)
+    blur = np.asarray(Image.fromarray(lum.astype(np.uint8)).resize((8, 8), Image.BOX).resize((32, 32), Image.BILINEAR),
+                      dtype=np.float32)
+    return rgb, float(np.abs(lum - blur).mean())
+
+
+def verify(vita_rgba, png):
+    """Confirma o candidato: cada canal de cor correlaciona (variantes de cor ficam de fora) e as duas
+    imagens têm detalhe parecido e de verdade (efeitos borrados -- brilhos, fumaça -- parecem todos iguais
+    na assinatura pequena)."""
+    va, dv = _detail_and_rgb(vita_rgba)
+    pa, dp = _detail_and_rgb(np.asarray(png.convert('RGBA')))
+    if dv < 7.0 or dp < 7.0 or not (0.7 <= dp / dv <= 1.43):  # medido em pares conferidos a olho
+        return 0.0
+    # saturação parecida: a versão petrificada (cinza) de um inimigo tem o mesmo desenho da colorida
+    def sat(rgb):
+        mx, mn = rgb.max(-1), rgb.min(-1)
+        return float(((mx - mn) / np.maximum(mx, 1.0)).mean())
+    if abs(sat(va) - sat(pa)) > 0.12:
+        return 0.0
+    cs = []
+    for ch in range(3):
+        x, nx = _unit(va[..., ch].ravel())
+        y, ny = _unit(pa[..., ch].ravel())
+        if nx < 1e-3 or ny < 1e-3:
+            continue
+        cs.append(float(x @ y))
+    return min(cs) if cs else 0.0
+
+
+MIN_CORR, MIN_GAP = float(os.environ.get('TEXPACK_MIN_CORR', '0.85')), float(os.environ.get('TEXPACK_MIN_GAP', '0.03'))
+MIN_VERIFY = float(os.environ.get('TEXPACK_MIN_VERIFY', '0.80'))
+
+
+def pkey(info):
+    parts = info.filename.replace(chr(92), '/').rsplit('/', 1)[-1][:-4].split('-')
+    return '-'.join(parts[:2])
 
 
 def main():
     iso, psarc, packzip, outdir = sys.argv[1:5]
     rel = sys.argv[sys.argv.index('--rel') + 1] if '--rel' in sys.argv else None
+    # --cand arquivo: para cada textura sem par, o melhor candidato e a nota (para escolher limiares);
+    # --dump pasta: grava essas texturas do Vita em PNG para conferir
+    cand_out = open(sys.argv[sys.argv.index('--cand') + 1], 'w', encoding='utf-8') if '--cand' in sys.argv else None
+    dump_dir = sys.argv[sys.argv.index('--dump') + 1] if '--dump' in sys.argv else None
+    if dump_dir:
+        os.makedirs(dump_dir, exist_ok=True)
     os.makedirs(outdir, exist_ok=True)
     z = zipfile.ZipFile(packzip)
 
@@ -164,21 +219,40 @@ def main():
                     continue
                 cands = sigs.get(round(w / h, 3), [])
                 best = second = (-1.0, None)
+                vl, va, na = v
                 for info, pv, pc, pn, pw in cands:
                     if pw < w or pn < 40:
                         continue  # o pack é HD: não menor que a textura do Vita
-                    c = float(v @ pv)
+                    pl, pa, pna = pv
+                    c = float(vl @ pl)
+                    if na > 40 and pna > 40:  # as duas com alfa variando: o desenho do alfa também tem de bater
+                        c = min(c, float(va @ pa))
+                    elif (na > 40) != (pna > 40):
+                        continue
                     if np.abs(col - pc).mean() > 24:
                         continue
+                    # cópias do mesmo PNG no pack (mesmo TEX0-CLUT, sufixo diferente) não contam como rival
+                    same = best[1] is not None and pkey(info) == pkey(best[1])
                     if c > best[0]:
-                        best, second = (c, info), best
-                    elif c > second[0]:
+                        if not same:
+                            second = best
+                        best = (c, info)
+                    elif c > second[0] and not same:
                         second = (c, info)
-                if best[1] is not None and best[0] >= 0.93 and best[0] - second[0] >= 0.02:
-                    index[vk], how[vk] = best[1], ('conteudo', best[0], fn, gname)
+                ok = best[1] is not None and best[0] >= MIN_CORR and best[0] - second[0] >= MIN_GAP
+                if ok:
+                    with z.open(best[1]) as fh:
+                        vc = verify(rgba, Image.open(io.BytesIO(fh.read())))
+                    ok = vc >= MIN_VERIFY
+                if ok:
+                    index[vk], how[vk] = best[1], ('conteudo', min(best[0], vc), fn, gname)
                     stats['conteudo'] += 1
                 else:
                     stats['sem'] += 1
+                    if cand_out and best[1] is not None:
+                        cand_out.write(chr(9).join(['%016x', '%dx%d', '%.3f', '%.3f', '%s', '%s', '%s']) % (vk, w, h, best[0], second[0], fn, gname, best[1].filename) + chr(10))
+                        if dump_dir:
+                            Image.fromarray(rgba, 'RGBA').save(os.path.join(dump_dir, '%016x.png' % vk))
         print(f'{fn}: {stats}', flush=True)
 
     used = {}

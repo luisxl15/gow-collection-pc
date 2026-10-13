@@ -376,12 +376,15 @@ static std::shared_ptr<std::vector<uint8_t>> texpack_take(uint64_t key, const gx
     finished = true;
     if (!job->px || orig.empty()) return nullptr;
     const std::vector<float> so = texsig(orig.data(), info.width, info.height), sp = texsig(job->px->data(), job->w, job->h);
-    const float corr = texsig_corr(so, sp);
     static int rejected = 0, logged = 0;
-    if (corr < 0.7f) {
+    // O pack é feito por fãs: o PNG pode ser bem diferente da textura original e entra assim mesmo (o
+    // usuário quer a troca). Só um PNG vazio (todo transparente) no lugar de uma textura visível fica de
+    // fora: apagaria o objeto.
+    double ao = 0, ap = 0;
+    for (int c = 0; c < 256; c++) ao += so[256 + c], ap += sp[256 + c];
+    if (ap < 0.01 * ao) {
         g_texpack_rejected[key] = true;
-        if (rejected++ < 8) logf("vitart: pack de texturas: %s recusado (não parece a textura do Vita, correlação %.2f)",
-                                 g_texpack[key].c_str(), corr);
+        if (rejected++ < 8) logf("vitart: pack de texturas: %s recusado (PNG vazio)", g_texpack[key].c_str());
         return nullptr;
     }
     // Alfa na escala do Vita. O pack vem do PS2: lá 128 é opaco, e várias texturas de personagem usam o
