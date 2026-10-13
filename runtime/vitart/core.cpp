@@ -607,6 +607,14 @@ static void prof_register(const Thread *t) {
     g_prof_threads.push_back({h, t->name});
 }
 
+// Relógio do Windows em 1 ms para todo o processo (o padrão é 15,6 ms: um sleep de 16,7 ms virava 31 ms e o
+// ritmo de 60 FPS travava 4-5 vezes por segundo). Antes só o motor de áudio ligava; com o som desligado
+// (VITART_MUTE) o ritmo ficava sem ele.
+void high_res_timer() {
+    static const bool on = (timeBeginPeriod(1), true);
+    (void)on;
+}
+
 static void prof_start() {
     if (!getenv("VITART_PROF")) return;
     std::thread([] {

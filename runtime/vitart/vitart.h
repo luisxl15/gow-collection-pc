@@ -112,6 +112,8 @@ std::string app_path(); // diretório do app (app0:)
 // Observador chamado antes de toda chamada de import (registrar só na inicialização).
 using ImportWatch = void (*)(arc_ctx *ctx, uint32_t stub);
 void watch_import(ImportWatch w);
+// Liga o relógio de 1 ms do Windows (uma vez por processo).
+void high_res_timer();
 std::string data_path(); // raiz para ux0:data e afins
 
 } // namespace vt

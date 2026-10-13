@@ -4,6 +4,7 @@
 #include "vitart.h"
 
 #include <cctype>
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <filesystem>
@@ -103,39 +104,72 @@ struct File {
     uint32_t skip_gen = 0;   // pedidos de pular já existentes quando foi aberto
     fs::directory_iterator it, end;
 };
-// START durante um vídeo: as leituras seguintes do .bk2 aberto devolvem fim de arquivo e o Bink
-// encerra a cena (o portátil não tinha como pular; o usuário quer o START, nos dois jogos).
+// Pular a cena em vídeo (X): acha na memória do jogo o HBINK do vídeo que está tocando ({Width, Height,
+// Frames, FrameNum, LastFrameNum, ...}, o começo da estrutura do Bink SDK) e faz Frames = FrameNum + 1; o
+// laço do jogo vê o último quadro e fecha o vídeo do jeito normal. (Fim de arquivo congelava o Bink.)
+// O pedido fica pendente por alguns segundos e é tentado a cada leitura do controle: apertado logo no
+// começo, o arquivo já está aberto mas o HBINK ainda não existe. Só procura com o vídeo tocando (lido nos
+// últimos 0,5 s) e guarda onde achou, porque varrer a memória do jogo custa dezenas de ms.
 static std::atomic<uint32_t> g_skip_gen{0};
 // Cabeçalho do vídeo aberto (Bink 2: quadros em +8, largura em +20, altura em +24).
-static std::atomic<uint32_t> g_video_open{0}, g_video_w{0}, g_video_h{0}, g_video_frames{0};
-// Pular a cena: acha na memória do jogo o HBINK do vídeo aberto ({Width, Height, Frames, FrameNum,
-// LastFrameNum, ...}, o começo da estrutura do Bink SDK) e faz Frames = FrameNum; o laço do jogo vê o
-// último quadro e fecha o vídeo do jeito normal. (Fim de arquivo congelava o decodificador.)
-void video_skip_request() {
-    g_skip_gen++;
-    const uint32_t w = g_video_w, h = g_video_h, frames = g_video_frames;
-    if (!g_video_open || !w || !h || !frames) return;
+static std::atomic<uint32_t> g_video_open{0}, g_video_w{0}, g_video_h{0}, g_video_frames{0}, g_video_gen{0};
+static std::atomic<int64_t> g_video_read_ms{0}, g_skip_until_ms{0};
+static uint32_t g_hbink = 0, g_hbink_gen = 0; // onde o HBINK do vídeo atual foi achado
+static int64_t now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+static bool hbink_matches(const uint32_t *v, uint32_t w, uint32_t h, uint32_t frames) {
+    return v[0] == w && v[1] == h && v[2] == frames && v[3] <= frames && v[4] <= frames;
+}
+static uint32_t hbink_find(uint32_t w, uint32_t h, uint32_t frames) {
     uint8_t *base = mem_base();
-    int hits = 0;
     for (uint8_t *p = base; p < base + 0x100000000ull;) {
         MEMORY_BASIC_INFORMATION mi{};
         if (!VirtualQuery(p, &mi, sizeof mi)) break;
         uint8_t *end = (uint8_t *)mi.BaseAddress + mi.RegionSize;
-        if (mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+        if (mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
             for (uint8_t *q = (uint8_t *)(((uintptr_t)p + 3) & ~(uintptr_t)3); q + 20 <= end; q += 4) {
                 uint32_t v[5];
                 std::memcpy(v, q, 20);
-                if (v[0] != w || v[1] != h || v[2] != frames) continue;
-                if (v[3] > frames || v[4] > frames) continue; // FrameNum/LastFrameNum plausíveis (0 no começo)
-                const uint32_t cut = v[3] + 1 < frames ? v[3] + 1 : frames;
-                std::memcpy(q + 8, &cut, 4);
-                logf("vitart: cena pulada com START (HBINK em 0x%08x: quadro %u de %u)", (uint32_t)(q - base), v[3], frames);
-                hits++;
+                if (hbink_matches(v, w, h, frames)) return (uint32_t)(q - base);
             }
-        }
         p = end;
     }
-    if (!hits) logf("vitart: START durante o vídeo, mas o HBINK (%ux%u, %u quadros) não foi achado", w, h, frames);
+    return 0;
+}
+void video_skip_request() {
+    g_skip_gen++;
+    if (g_video_open) g_skip_until_ms = now_ms() + 4000;
+}
+// Chamada a cada leitura do controle.
+void video_skip_tick() {
+    const int64_t until = g_skip_until_ms, now = now_ms();
+    if (!until) return;
+    if (now > until || !g_video_open) {
+        g_skip_until_ms = 0;
+        return;
+    }
+    if (now - g_video_read_ms > 500) return; // vídeo aberto mas parado: espera ele tocar
+    static int64_t last_try = 0;
+    if (now - last_try < 150) return;
+    last_try = now;
+    const uint32_t w = g_video_w, h = g_video_h, frames = g_video_frames;
+    if (!w || !h || !frames) return;
+    uint32_t at = 0;
+    if (g_hbink && g_hbink_gen == g_video_gen) {
+        uint32_t v[5];
+        std::memcpy(v, ptr<uint8_t>(g_hbink), 20);
+        if (hbink_matches(v, w, h, frames)) at = g_hbink;
+    }
+    if (!at) at = hbink_find(w, h, frames);
+    if (!at) return; // ainda não criado: tenta de novo daqui a pouco
+    g_hbink = at, g_hbink_gen = g_video_gen;
+    uint32_t v[5];
+    std::memcpy(v, ptr<uint8_t>(at), 20);
+    const uint32_t cut = v[3] + 1 < frames ? v[3] + 1 : frames;
+    std::memcpy(ptr<uint8_t>(at + 8), &cut, 4);
+    g_skip_until_ms = 0;
+    logf("vitart: cena pulada (HBINK em 0x%08x: quadro %u de %u)", at, v[3], frames);
 }
 static bool is_video(const std::string &p) {
     if (p.size() < 4) return false;
@@ -199,6 +233,7 @@ VT_HLE(sceIoOpen) {
         if (_read(fd, hd, sizeof hd) == (int)sizeof hd) g_video_frames = hd[2], g_video_w = hd[5], g_video_h = hd[6];
         _lseeki64(fd, 0, SEEK_SET);
         g_video_open++;
+        g_video_gen++;
     }
     g_files[vfd].skip_gen = g_skip_gen.load();
     logf("vitart: sceIoOpen(%s, 0x%x) -> 0x%x", path.c_str(), flags, vfd);
@@ -217,6 +252,7 @@ static int host_fd(uint32_t vfd) {
 static bool video_cut(uint32_t vfd) {
     const std::lock_guard<std::mutex> lock(g_files_mutex);
     auto it = g_files.find(vfd);
+    if (it != g_files.end() && it->second.video) g_video_read_ms = now_ms(); // vídeo tocando
     static const bool eof_cut = getenv("VITART_SKIP_EOF") != nullptr; // experimento: o Bink congela no fim de arquivo
     if (!eof_cut || it == g_files.end() || !it->second.video || g_skip_gen.load() == it->second.skip_gen) return false;
     static uint32_t logged = 0;

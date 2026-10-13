@@ -182,6 +182,13 @@ void game_options_tick() {
             if (e) e++;
         }
     }
+    // VITART_TEST_NOTIFY (teste): mostra o aviso de troféu no quadro 400
+    if (static const char *tn = getenv("VITART_TEST_NOTIFY"); tn) {
+        static uint32_t n = 0;
+        if (++n == 400)
+            gvk::notify(std::string("Troféu desbloqueado (Bronze)") + char(10) + "Zero Health = Bronze Trophy" + char(10) +
+                        "Open a Health Chest when your health meter is already full");
+    }
     // pedidos do menu
     bool changed = false;
     if (const uint32_t v = g_req_tex.exchange(0); v && texpack_available() && (v == 2) != g_opt.tex)

@@ -6,6 +6,7 @@
 // próprio fluxo (sem laço de realimentação e sem esperar a GPU). A espera só acontece ao apresentar, ao
 // ler um alvo ou quando o anel enche.
 #include "gxm_vk.h"
+#include "trophy_banner.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -955,15 +956,85 @@ static void notice_tick() {
         g_notice_shown = false;
     }
 }
+// Aviso de troféu na própria imagem, igual ao do PS Vita (trophy_banner.cpp): entra deslizando pela
+// direita, fica ~4 s e sai. Em tela cheia ou sem bordas não há título de janela para mostrar nada.
+static TrophyBanner g_trophy;
+static BannerImage g_trophy_img;
+static uint32_t g_trophy_for = 0; // altura de tela para a qual a imagem foi montada
+static bool g_trophy_on = false;
+static std::chrono::steady_clock::time_point g_trophy_t0;
+static Buffer g_banner_buf;
+void notify_trophy(const TrophyBanner &t) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    g_trophy = t, g_trophy_for = 0, g_trophy_on = true;
+    g_trophy_t0 = std::chrono::steady_clock::now();
+}
+static void overlay_banner(VkImage img, int32_t area_x, int32_t area_y, int32_t area_w, int32_t area_h) {
+    if (!g_trophy_on) return;
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_trophy_t0).count();
+    constexpr double kSlide = 0.25, kStay = 4.2;
+    if (t > kSlide * 2 + kStay) {
+        g_trophy_on = false;
+        return;
+    }
+    if (g_trophy_for != (uint32_t)area_h) {
+        if (!render_trophy_banner(g_trophy, (uint32_t)area_h, g_trophy_img)) return g_trophy_on = false, void();
+        g_trophy_for = (uint32_t)area_h;
+    }
+    const BannerImage &bi = g_trophy_img;
+    const double k = area_h / 544.0;
+    const int32_t margin = (int32_t)(12 * k), x_in = area_x + area_w - (int32_t)bi.w - margin, x_out = area_x + area_w + margin;
+    const double f = t < kSlide ? 1 - t / kSlide : t > kSlide + kStay ? (t - kSlide - kStay) / kSlide : 0; // 0 = no lugar
+    const int32_t x0 = x_in + (int32_t)((x_out - x_in) * f), y0 = area_y + (int32_t)(20 * k);
+    const int32_t sw = (int32_t)g_swap_extent.width;
+    if (x0 >= sw || y0 + (int32_t)bi.h > (int32_t)g_swap_extent.height || x0 < 0) return;
+    const VkDeviceSize bytes = (VkDeviceSize)bi.w * bi.h * 4;
+    if (g_banner_buf.size < bytes) {
+        destroy(g_banner_buf);
+        if (!make_buffer(g_banner_buf, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, nullptr)) return;
+    }
+    void *map = nullptr;
+    if (vkMapMemory(g_dev, g_banner_buf.mem, 0, bytes, 0, &map) != VK_SUCCESS) return;
+    std::memcpy(map, bi.px.data(), bytes);
+    vkUnmapMemory(g_dev, g_banner_buf.mem);
+    // uma região por linha dos cantos (só o trecho dentro da faixa) e uma para o meio; cortado na borda da tela
+    std::vector<VkBufferImageCopy> regs;
+    auto add = [&](uint32_t y, uint32_t rows, uint32_t from, uint32_t to) {
+        const int32_t vis = std::min<int32_t>((int32_t)to, sw - x0);
+        if (vis <= (int32_t)from) return;
+        VkBufferImageCopy c{};
+        c.bufferOffset = ((VkDeviceSize)y * bi.w + from) * 4;
+        c.bufferRowLength = bi.w, c.bufferImageHeight = bi.h;
+        c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        c.imageOffset = {x0 + (int32_t)from, y0 + (int32_t)y, 0};
+        c.imageExtent = {(uint32_t)vis - from, rows, 1};
+        regs.push_back(c);
+    };
+    const uint32_t r = std::min(bi.radius, bi.h / 2);
+    for (uint32_t y = 0; y < r; y++) add(y, 1, bi.row_from[y], bi.row_to[y]);
+    add(r, bi.h - 2 * r, 0, bi.w);
+    for (uint32_t y = bi.h - r; y < bi.h; y++) add(y, 1, bi.row_from[y], bi.row_to[y]);
+    if (regs.empty()) return;
+    VkImageMemoryBarrier mb{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    mb.srcAccessMask = mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.oldLayout = mb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    mb.srcQueueFamilyIndex = mb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    mb.image = img;
+    mb.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(g_pcmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &mb);
+    vkCmdCopyBufferToImage(g_pcmd, g_banner_buf.buf, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (uint32_t)regs.size(), regs.data());
+}
+
 void notify(const std::string &text) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     const int n = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
     std::wstring w(n > 0 ? n - 1 : 0, L'\0');
     if (n > 1) MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, w.data(), n);
+    for (wchar_t &c : w)
+        if (c == L'\n') c = L' '; // o título tem uma linha só
     g_notice = w;
     g_notice_end = std::chrono::steady_clock::now() + std::chrono::seconds(6);
     g_notice_shown = false;
-    MessageBeep(MB_ICONASTERISK);
 }
 
 bool pointer(float &nx, float &ny) {
@@ -1127,6 +1198,7 @@ bool present(uint32_t addr) {
                    VK_FILTER_LINEAR);
     const int32_t margin = (int32_t)(g_swap_extent.height / 60);
     overlay_fps(dst.img, dx + margin, dy + margin);
+    overlay_banner(dst.img, dx, dy, dw, dh);
     barrier(src, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     barrier(dst, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     g_cur = g_cmd;
@@ -1574,6 +1646,11 @@ bool draw(const Draw &d) {
 
 const std::vector<float> &debug_vs_output() { return g_debug_vs; }
 
+Stats peek_stats() {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    return g_stats;
+}
+
 Stats take_stats() {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Stats s = g_stats;
@@ -1701,6 +1778,7 @@ void shutdown() {
     for (auto &kv : g_textures) destroy(kv.second);
     for (auto &kv : g_snaps) destroy(kv.second.im);
     destroy(g_ovl);
+    destroy(g_banner_buf);
     for (auto &kv : g_targets) {
         vkDestroyFramebuffer(g_dev, kv.second.fb, nullptr);
         destroy(kv.second.color), destroy(kv.second.depth);

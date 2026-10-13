@@ -720,8 +720,41 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
 }
 
 void game_options_tick();
+// Travadas: quadro com intervalo > 25 ms (depois do carregamento) vai para o log com o que aconteceu
+// nele -- texturas e pipelines novos, tempos de criação --, e a cada 10 s sai um resumo do ritmo.
+static void hitch_tick() {
+    using clk = std::chrono::steady_clock;
+    static clk::time_point last = clk::now(), window = clk::now();
+    static gvk::Stats prev{};
+    static uint32_t frames = 0, wframes = 0, slow = 0, logged = 0;
+    static double worst = 0;
+    const auto now = clk::now();
+    const double ms = std::chrono::duration<double, std::milli>(now - last).count();
+    last = now;
+    const gvk::Stats st = gvk::peek_stats();
+    auto d64 = [](uint64_t a, uint64_t b) { return a >= b ? a - b : a; };
+    auto d32 = [](uint32_t a, uint32_t b) { return a >= b ? a - b : a; };
+    frames++, wframes++;
+    if (frames > 300 && ms > 25.0) {
+        slow++;
+        worst = ms > worst ? ms : worst;
+        if (logged++ < 400)
+            logf("vitart: travada %.1f ms (quadro %u): texturas novas %u (%.1f ms), pipelines %u (%.1f ms), cópias %u, "
+                 "espera GPU %.1f ms",
+                 ms, g_present_frame.load(), d32(st.uploads, prev.uploads), d64(st.alloc_ns, prev.alloc_ns) / 1e6,
+                 d32(st.pipes, prev.pipes), d64(st.pipe_ns, prev.pipe_ns) / 1e6, d32(st.snapshots, prev.snapshots),
+                 d64(st.wait_ns, prev.wait_ns) / 1e6);
+    }
+    prev = st;
+    if (now - window > std::chrono::seconds(10)) {
+        if (frames > 300) logf("vitart: ritmo: %u quadros em 10 s, %u acima de 25 ms (pior %.1f ms)", wframes, slow, worst);
+        window = now, slow = 0, worst = 0, wframes = 0;
+    }
+}
+
 void gxm_present(uint32_t fb) {
     if (g_vk != 1) return;
+    hitch_tick();
     game_options_tick(); // opções do PC no menu de pausa do jogo (game_options.cpp)
     if (g_texcache_flush.exchange(false)) {
         const std::lock_guard<std::mutex> lock(g_vk_mutex);

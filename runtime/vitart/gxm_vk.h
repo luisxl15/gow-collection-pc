@@ -107,6 +107,9 @@ void set_fps_counter(bool on);
 uint32_t measured_fps();
 // Janela sem bordas ocupando o monitor (o mesmo modo do F11 / Alt+Enter).
 void set_borderless(bool on);
+// Aviso de troféu igual ao do PS Vita (ícone, nível, nome), desenhado sobre o quadro.
+struct TrophyBanner;
+void notify_trophy(const TrophyBanner &t);
 bool is_borderless();
 // Grava o desenho no quadro atual (os desenhos são executados em ordem em end_frame).
 bool draw(const Draw &d);
@@ -130,5 +133,6 @@ struct Stats {
     uint32_t submits = 0, snapshots = 0, uploads = 0, pipes = 0, draws = 0;
 };
 Stats take_stats();
+Stats peek_stats(); // sem zerar (diagnóstico de travadas)
 
 } // namespace gvk

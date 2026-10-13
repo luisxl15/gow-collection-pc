@@ -5,6 +5,7 @@
 #include "host_input.h"
 #include "host_audio.h"
 #include "gxm_vk.h"
+#include "trophy_banner.h"
 
 #include <chrono>
 #include <ctime>
@@ -155,6 +156,7 @@ VT_HLE(sceAudioOutOutput) {
 // Modo PS TV por padrão (o jogo tem caminho próprio, wad/_VitaTV, com L2/R2/L3/R3 no controle);
 // VITART_HANDHELD=1 volta ao portátil, em que L2/R2 eram gestos no painel traseiro.
 void video_skip_request(); // hle_io.cpp
+void video_skip_tick();
 bool handheld_mode() {
     static const bool h = getenv("VITART_HANDHELD") && *getenv("VITART_HANDHELD") == '1';
     return h;
@@ -206,11 +208,13 @@ static void ctrl_read(arc_ctx *ctx) {
     const int count = (int)arg(ctx, 2) > 0 ? (int)arg(ctx, 2) : 1;
     const hostin::State pad = hostin::poll(); // XInput, DualShock 4 e DualSense
     uint32_t buttons = keyboard_buttons() | scripted_buttons() | pad.buttons;
-    {   // START apertado (borda): pede para pular a cena em vídeo, se houver uma tocando.
-        static bool start_was = false;
-        const bool start_now = (buttons & 0x8) != 0;
-        if (start_now && !start_was) video_skip_request();
-        start_was = start_now;
+    {   // X apertado (borda): pede para pular a cena em vídeo, se houver uma tocando (o usuário prefere o X;
+        // o START abre o menu de Power Up no GoW1).
+        static bool x_was = false;
+        const bool x_now = (buttons & 0x4000) != 0;
+        if (x_now && !x_was) video_skip_request();
+        x_was = x_now;
+        video_skip_tick();
     }
     if (handheld_mode()) { // portátil: sem L2/R2/L3/R3; L1/R1 são os bits 0x100/0x200
         if (buttons & 0x400) buttons |= 0x100;
@@ -371,7 +375,11 @@ static void wait_frame(uint32_t vblanks) {
     const auto now = clk::now();
     const auto target = last + interval;
     if (last.time_since_epoch().count() && now < target) {
-        std::this_thread::sleep_until(target);
+        // dorme até 1,5 ms antes e completa girando: o sleep do Windows passa do prazo em até 1 ms
+        high_res_timer();
+        if (clk::now() < target - std::chrono::microseconds(1500))
+            std::this_thread::sleep_until(target - std::chrono::microseconds(1500));
+        while (clk::now() < target) std::this_thread::yield();
         last = target;
     } else {
         last = now; // atrasado (ou primeiro quadro): sem espera, o prazo recomeça daqui
@@ -473,8 +481,8 @@ VT_HLE(sceKernelLibcMktime) {
 
 // =================================================================== tubos de mensagem
 constexpr uint32_t ERR_UNKNOWN_MPP = 0x8002819Eu;
-constexpr uint32_t ERR_MPP_EMPTY = 0x800201B4u;
-constexpr uint32_t ERR_MPP_FULL = 0x800201B3u;
+constexpr uint32_t ERR_MPP_EMPTY = 0x80028223u; // SCE_KERNEL_ERROR_MPP_EMPTY (o GoW1 compara com este valor)
+constexpr uint32_t ERR_MPP_FULL = 0x80028222u;  // SCE_KERNEL_ERROR_MPP_FULL
 constexpr uint32_t ERR_WAIT_TIMEOUT = 0x80028005u;
 constexpr uint32_t MPP_FULL = 0x1, MPP_DONT_WAIT = 0x10, MPP_DONT_REMOVE = 0x100;
 
@@ -682,6 +690,31 @@ static void trophy_save(const TrophySet &ts) {
         fclose(u);
     }
 }
+// Arquivo de dentro do TROPHY.TRP (ícones TROPnnn.PNG).
+static std::vector<uint8_t> trp_entry(const std::string &comm, const std::string &name) {
+    std::vector<uint8_t> out;
+    FILE *f = fopen((app_path() + "/sce_sys/trophy/" + comm + "/TROPHY.TRP").c_str(), "rb");
+    if (!f) return out;
+    uint8_t h[0x40];
+    auto be32 = [](const uint8_t *p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; };
+    if (fread(h, 1, sizeof h, f) == sizeof h && be32(h) == 0xDCA24D00u) {
+        const uint32_t n = be32(h + 16), esz = be32(h + 20);
+        std::vector<uint8_t> e(esz);
+        for (uint32_t i = 0; i < n; i++) {
+            fseek(f, 0x40 + (long)(i * esz), SEEK_SET);
+            if (fread(e.data(), 1, esz, f) != esz) break;
+            if (std::strncmp(reinterpret_cast<const char *>(e.data()), name.c_str(), 32) != 0) continue;
+            const uint64_t off = (uint64_t)be32(&e[32]) << 32 | be32(&e[36]), size = (uint64_t)be32(&e[40]) << 32 | be32(&e[44]);
+            out.resize((size_t)size);
+            _fseeki64(f, (long long)off, SEEK_SET);
+            if (fread(out.data(), 1, out.size(), f) != out.size()) out.clear();
+            break;
+        }
+    }
+    fclose(f);
+    return out;
+}
+
 static void trophy_announce(const TrophySet &ts, int id) {
     const char *kind = "Bronze";
     std::string name = "#" + std::to_string(id), detail;
@@ -691,7 +724,19 @@ static void trophy_announce(const TrophySet &ts, int id) {
             kind = t.type == 'P' ? "Platina" : t.type == 'G' ? "Ouro" : t.type == 'S' ? "Prata" : "Bronze";
         }
     logf("vitart: TROFÉU (%s) desbloqueado: %s — %s", kind, name.c_str(), detail.c_str());
-    gvk::notify(std::string("Troféu desbloqueado (") + kind + "): " + name + " — " + detail);
+    gvk::notify(std::string("Troféu desbloqueado (") + kind + "): " + name + " — " + detail); // título da janela
+    gvk::TrophyBanner b;
+    char icon[16];
+    std::snprintf(icon, sizeof icon, "TROP%03d.PNG", id);
+    b.icon_png = trp_entry(ts.comm, icon);
+    for (const Trophy &t : ts.list)
+        if (t.id == id) b.tier = t.type;
+    b.name = name;
+    gvk::notify_trophy(b);
+    // som: <dados>/trophy.wav, se existir (o som de troféu de sua preferência); senão o aviso do Windows
+    const std::string wav = data_path() + "/trophy.wav";
+    if (std::filesystem::exists(wav)) PlaySoundA(wav.c_str(), nullptr, SND_ASYNC | SND_FILENAME | SND_NODEFAULT);
+    else MessageBeep(MB_ICONASTERISK);
 }
 
 VT_HLE(sceNpTrophyCreateContext) {
