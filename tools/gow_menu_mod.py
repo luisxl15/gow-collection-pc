@@ -27,23 +27,26 @@ import psarc_gxp as P  # noqa: E402
 # sem tratador no jogo): 0x10000 | textura | áudio << 2 | resolução << 4 | fps << 7 | proporção << 9.
 # Ver runtime/vitart/game_options.cpp.
 STATE = 'PS2_Cheat'
-FIELDS = [('_level0/:VtAsp', 512, 7), ('_level0/:VtFps', 128, 3), ('_level0/:VtRes', 16, 7),
+FIELDS = [('_level0/:VtDsp', 16384, 3), ('_level0/:VtCnt', 4096, 3), ('_level0/:VtAsp', 512, 7), ('_level0/:VtFps', 128, 3), ('_level0/:VtRes', 16, 7),
           ('_level0/:VtAud', 4, 3), ('_level0/:VtTex', 1, 3)]
 ROWS = [  # (estado da página, nome do clipe, rótulo, variável decodificada, peso, variável do texto)
     (5, 'VtTextures', 'HD Textures', '_level0/:VtTex', 1, '_level0/:VtTexText'),
     (6, 'VtAudio', 'PS2 Audio', '_level0/:VtAud', 4, '_level0/:VtAudText'),
     (7, 'VtResolution', 'Resolution', '_level0/:VtRes', 16, '_level0/:VtResText'),
     (8, 'VtFrameRate', 'Frame Rate', '_level0/:VtFps', 128, '_level0/:VtFpsText'),
+    (9, 'VtFpsCounter', 'FPS Counter', '_level0/:VtCnt', 4096, '_level0/:VtCntText'),
+    (10, 'VtDisplayMode', 'Display Mode', '_level0/:VtDsp', 16384, '_level0/:VtDspText'),
 ]
 RES_TEXT = {1: '1x  (960x544)', 2: '2x  (1920x1088)', 3: '3x  (2880x1632)', 4: '4x  (3840x2176)'}
 FPS_TEXT = {1: '30 FPS', 2: '60 FPS'}
 # estado -> (caminho do clipe da linha, grupo: A = ajustável com esquerda/direita, B = seleciona com X)
 PATH = {1: ('PauseMenu/MusicVolume', 'A'), 2: ('PauseMenu/SFXVolume', 'A'), 5: ('PauseMenu/VtTextures', 'A'),
         6: ('PauseMenu/VtAudio', 'A'), 7: ('PauseMenu/VtResolution', 'A'), 8: ('PauseMenu/VtFrameRate', 'A'),
+        9: ('PauseMenu/VtFpsCounter', 'A'), 10: ('PauseMenu/VtDisplayMode', 'A'),
         3: ('PauseMenu/Controller', 'B'), 4: ('PauseMenu/Return', 'B')}
-ORDER = [1, 2, 5, 6, 7, 8, 3, 4]
-Y = {s: -175.0 + 50.0 * i for i, s in enumerate(ORDER)}
-FIRST_NEW, LAST_NEW = 5, 8
+ORDER = [1, 2, 5, 6, 7, 8, 9, 10, 3, 4]
+Y = {s: -175.0 + 350.0 / (len(ORDER) - 1) * i for i, s in enumerate(ORDER)}
+FIRST_NEW, LAST_NEW = 5, 10
 VALUE_RISE = 25.0  # unidades da linha
 ST = 'PauseOptions_State'
 
@@ -109,11 +112,40 @@ def nav_script(f, step):
     return flp.encode(f, a.build())
 
 
+def push_fps(a, state):
+    """Empilha os FPS medidos que o vitart pôs em PS2_Cheat (bits 17+): int(estado / 131072 - 0,5).
+    O resto do estado é >= 65536 (bit 16), então a parte fracionária fica em [0, 0,5): truncar ou
+    arredondar dá o mesmo número."""
+    a.getv(state).push(131072).div().push(0.5).sub().toint()
+
+
+def fps_counter_script():
+    """Quadro do clipe do contador: número e "FPS" (vazios com o contador desligado = FPS 0)."""
+    a = flp.Asm()
+    st = '_level0/:' + STATE
+    num, unit = '_level0/:VtFpsNum', '_level0/:VtFpsUnit'
+    # sombra escura dos textos deste clipe (o mesmo recurso que o menu usa em 'TextPause'), para ler
+    # sobre o céu claro
+    a.setv('PS2_DropShadowOffset', '.09').setv('PS2_DropShadowColor', '0xFF000000')
+    push_fps(a, st)
+    a.push(0).eq().not_().jumpif('liga')
+    a.setv(num, '').setv(unit, '').jump('fim')
+    a.label('liga')
+    a.push(num)
+    push_fps(a, st)
+    a.setvar()
+    a.setv(unit, 'FPS')
+    a.label('fim')
+    return a
+
+
 def show_script(f):
     """Decodifica PS2_Cheat nas variáveis _level0/:Vt* e escreve os textos dos valores."""
     a = flp.Asm()
     X = '_level0/:VtX'
-    a.push(X).getv(STATE).push(65536).sub().setvar()
+    a.push(X).getv(STATE)
+    push_fps(a, STATE)
+    a.push(131072).mul().sub().push(65536).sub().setvar()
     for name, w, maxv in FIELDS:
         for v in range(maxv, 0, -1):
             a.getv(X).push(v * w).lt().jumpif('m%s%d' % (name, v))  # X < v*w -> tenta o menor
@@ -139,7 +171,8 @@ def texts_script(f):
         a.label('z' + txt)
         a.setv(txt, 'Off')
         a.label('y' + txt)
-    for (_, _, _, var, _, txt), table in ((ROWS[2], RES_TEXT), (ROWS[3], FPS_TEXT)):
+    for (_, _, _, var, _, txt), table in ((ROWS[2], RES_TEXT), (ROWS[3], FPS_TEXT), (ROWS[4], {1: 'Off', 2: 'On'}),
+                                     (ROWS[5], {1: 'Windowed', 2: 'Borderless'})):
         for v, t in table.items():
             a.getv(var).push(v).eq().not_().jumpif('t%s%d' % (txt, v))
             a.setv(txt, t)
@@ -148,7 +181,7 @@ def texts_script(f):
     return flp.encode(f, a.build())
 
 
-KEY = {5: 'tex', 6: 'aud', 7: 'res', 8: 'fps'}
+KEY = {5: 'tex', 6: 'aud', 7: 'res', 8: 'fps', 9: 'cnt', 10: 'dsp'}
 
 
 def change_script(f, step):
@@ -177,10 +210,10 @@ def change_script(f, step):
                     a.jump('trava')
                 a.label('r%d' % v)
             a.jump('trava')
-        else:  # 30 / 60 FPS
-            a.getv(var).push(2).eq().not_().jumpif('fps60')
+        else:  # 30 / 60 FPS, contador Off / On
+            a.getv(var).push(2).eq().not_().jumpif('dois%d' % s)
             choose(s, var, 1)
-            a.label('fps60')
+            a.label('dois%d' % s)
             choose(s, var, 2)
         a.label('n%d' % s)
     a.jump('fim')
@@ -311,6 +344,52 @@ def mod_flp(b):
         head = bytearray(pm.anims[0][0])
         struct.pack_into('<H', head, 0, depth)
         pm.anims.append([head, keys])
+
+    # ---- contador de FPS no estilo do contador de HITS: número grande (o rótulo dinâmico do HITS) com
+    # "FPS" menor embaixo, num clipe de 2 quadros em laço no canto superior direito do HUD (800x600)
+    hit = next(d for d in f.dyns if f.s(struct.unpack_from('<H', d, 0)[0]) == '_level0/:HitCounter')
+    d_num = bytearray(hit)
+    struct.pack_into('<H', d_num, 0, f.add_string('_level0/:VtFpsNum'))
+    f.dyns.append(d_num)
+    h_num = handler(f, 5, len(f.dyns) - 1)
+    d_unit = bytearray(hit)
+    struct.pack_into('<H', d_unit, 0, f.add_string('_level0/:VtFpsUnit'))
+    struct.pack_into('<H', d_unit, 6, 400)  # menor, como o "Hits"
+    f.dyns.append(d_unit)
+    h_unit = handler(f, 5, len(f.dyns) - 1)
+    hit_clip = f.c7[obj(f, named(f.root, f, 'HitCounter'), 7)]
+    shake = f.c7[obj(f, struct.unpack_from('<H', hit_clip.anims[0][1][0], 2)[0], 7)]
+    t_num = struct.unpack_from('<H', shake.anims[0][1][0], 4)[0]
+    t_unit = struct.unpack_from('<H', shake.anims[1][1][0], 4)[0]
+    c = flp.Clip()
+    c.h = bytearray(shake.h)
+    c.frames = 2
+    a0 = [bytearray(shake.anims[0][0]), [bytearray(struct.pack('<HHHHH', 0, h_num, t_num, 0, 0xffff))]]
+    a1 = [bytearray(shake.anims[1][0]), [bytearray(struct.pack('<HHHHH', 0, h_unit, t_unit, 0, 0xffff))]]
+    c.anims = [a0, a1]
+    lab_h = bytearray(hit_clip.labels[0][0])  # cabeçalho de rótulo de quadro
+    sub_h = bytearray(hit_clip.labels[0][1][0][0])
+    a = fps_counter_script()
+    a.gotoframe(0).play().end()
+    code1 = flp.encode(f, a.build())
+    labs = []
+    for frame, code in ((0, flp.encode(f, fps_counter_script().end().build())), (1, code1)):
+        h = bytearray(lab_h)
+        struct.pack_into('<H', h, 0, frame)
+        struct.pack_into('<H', h, 8, 0xffff)
+        labs.append([h, [[bytearray(sub_h), code]]])
+    c.labels = labs
+    f.c7.append(c)
+    h_clip = handler(f, 7, len(f.c7) - 1)
+    t = bytearray(f.xforms[0])
+    struct.pack_into('<4i', t, 0, 49152, 0, 0, 49152)  # escala 0,75
+    struct.pack_into('<hh', t, 0x10, round(730 * 16), round(52 * 16))
+    f.xforms.append(t)
+    depth = max(struct.unpack_from('<H', h, 0)[0] for h, _ in f.root.anims) + 2
+    head = bytearray(f.root.anims[0][0])
+    struct.pack_into('<H', head, 0, depth)
+    f.root.anims.append([head, [bytearray(struct.pack('<HHHHH', 0, h_clip, len(f.xforms) - 1, 0,
+                                                       f.add_string('VtFpsCounter')))]])
 
     # ---- funções novas na raiz (quadros 49..53, fora da linha do tempo: a raiz para no quadro 1)
     root = f.root

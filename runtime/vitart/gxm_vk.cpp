@@ -15,6 +15,7 @@
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <mutex>
 
@@ -798,6 +799,12 @@ static void toggle_fullscreen(HWND h) {
     g_resized = true;
 }
 
+// Opção "Display Mode" do menu de pausa: o pedido vem de outra thread e é aplicado em present(), na thread
+// da janela (-1 = nenhum pedido).
+static std::atomic<int> g_want_borderless{-1};
+void set_borderless(bool on) { g_want_borderless = on ? 1 : 0; }
+bool is_borderless() { return g_fullscreen; }
+
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_CLOSE:
@@ -843,14 +850,19 @@ static bool create_swapchain() {
     ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     ci.preTransform = caps.currentTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    // Mailbox (sem rasgar a imagem e sem bloquear): quem dita o ritmo é o vblank emulado do vitart (30/60 do
+    // jogo). Com FIFO a apresentação esperava o vblank real do monitor (74 Hz aqui) e os dois relógios se
+    // desencontravam: em tela cheia sem bordas (sem o compositor no meio) caía para ~50 FPS com engasgos.
+    // FIFO fica de reserva. VITART_NOVSYNC=1 (medição) aceita também o imediato.
     ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
-    // VITART_NOVSYNC=1 (medição): apresenta sem esperar o monitor (mailbox, ou imediato).
-    if (getenv("VITART_NOVSYNC")) {
+    {
         uint32_t nm = 0;
         vkGetPhysicalDeviceSurfacePresentModesKHR(g_phys, g_surface, &nm, nullptr);
         std::vector<VkPresentModeKHR> modes(nm);
         vkGetPhysicalDeviceSurfacePresentModesKHR(g_phys, g_surface, &nm, modes.data());
-        for (VkPresentModeKHR m : {VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR})
+        std::vector<VkPresentModeKHR> pref = {VK_PRESENT_MODE_MAILBOX_KHR};
+        if (getenv("VITART_NOVSYNC")) pref.push_back(VK_PRESENT_MODE_IMMEDIATE_KHR);
+        for (VkPresentModeKHR m : pref)
             if (std::find(modes.begin(), modes.end(), m) != modes.end()) {
                 ci.presentMode = m;
                 break;
@@ -988,6 +1000,74 @@ void begin_scene(uint32_t color_addr, uint8_t stencil) {
     it->second.dver++;
 }
 
+// Contador de FPS (opção "FPS Counter" do menu de pausa): quadros apresentados por segundo, medidos a cada
+// meio segundo, escritos no canto da imagem do jogo depois do blit para a swapchain. O texto é um bitmap
+// 5x7 ampliado (sem pipeline gráfico: cópia de buffer para a imagem, que já é destino de transferência).
+static std::atomic<bool> g_fps_counter{false};
+static std::atomic<uint32_t> g_fps_measured{0};
+void set_fps_counter(bool on) { g_fps_counter = on; }
+uint32_t measured_fps() { return g_fps_measured; }
+static Buffer g_ovl;
+static const uint8_t *glyph5x7(char c) {
+    static const uint8_t digits[10][7] = {
+        {14, 17, 19, 21, 25, 17, 14}, {4, 12, 4, 4, 4, 4, 14},    {14, 17, 1, 2, 4, 8, 31},
+        {31, 2, 4, 2, 1, 17, 14},     {2, 6, 10, 18, 31, 2, 2},   {31, 16, 30, 1, 1, 17, 14},
+        {6, 8, 16, 30, 17, 17, 14},   {31, 1, 2, 4, 8, 8, 8},     {14, 17, 17, 14, 17, 17, 14},
+        {14, 17, 17, 15, 1, 2, 12}};
+    static const uint8_t F[7] = {31, 16, 16, 30, 16, 16, 16}, P[7] = {30, 17, 17, 30, 16, 16, 16},
+                         S[7] = {15, 16, 16, 14, 1, 1, 30}, sp[7] = {};
+    if (c >= '0' && c <= '9') return digits[c - '0'];
+    return c == 'F' ? F : c == 'P' ? P : c == 'S' ? S : sp;
+}
+static void overlay_fps(VkImage img, int32_t x0, int32_t y0) {
+    using clk = std::chrono::steady_clock;
+    static clk::time_point t0 = clk::now();
+    static uint32_t frames = 0;
+    static double fps = 0;
+    frames++;
+    const double el = std::chrono::duration<double>(clk::now() - t0).count();
+    if (el >= 0.5) fps = frames / el, frames = 0, t0 = clk::now(), g_fps_measured = (uint32_t)(fps + 0.5);
+    if (!g_fps_counter) return;
+    char text[16];
+    std::snprintf(text, sizeof text, "%d FPS", (int)(fps + 0.5));
+    const uint32_t len = (uint32_t)std::strlen(text);
+    uint32_t k = (g_swap_extent.height + 135) / 270; // 1080p -> 4
+    k = k < 2 ? 2 : k > 6 ? 6 : k;
+    const uint32_t w = (len * 6 + 3) * k, h = 11 * k;
+    if (x0 + (int32_t)w > (int32_t)g_swap_extent.width || y0 + (int32_t)h > (int32_t)g_swap_extent.height) return;
+    if (!g_ovl.buf && !make_buffer(g_ovl, 512 * 1024, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, nullptr)) return;
+    if ((VkDeviceSize)w * h * 4 > g_ovl.size) return;
+    void *map = nullptr;
+    if (vkMapMemory(g_dev, g_ovl.mem, 0, g_ovl.size, 0, &map) != VK_SUCCESS) return;
+    uint32_t *px = static_cast<uint32_t *>(map);
+    const uint32_t bg = 0xFF101010u, fg = 0xFF40FF40u; // BGRA: fundo quase preto, texto verde
+    for (uint32_t i = 0; i < w * h; i++) px[i] = bg;
+    for (uint32_t n = 0; n < len; n++) {
+        const uint8_t *g = glyph5x7(text[n]);
+        for (uint32_t r = 0; r < 7; r++)
+            for (uint32_t c = 0; c < 5; c++)
+                if (g[r] & (16 >> c))
+                    for (uint32_t yy = 0; yy < k; yy++)
+                        for (uint32_t xx = 0; xx < k; xx++)
+                            px[((2 + r) * k + yy) * w + (2 + n * 6 + c) * k + xx] = fg;
+    }
+    vkUnmapMemory(g_dev, g_ovl.mem);
+    // o blit escreveu na mesma imagem: ordena as duas escritas de transferência
+    VkImageMemoryBarrier mb{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    mb.srcAccessMask = mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.oldLayout = mb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    mb.srcQueueFamilyIndex = mb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    mb.image = img;
+    mb.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(g_pcmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &mb);
+    VkBufferImageCopy c{};
+    c.bufferRowLength = w, c.bufferImageHeight = h;
+    c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    c.imageOffset = {x0, y0, 0};
+    c.imageExtent = {w, h, 1};
+    vkCmdCopyBufferToImage(g_pcmd, g_ovl.buf, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+}
+
 bool present(uint32_t addr) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (!g_dev) return false;
@@ -1001,6 +1081,8 @@ bool present(uint32_t addr) {
         DispatchMessageW(&msg);
     }
     notice_tick();
+    if (const int want = g_want_borderless.exchange(-1); want >= 0 && g_hwnd && (want == 1) != g_fullscreen)
+        toggle_fullscreen(g_hwnd);
     auto it = g_targets.find(addr);
     if (it == g_targets.end()) return false;
     if (g_resized) {
@@ -1043,6 +1125,8 @@ bool present(uint32_t addr) {
     b.dstOffsets[1] = {dx + dw, dy + dh, 1};
     vkCmdBlitImage(g_pcmd, src.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
                    VK_FILTER_LINEAR);
+    const int32_t margin = (int32_t)(g_swap_extent.height / 60);
+    overlay_fps(dst.img, dx + margin, dy + margin);
     barrier(src, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     barrier(dst, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     g_cur = g_cmd;
@@ -1616,6 +1700,7 @@ void shutdown() {
     for (auto &kv : g_modules) if (kv.second) vkDestroyShaderModule(g_dev, kv.second, nullptr);
     for (auto &kv : g_textures) destroy(kv.second);
     for (auto &kv : g_snaps) destroy(kv.second.im);
+    destroy(g_ovl);
     for (auto &kv : g_targets) {
         vkDestroyFramebuffer(g_dev, kv.second.fb, nullptr);
         destroy(kv.second.color), destroy(kv.second.depth);

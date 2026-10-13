@@ -596,8 +596,8 @@ def encode(f, ins):
 
 class Asm:
     """Construtor de scripts com rótulos simbólicos: a.push('x'); a.jumpif('fim'); a.label('fim')."""
-    OPS = {'end': 0, 'play': 6, 'stop': 7, 'add': 0xa, 'sub': 0xb, 'eq': 0xe, 'lt': 0xf, 'and_': 0x10,
-           'or_': 0x11, 'not_': 0x12, 'getvar': 0x1c, 'setvar': 0x1d, 'concat': 0x21}
+    OPS = {'end': 0, 'play': 6, 'stop': 7, 'add': 0xa, 'sub': 0xb, 'mul': 0xc, 'div': 0xd, 'eq': 0xe, 'lt': 0xf,
+           'and_': 0x10, 'or_': 0x11, 'not_': 0x12, 'toint': 0x18, 'getvar': 0x1c, 'setvar': 0x1d, 'concat': 0x21}
 
     def __init__(self):
         self.ins, self.labels, self.fix = [], {}, []

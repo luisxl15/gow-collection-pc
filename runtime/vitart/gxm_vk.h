@@ -101,6 +101,13 @@ void shutdown();
 uint32_t render_scale();
 uint32_t auto_render_scale();
 bool set_render_scale(uint32_t s);
+// Contador de FPS no canto da imagem (opção do menu de pausa).
+void set_fps_counter(bool on);
+// Quadros apresentados por segundo (medidos a cada meio segundo).
+uint32_t measured_fps();
+// Janela sem bordas ocupando o monitor (o mesmo modo do F11 / Alt+Enter).
+void set_borderless(bool on);
+bool is_borderless();
 // Grava o desenho no quadro atual (os desenhos são executados em ordem em end_frame).
 bool draw(const Draw &d);
 // Executa o quadro e espera a GPU.
