@@ -12,6 +12,7 @@ struct TrophyBanner {
     std::vector<uint8_t> icon_png; // ícone do troféu (PNG), pode faltar
     char tier = 'B';               // B, S, G, P
     std::string name;              // nome do troféu (UTF-8)
+    std::string sound;             // WAV tocado quando o aviso aparece (vazio: aviso do Windows)
 };
 
 struct BannerImage {

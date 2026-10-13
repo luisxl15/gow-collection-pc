@@ -12,6 +12,8 @@
 #define NOMINMAX
 #include <windows.h>
 #pragma comment(lib, "user32.lib")
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 
@@ -964,10 +966,20 @@ static uint32_t g_trophy_for = 0; // altura de tela para a qual a imagem foi mon
 static bool g_trophy_on = false;
 static std::chrono::steady_clock::time_point g_trophy_t0;
 static Buffer g_banner_buf;
+static std::vector<TrophyBanner> g_trophy_queue; // um aviso por vez (o troféu e a platina logo depois)
+static void trophy_start_next() {
+    if (g_trophy_queue.empty()) return;
+    g_trophy = g_trophy_queue.front();
+    g_trophy_queue.erase(g_trophy_queue.begin());
+    g_trophy_for = 0, g_trophy_on = true;
+    g_trophy_t0 = std::chrono::steady_clock::now();
+    if (!g_trophy.sound.empty()) PlaySoundA(g_trophy.sound.c_str(), nullptr, SND_ASYNC | SND_FILENAME | SND_NODEFAULT);
+    else MessageBeep(MB_ICONASTERISK);
+}
 void notify_trophy(const TrophyBanner &t) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
-    g_trophy = t, g_trophy_for = 0, g_trophy_on = true;
-    g_trophy_t0 = std::chrono::steady_clock::now();
+    g_trophy_queue.push_back(t);
+    if (!g_trophy_on) trophy_start_next();
 }
 static void overlay_banner(VkImage img, int32_t area_x, int32_t area_y, int32_t area_w, int32_t area_h) {
     if (!g_trophy_on) return;
@@ -975,6 +987,7 @@ static void overlay_banner(VkImage img, int32_t area_x, int32_t area_y, int32_t 
     constexpr double kSlide = 0.25, kStay = 4.2;
     if (t > kSlide * 2 + kStay) {
         g_trophy_on = false;
+        trophy_start_next();
         return;
     }
     if (g_trophy_for != (uint32_t)area_h) {

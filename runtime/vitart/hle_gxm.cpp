@@ -328,6 +328,12 @@ static uint64_t texpack_key(const gxmtex::Info &info, size_t base_bytes) {
     const uint32_t wh[2] = {info.width, info.height};
     const uint64_t key = fnv64(ptr<uint8_t>(info.data), std::min<size_t>(4096, base_bytes),
                                fnv64(reinterpret_cast<const uint8_t *>(wh), 8));
+    // Com paleta (P8), a chave inclui a paleta inteira: variantes de cor da mesma imagem são texturas
+    // diferentes (tools/texpack_match.py). Índices antigos, sem a paleta, continuam valendo.
+    if (info.base == 0x95000000u && info.palette) {
+        const uint64_t kp = fnv64(ptr<uint8_t>(info.palette), 1024, key);
+        if (g_texpack.count(kp)) return g_texpack_rejected.count(kp) ? 0 : kp;
+    }
     return g_texpack.count(key) && !g_texpack_rejected.count(key) ? key : 0;
 }
 static void texpack_start(uint64_t key) {

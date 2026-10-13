@@ -732,11 +732,11 @@ static void trophy_announce(const TrophySet &ts, int id) {
     for (const Trophy &t : ts.list)
         if (t.id == id) b.tier = t.type;
     b.name = name;
+    // som: <dados>/trophy.wav (platina: platinum.wav), tocado quando o aviso aparece
+    const std::string wav = data_path() + (b.tier == 'P' && std::filesystem::exists(data_path() + "/platinum.wav")
+                                               ? "/platinum.wav" : "/trophy.wav");
+    if (std::filesystem::exists(wav)) b.sound = wav;
     gvk::notify_trophy(b);
-    // som: <dados>/trophy.wav, se existir (o som de troféu de sua preferência); senão o aviso do Windows
-    const std::string wav = data_path() + "/trophy.wav";
-    if (std::filesystem::exists(wav)) PlaySoundA(wav.c_str(), nullptr, SND_ASYNC | SND_FILENAME | SND_NODEFAULT);
-    else MessageBeep(MB_ICONASTERISK);
 }
 
 VT_HLE(sceNpTrophyCreateContext) {
