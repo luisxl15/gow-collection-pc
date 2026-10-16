@@ -176,6 +176,18 @@ Run "git" @("branch", "-M", "main")
 # ------------------------------------------------------------------ 7. GitHub
 Step "Enviando para o GitHub"
 $hasOrigin = (& git remote) -contains "origin"
+if ($hasOrigin) {
+    # Um "origin" que nao e do GitHub (ex.: o .bundle de onde o projeto foi
+    # clonado) e renomeado e mantido, e o GitHub vira o novo origin.
+    $originUrl = (& git remote get-url origin).Trim()
+    if ($originUrl -notmatch 'github\.com') {
+        $oldName = "origem-antiga"
+        if ((& git remote) -contains $oldName) { Run "git" @("remote", "remove", $oldName) }
+        Run "git" @("remote", "rename", "origin", $oldName)
+        Warn "O origin apontava para '$originUrl'. Foi renomeado para '$oldName'."
+        $hasOrigin = $false
+    }
+}
 if (-not $hasOrigin) {
     if ((Test-Native "gh" @("repo", "view", "$ghUser/$RepoName")) -eq 0) {
         Warn "O repositorio $ghUser/$RepoName ja existe. Vou usar ele."
