@@ -7,7 +7,8 @@
 //
 // Contrato do SPIR-V (ver vitarecomp/usse/translate.py): vértice com atributos em location k e uniforms
 // em set 0 (binding 0 = default uniform buffer, 1 = memória do vldst); fragmento com texturas em set 1
-// (binding = recurso do sampler) e uniforms em set 2.
+// (binding = recurso do sampler) e uniforms em set 2. A variante PBR do fragmento (vitarecomp/usse/pbr.py,
+// docs/pbr.md) usa também o set 3 (normal map e ORM) e o set 4 (parâmetros por desenho).
 #pragma once
 #include <string>
 #include <cstdint>
@@ -36,6 +37,9 @@ struct Stencil {
     uint8_t fail = 0, zfail = 0, zpass = 0; // SceGxmStencilOp (0 = manter)
     uint8_t cmask = 0xFF, wmask = 0xFF, ref = 0;
 };
+
+// Floats do buffer de parâmetros do PBR (PARAM_FLOATS em vitarecomp/usse/pbr.py).
+constexpr uint32_t kPbrParamFloats = 56;
 
 // Vértices crus (sem conversão na CPU): streams do jogo e atributos com o formato do GXM
 // (SceGxmAttributeFormat: 0 U8, 1 S8, 2 U16, 3 S16, 4 U8N, 5 S8N, 6 U16N, 7 S16N, 8 F16, 9 F32).
@@ -77,6 +81,12 @@ struct Draw {
     const uint32_t *fs = nullptr; uint32_t fs_size = 0;
     std::vector<Texture> textures;
     bool debug_vs = false; // o vertex shader (de depuração) grava OUTPUT 0..3 após os uniforms
+    // PBR: fs é a variante PBR; pbr_maps = normal map e ORM (binding ignorado; amostragem como a da
+    // difusa). pbr_params[0..15] chega com a inversa de g_Projection (NDC do GXM -> câmera, coluna a
+    // coluna) e sai combinada com o viewport do desenho (pixel -> câmera).
+    bool pbr = false;
+    Texture pbr_maps[2];
+    float pbr_params[kPbrParamFloats] = {};
 
 };
 

@@ -94,8 +94,11 @@ class Builder:
         return a
 
     def runtime_array(self, t, stride):
-        a = self._type(("rta", t, stride), OpTypeRuntimeArray, t)
-        self.decorate(a, DecArrayStride, stride)
+        key = ("rta", t, stride)
+        new = key not in self._tcache
+        a = self._type(key, OpTypeRuntimeArray, t)
+        if new:  # o tipo é reaproveitado: a decoração só pode existir uma vez
+            self.decorate(a, DecArrayStride, stride)
         return a
 
     def struct(self, key, *members):

@@ -22,6 +22,9 @@ em tempo de execução.
 | Execução no **Vita3K** (compilado do fonte, headless) | renderiza e responde a entrada (`docs/vita3k_input.png`) |
 | Evidência REA | `docs/evidence/` (VPK e binário recompilado x86-64) |
 
+**PBR** (normal map, ORM e luz GGX com as luzes do próprio jogo) no renderizador Vulkan do port de PC:
+**[docs/pbr.md](docs/pbr.md)**.
+
 Leia **[docs/viabilidade.md](docs/viabilidade.md)** para as conclusões, os
 limites e o caminho para um jogo real.
 
@@ -53,7 +56,7 @@ guest/               libc mínima do guest, crt0, linker script
 tests/               testes C, demo (raycaster), fuzzer
 tools/lockstep.py    localizador de divergência contra o log single-step do QEMU
 scripts/             build do guest, build/empacotamento Vita, Vita3K headless
-docs/                viabilidade, arquitetura, fidelidade, evidências
+docs/                viabilidade, arquitetura, fidelidade, evidências, PBR (docs/pbr.md)
 ```
 
 O QEMU **não** faz parte do port: ele é apenas o oráculo de referência dos testes.

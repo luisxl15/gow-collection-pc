@@ -8,6 +8,7 @@ O mapeamento fiel vem dos contêineres e das varyings do GXP (próximo passo).
 import os
 
 from . import operands as O
+from . import pbr as PBR
 from . import spirv as S
 from .disasm import lower
 from .interp import FPC0, FPC1
@@ -23,8 +24,13 @@ class Unsupported(Exception):
 
 
 class Translator:
-    def __init__(self, prog):
+    def __init__(self, prog, pbr=False):
         self.p = prog
+        # Variante PBR (pbr.py): só fragmentos com a textura difusa lida pela UV, sem projeção.
+        self.pbr_res = PBR.diffuse_resource(prog) if pbr else None
+        if pbr and self.pbr_res is None:
+            raise Unsupported("sem textura difusa para a variante PBR")
+        self.pbr_texel = self.pbr_coord = self.pbr_fragcoord = None
         b = self.b = S.Builder()
         self.glsl = b.id()
         b.ext = b.inst(S.OpExtInstImport, self.glsl, *S._str_words("GLSL.std.450"))
@@ -572,8 +578,12 @@ class Translator:
                 v3 = b.vec(self.f32, 3)
                 c3 = b.emit(S.OpVectorShuffle, v3, coord, coord, 0, 1, inp["proj"])
                 texel = b.emit(S.OpImageSampleProjImplicitLod, self.v4, img, c3)
+            if inp["sampler"] == self.pbr_res and self.pbr_texel is None:
+                self.pbr_texel, self.pbr_coord = texel, coord
             comps = [b.emit(S.OpCompositeExtract, self.f32, texel, c) for c in range(4)]
             self._write_pa(inp["pa"], inp["regs"], self._pack_words(comps, inp["store"]))
+        if self.pbr_res is not None:
+            self.pbr_fragcoord = input_var(-1, "gl_FragCoord")
 
     def _frag_color(self):
         p = self.p
@@ -642,8 +652,13 @@ class Translator:
             for c in range(4):
                 if res + c < 256:
                     self.regs.write("pa", res + c, b.emit(S.OpCompositeExtract, self.f32, val, c))
+        pbr = None
         if p.fragment:
             self._frag_inputs(ifaces)
+            if self.pbr_res is not None:
+                # Derivadas e mapas antes do código do jogo: depois de um kill o fluxo deixa de ser uniforme.
+                pbr = PBR.PbrEmitter(self, ifaces, self.pbr_fragcoord, self.pbr_texel, self.pbr_coord)
+                pbr.prologue()
         # Entradas em SA pelas tabelas do GXP: contêiner 14 = default uniform buffer copiado a partir
         # de base_sa_offset; infos de uniform buffer põem em SA (base do contêiner 19 + ldst_base_offset)
         # o endereço em bytes do buffer na memória do vldst (o default fica em 0) + ldst_base_value;
@@ -667,7 +682,8 @@ class Translator:
         self.run(p.secondary, True)
         self.run(p.primary, False)
         if p.fragment:
-            b.store(outv, self._frag_color())
+            color = self._frag_color()
+            b.store(outv, pbr.epilogue(color) if pbr else color)
         else:
             res = b.emit(S.OpCompositeConstruct, self.v4, *[self.regs.read("out", c) for c in range(4)])
             b.store(b.chain(S.SCOutput, self.v4, outv, b.const(self.i32, 0)), res)
@@ -685,5 +701,6 @@ class Translator:
         return b.finish(S.ExecFragment if p.fragment else S.ExecVertex, main, ifaces, frag=p.fragment)
 
 
-def translate(prog):
-    return Translator(prog).build()
+def translate(prog, pbr=False):
+    """SPIR-V do programa; pbr=True gera a variante PBR do fragmento (Unsupported se não couber)."""
+    return Translator(prog, pbr).build()
