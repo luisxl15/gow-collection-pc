@@ -1,3 +1,49 @@
 build/
 __pycache__/
 *.pyc
+
+# --- adicionado por subir_para_github.ps1 ---
+# build
+out/
+bin/
+obj/
+x64/
+Debug/
+Release/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+*.obj
+*.o
+*.pdb
+*.ilk
+*.idb
+*.exe
+*.dll
+*.lib
+*.exp
+# IDEs
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+# arquivos do jogo (nao vao para o repositorio)
+*.vpk
+*.iso
+*.psarc
+*.pkg
+*.zip
+*.7z
+*.rar
+dump/
+dumps/
+game/
+app0/
+assets_extraidos/
+# texturas PBR e dumps de shader (pesados)
+textures/
+pbr_dump/
+# sistema
+Thumbs.db
+desktop.ini
