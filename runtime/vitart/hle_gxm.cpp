@@ -5,6 +5,7 @@
 #include "vitart.h"
 #include "gxm_tex.h"
 #include "gxm_vk.h"
+#include "pbr.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
@@ -242,6 +243,7 @@ struct TexEntry {
     uint32_t checked = UINT32_MAX;
     uint32_t rw = 0, rh = 0; // tamanho do PNG do pack de texturas (0 = textura original)
     uint64_t tp_key = 0;      // PNG do pack sendo decodificado em segundo plano
+    uint64_t mat_key = 0;     // material PBR da textura (pbr.h; 0 = sem material)
 };
 
 // Pack de texturas (vitart-data/texpack/*/index.tsv, montado por tools/texpack_build.py a partir de um
@@ -450,7 +452,7 @@ static uint64_t content_hash(const uint8_t *p, size_t n, uint64_t h) {
     for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
     return h;
 }
-static uint64_t g_vk_draws = 0, g_vk_skipped = 0;
+static uint64_t g_vk_draws = 0, g_vk_skipped = 0, g_pbr_draws = 0;
 // Censo do que fica de fora (VITART_VK_CENSUS=1): primitivas por tipo e formatos de textura sem decodificador.
 static std::map<std::string, uint64_t> g_census;
 static bool census() {
@@ -481,28 +483,97 @@ static bool vk_on() {
     return g_vk == 1;
 }
 
-static std::shared_ptr<std::vector<uint32_t>> spv_of(uint32_t prog) {
-    auto it = g_spv.find(prog);
-    if (it != g_spv.end()) return it->second;
+// Nome do programa no cache: FNV-1a de 64 bits do binário (tools/usse_build_cache.py).
+static std::string spv_name(uint32_t prog) {
     const uint32_t size = rd32(prog + 8);
     const uint8_t *b = ptr<uint8_t>(prog);
     uint64_t h = 0xCBF29CE484222325ull;
     for (uint32_t i = 0; i < size; i++) h = (h ^ b[i]) * 0x100000001B3ull;
     char name[64];
     std::snprintf(name, sizeof name, "%016llx", (unsigned long long)h);
-    std::shared_ptr<std::vector<uint32_t>> code;
-    std::ifstream f(g_spv_dir + "/" + name + ".spv", std::ios::binary);
-    if (f) {
-        std::vector<char> raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-        code = std::make_shared<std::vector<uint32_t>>(raw.size() / 4);
-        std::memcpy(code->data(), raw.data(), code->size() * 4);
-    } else {
+    return name;
+}
+static std::shared_ptr<std::vector<uint32_t>> spv_read(const std::string &path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return nullptr;
+    std::vector<char> raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (raw.size() < 20) return nullptr;
+    auto code = std::make_shared<std::vector<uint32_t>>(raw.size() / 4);
+    std::memcpy(code->data(), raw.data(), code->size() * 4);
+    return code;
+}
+
+static std::shared_ptr<std::vector<uint32_t>> spv_of(uint32_t prog) {
+    auto it = g_spv.find(prog);
+    if (it != g_spv.end()) return it->second;
+    const uint32_t size = rd32(prog + 8);
+    const uint8_t *b = ptr<uint8_t>(prog);
+    const std::string name = spv_name(prog);
+    std::shared_ptr<std::vector<uint32_t>> code = spv_read(g_spv_dir + "/" + name + ".spv");
+    if (!code) {
         std::filesystem::create_directories(g_spv_dir + "/miss");
         std::ofstream o(g_spv_dir + "/miss/" + name + ".gxp", std::ios::binary);
         o.write(reinterpret_cast<const char *>(b), size);
-        logf("vitart: programa 0x%08x sem SPIR-V no cache (%s)", prog, name);
+        logf("vitart: programa 0x%08x sem SPIR-V no cache (%s)", prog, name.c_str());
     }
     return g_spv[prog] = code;
+}
+
+// ------------------------------------------------------------------ PBR (pbr.h, docs/pbr.md)
+// Variante PBR do fragmento (<hash>.pbr.spv, gerada pelo usse_build_cache.py); nula se não existe.
+static std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint32_t>>> g_spv_pbr;
+static std::shared_ptr<std::vector<uint32_t>> spv_pbr_of(uint32_t prog) {
+    auto it = g_spv_pbr.find(prog);
+    if (it != g_spv_pbr.end()) return it->second;
+    auto code = spv_read(g_spv_dir + "/" + spv_name(prog) + ".pbr.spv");
+    static int missing = 0;
+    if (!code) {
+        // o .spv normal pode ter vindo de uma captura que não existe mais: o programa vai para miss/ e a
+        // próxima rodada do usse_build_cache.py gera a variante (sem textura difusa ele só o ignora)
+        const std::string gxp = g_spv_dir + "/miss/" + spv_name(prog) + ".gxp";
+        std::error_code ec;
+        if (!std::filesystem::exists(gxp, ec)) {
+            std::filesystem::create_directories(g_spv_dir + "/miss", ec);
+            std::ofstream o(gxp, std::ios::binary);
+            o.write(reinterpret_cast<const char *>(ptr<uint8_t>(prog)), rd32(prog + 8));
+        }
+        if (missing++ < 3)
+            logf("vitart: PBR: sem %s.pbr.spv no cache (rode tools/usse_build_cache.py de novo)", spv_name(prog).c_str());
+    }
+    return g_spv_pbr[prog] = code;
+}
+// O que o PBR lê dos parâmetros de um programa: o recurso da textura difusa (fragmento) e as palavras
+// de g_Projection e das luzes no default uniform buffer (vértice, contêiner 14).
+struct PbrProgInfo {
+    int diffuse = -1;
+    pbr::VertexInfo vi;
+};
+static const PbrProgInfo &pbr_prog(uint32_t prog) {
+    static std::unordered_map<uint32_t, PbrProgInfo> cache;
+    auto it = cache.find(prog);
+    if (it != cache.end()) return it->second;
+    PbrProgInfo info;
+    const uint32_t n = rd32(prog + 0x24);
+    for (uint32_t i = 0; i < n; i++) {
+        const uint32_t p = gxp_param(prog, i);
+        const char *name = gstr(p + rd32(p));
+        const uint32_t cat = *ptr<uint8_t>(p + 4) & 15, cont = *ptr<uint8_t>(p + 5) >> 4;
+        const int res = (int)rd32(p + 12);
+        if (cat == 2 && !std::strcmp(name, "sTextureSampler")) info.diffuse = res;
+        if (cat != 1 || cont != 14) continue;
+        if (!std::strcmp(name, "g_Projection")) info.vi.proj = res;
+        else if (!std::strcmp(name, "g_LightDir")) info.vi.light_dir = res;
+        else if (!std::strcmp(name, "g_LightColor")) info.vi.light_color = res;
+        else if (!std::strcmp(name, "g_Ambient")) info.vi.ambient = res;
+    }
+    return cache[prog] = info;
+}
+// Blend que o PBR respeita: nenhum ou alfa comum. Aditivo e multiplicativo (fogo, brilho, sombras
+// pintadas) ficam com a cor original.
+static bool pbr_blend_ok(const gvk::Draw &d) {
+    if (!d.has_blend || ((d.blend >> 8) & 15) == 0) return true;
+    const uint32_t src = (d.blend >> 16) & 15, dst = (d.blend >> 20) & 15;
+    return dst != 1 && dst != 11 && src != 6 && src != 7;
 }
 
 // Formato de atributo (SceGxmAttributeFormat) -> float, normalizado quando pedido.
@@ -684,6 +755,9 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
     d.vs = vs->data(), d.vs_size = (uint32_t)vs->size() * 4;
     d.fs = fs->data(), d.fs_size = (uint32_t)fs->size() * 4;
     std::vector<std::shared_ptr<std::vector<uint8_t>>> keep;
+    const PbrProgInfo &pinfo_f = pbr_prog(fp->program);
+    int diffuse_idx = -1;      // posição da textura difusa em d.textures (só textura comum, não alvo)
+    uint64_t diffuse_key = 0;  // material PBR dela
     for (uint32_t i = 0; i < 16; i++) {
         if (!c.textures[i]) continue;
         std::array<uint32_t, 4> w;
@@ -718,6 +792,9 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
                     e.rw = e.rh = 0, e.tp_key = 0;
                     if (ok)
                         if (const uint64_t k = texpack_key(info, n)) texpack_start(k), e.tp_key = k; // HD em segundo plano
+                    e.mat_key = ok ? pbr::key_for(ptr<uint8_t>(info.data), n, info.width, info.height,
+                                                  info.base == 0x95000000u && info.palette ? ptr<uint8_t>(info.palette) : nullptr)
+                                   : 0;
                     if (!ok) {
                         px.reset();
                         if (census()) {
@@ -737,6 +814,7 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
                 if (finished) e.tp_key = 0;
             }
             if (!e.px) continue;
+            if ((int)i == pinfo_f.diffuse) diffuse_idx = (int)d.textures.size(), diffuse_key = e.mat_key;
             keep.push_back(e.px);
             t.rgba = e.px->data();
             t.key = (e.rw ? e.hash ^ 0x9E3779B97F4A7C15ull : e.hash) | 1; // HD do pack é outra textura na GPU
@@ -749,6 +827,32 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
             }
         }
         d.textures.push_back(t);
+    }
+    // PBR: troca o fragmento pela variante PBR quando a textura difusa tem material, o vértice tem
+    // projeção em perspectiva e o blend não é aditivo/multiplicativo.
+    if (diffuse_idx >= 0 && c.vuniform && pbr::enabled()) {
+        const uint32_t frame = g_present_frame.load();
+        std::shared_ptr<const pbr::Material> mat = pbr::material(diffuse_key, frame);
+        if (!mat && pbr::config().all_surfaces) mat = pbr::neutral();
+        std::shared_ptr<std::vector<uint32_t>> pfs;
+        if (mat && pbr_blend_ok(d) && (pfs = spv_pbr_of(fp->program)) &&
+            pbr::params(pbr_prog(vp->program).vi, ptr<float>(c.vuniform), vsize / 4, frame, d.pbr_params)) {
+            d.pbr = true;
+            d.fs = pfs->data(), d.fs_size = (uint32_t)pfs->size() * 4;
+            const gvk::Texture &dt = d.textures[diffuse_idx];
+            for (int k = 0; k < 2; k++) {
+                gvk::Texture &m = d.pbr_maps[k];
+                const auto &px = k ? mat->orm : mat->normal;
+                m = dt; // mesma amostragem (endereçamento e filtro) da difusa
+                m.target_addr = 0, m.depth = false;
+                m.width = k ? mat->ow : mat->nw, m.height = k ? mat->oh : mat->nh;
+                m.rgba = px->data();
+                m.key = ((mat->key ^ (k ? 0x4F524D0000000000ull : 0x4E524D0000000000ull)) * 0x9E3779B97F4A7C15ull) | 1;
+                m.mip_count = 1, m.mip_filter = 1, m.lod_bias = 31;
+                keep.push_back(px);
+            }
+            g_pbr_draws++;
+        }
     }
     const uint64_t tg = now_ns();
     g_t_tex += tg - t_tex0;
@@ -789,6 +893,11 @@ static void hitch_tick() {
     prev = st;
     if (now - window > std::chrono::seconds(10)) {
         if (frames > 300) logf("vitart: ritmo: %u quadros em 10 s, %u acima de 25 ms (pior %.1f ms)", wframes, slow, worst);
+        static uint64_t pbr_prev = 0, draws_prev = 0;
+        if (g_pbr_draws != pbr_prev)
+            logf("vitart: PBR em %llu de %llu desenhos nos últimos 10 s", (unsigned long long)(g_pbr_draws - pbr_prev),
+                 (unsigned long long)(g_vk_draws - draws_prev));
+        pbr_prev = g_pbr_draws, draws_prev = g_vk_draws;
         window = now, slow = 0, worst = 0, wframes = 0;
     }
 }
@@ -802,6 +911,10 @@ void gxm_present(uint32_t fb) {
         g_texcache.clear(); // tudo é decodificado de novo no próximo uso, com ou sem o pack
         g_texpack_bytes = 0;
         logf("vitart: texturas HD %s", g_texpack_on ? "ligadas" : "desligadas");
+    }
+    {
+        const std::lock_guard<std::mutex> lock(g_vk_mutex);
+        pbr::tick(g_present_frame.load()); // pbr.ini ao vivo e mapas parados fora da memória
     }
     if (g_texpack_bytes > (1536ull << 20)) {
         const std::lock_guard<std::mutex> lock(g_vk_mutex);

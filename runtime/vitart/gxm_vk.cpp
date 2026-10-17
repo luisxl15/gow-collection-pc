@@ -6,6 +6,7 @@
 // próprio fluxo (sem laço de realimentação e sem esperar a GPU). A espera só acontece ao apresentar, ao
 // ler um alvo ou quando o anel enche.
 #include "gxm_vk.h"
+#include "pbr.h"
 #include "trophy_banner.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -47,7 +48,7 @@ VkFence g_pfence = VK_NULL_HANDLE;
 VkFence g_fence = VK_NULL_HANDLE;
 VkPhysicalDeviceMemoryProperties g_memprops{};
 VkRenderPass g_rp = VK_NULL_HANDLE;
-VkDescriptorSetLayout g_dsl[3] = {};
+VkDescriptorSetLayout g_dsl[5] = {}; // 3: mapas do PBR, 4: parâmetros do PBR
 VkPipelineLayout g_layout = VK_NULL_HANDLE;
 VkSampler g_sampler = VK_NULL_HANDLE, g_sampler_nearest = VK_NULL_HANDLE;
 constexpr uint32_t kTexBindings = 16;
@@ -248,6 +249,7 @@ uint32_t g_fi = 0; // vaga atual
 // persistente que é esvaziado quando enche ou quando imagens são destruídas.
 constexpr VkDeviceSize kUBWindow = 1u << 20; // janela de cada descritor dinâmico (uniforms + depuração)
 VkDescriptorSet g_ubsets[kSlots][2] = {};
+VkDescriptorSet g_pbrsets[kSlots] = {}; // set 4 (parâmetros do PBR por desenho, deslocamento dinâmico)
 VkDescriptorPool g_tex_pool = VK_NULL_HANDLE;
 constexpr uint32_t kTexSets = 4096;
 std::unordered_map<uint64_t, VkDescriptorSet> g_tex_sets;
@@ -364,23 +366,25 @@ bool frame_begin() {
     VKC(vkResetDescriptorPool(g_dev, g_dpool, 0));
     {
         // Conjuntos de uniforms da vaga: o anel inteiro, deslocamento dinâmico por desenho.
-        VkDescriptorSetLayout ls[2] = {g_dsl[0], g_dsl[2]};
+        VkDescriptorSetLayout ls[3] = {g_dsl[0], g_dsl[2], g_dsl[4]};
+        VkDescriptorSet got[3];
         VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         dai.descriptorPool = g_dpool;
-        dai.descriptorSetCount = 2;
+        dai.descriptorSetCount = 3;
         dai.pSetLayouts = ls;
-        VKC(vkAllocateDescriptorSets(g_dev, &dai, g_ubsets[g_fi]));
+        VKC(vkAllocateDescriptorSets(g_dev, &dai, got));
+        g_ubsets[g_fi][0] = got[0], g_ubsets[g_fi][1] = got[1], g_pbrsets[g_fi] = got[2];
         VkDescriptorBufferInfo bi{g_ring.buf, 0, kUBWindow};
-        VkWriteDescriptorSet w[4]{};
-        for (int i = 0; i < 4; i++) {
+        VkWriteDescriptorSet w[5]{};
+        for (int i = 0; i < 5; i++) {
             w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            w[i].dstSet = g_ubsets[g_fi][i / 2];
-            w[i].dstBinding = i & 1;
+            w[i].dstSet = i < 4 ? g_ubsets[g_fi][i / 2] : g_pbrsets[g_fi];
+            w[i].dstBinding = i < 4 ? i & 1 : 0;
             w[i].descriptorCount = 1;
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
             w[i].pBufferInfo = &bi;
         }
-        vkUpdateDescriptorSets(g_dev, 4, w, 0, nullptr);
+        vkUpdateDescriptorSets(g_dev, 5, w, 0, nullptr);
     }
     // Cache de conjuntos de textura: esvaziado com a outra vaga parada (ela pode usar um deles).
     if (g_tex_sets_stale || g_tex_sets.size() >= kTexSets) {
@@ -492,6 +496,8 @@ struct Snap {
 };
 std::map<std::pair<uint32_t, bool>, Snap> g_snaps;
 Image g_white;
+// Mapas neutros do PBR (mapa ausente no desenho): normal reta e ORM com peso 0 (fica a cor original).
+Image g_pbr_flat, g_pbr_none;
 
 // Samplers por combinação de filtro e endereçamento do jogo (são poucas).
 std::map<uint32_t, VkSampler> g_samplers;
@@ -1379,16 +1385,21 @@ bool init(bool validation, bool window) {
     VkDescriptorSetLayoutBinding b2[2] = {
         {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
-    const VkDescriptorSetLayoutBinding *bs[3] = {b0, b1, b2};
-    const uint32_t bn[3] = {2, kTexBindings, 2};
-    for (int i = 0; i < 3; i++) {
+    // PBR: set 3 = normal map e ORM; set 4 = parâmetros por desenho (vitarecomp/usse/pbr.py).
+    VkDescriptorSetLayoutBinding b3[2] = {
+        {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
+    VkDescriptorSetLayoutBinding b4[1] = {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
+    const VkDescriptorSetLayoutBinding *bs[5] = {b0, b1, b2, b3, b4};
+    const uint32_t bn[5] = {2, kTexBindings, 2, 2, 1};
+    for (int i = 0; i < 5; i++) {
         VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         li.bindingCount = bn[i];
         li.pBindings = bs[i];
         VKC(vkCreateDescriptorSetLayout(g_dev, &li, nullptr, &g_dsl[i]));
     }
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    pli.setLayoutCount = 3;
+    pli.setLayoutCount = 5;
     pli.pSetLayouts = g_dsl;
     VKC(vkCreatePipelineLayout(g_dev, &pli, nullptr, &g_layout));
     {
@@ -1440,9 +1451,9 @@ bool init(bool validation, bool window) {
         g_ring_ptr = static_cast<uint8_t *>(p);
     }
     {
-        VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 4};
+        VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 5};
         VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        dpi.maxSets = 2;
+        dpi.maxSets = 3;
         dpi.poolSizeCount = 1;
         dpi.pPoolSizes = &ps;
         for (auto &dp : g_dpools) VKC(vkCreateDescriptorPool(g_dev, &dpi, nullptr, &dp));
@@ -1456,7 +1467,10 @@ bool init(bool validation, bool window) {
     }
     // A janela nasce na primeira apresentação: as mensagens só chegam à thread que a criou, e quem
     // apresenta é a thread de vídeo, não a que inicializa.
-    if (!frame_reserve(64) || !upload_texture(g_white, 1, 1, white)) return false;
+    const uint8_t flat[4] = {128, 128, 255, 255}, none[4] = {255, 204, 0, 0};
+    if (!frame_reserve(64) || !upload_texture(g_white, 1, 1, white) || !upload_texture(g_pbr_flat, 1, 1, flat) ||
+        !upload_texture(g_pbr_none, 1, 1, none))
+        return false;
     return frame_flush(true);
 }
 
@@ -1488,6 +1502,11 @@ bool draw(const Draw &d) {
         if (t.target_addr || !t.rgba) continue;
         keys[i] = t.key ? t.key : fnv(t.rgba, (size_t)t.width * t.height * 4, fnv(&t.width, 8));
         if (!g_textures.count(keys[i])) need += (VkDeviceSize)t.width * t.height * 4 + 16;
+    }
+    if (d.pbr) {
+        need += sizeof d.pbr_params + g_ssbo_align;
+        for (const Texture &t : d.pbr_maps)
+            if (t.rgba && t.key && !g_textures.count(t.key)) need += (VkDeviceSize)t.width * t.height * 4 + 16;
     }
     if (!frame_reserve(need)) return false;
     Target *tgt;
@@ -1565,6 +1584,48 @@ bool draw(const Draw &d) {
         g_tex_used[h] = g_frame_no;
     }
 
+    // PBR: normal map e ORM (cache por conteúdo, com mipmaps) no set 3, cacheado como as texturas.
+    VkDescriptorSet pbr_set = VK_NULL_HANDLE;
+    if (d.pbr) {
+        VkDescriptorImageInfo mi[2] = {{g_sampler, g_pbr_flat.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                                       {g_sampler, g_pbr_none.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+        for (int k = 0; k < 2; k++) {
+            const Texture &t = d.pbr_maps[k];
+            if (!t.rgba || !t.key) continue;
+            auto it = g_textures.find(t.key);
+            if (it == g_textures.end()) {
+                Image im;
+                if (!upload_texture(im, t.width, t.height, t.rgba, t.width > 1 && t.height > 1)) return false;
+                it = g_textures.emplace(t.key, im).first;
+            }
+            mi[k].imageView = it->second.view;
+            mi[k].sampler = sampler_for(t);
+            g_tex_used[t.key] = g_frame_no;
+        }
+        uint64_t key = 0x5042520000000000ull; // "PBR": não colide com os conjuntos do set 1
+        for (const VkDescriptorImageInfo &ii : mi) {
+            key = (key ^ (uint64_t)(uintptr_t)ii.imageView) * 1099511628211ull;
+            key = (key ^ (uint64_t)(uintptr_t)ii.sampler) * 1099511628211ull;
+        }
+        auto it = g_tex_sets.find(key);
+        if (it != g_tex_sets.end()) {
+            pbr_set = it->second;
+        } else {
+            VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            dai.descriptorPool = g_tex_pool;
+            dai.descriptorSetCount = 1;
+            dai.pSetLayouts = &g_dsl[3];
+            VKC(vkAllocateDescriptorSets(g_dev, &dai, &pbr_set));
+            VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            w.dstSet = pbr_set;
+            w.descriptorCount = 2;
+            w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w.pImageInfo = mi;
+            vkUpdateDescriptorSets(g_dev, 1, &w, 0, nullptr);
+            g_tex_sets[key] = pbr_set;
+        }
+    }
+
     tgt->cver++;
     if (d.depth_write) tgt->dver++;
 
@@ -1635,6 +1696,15 @@ bool draw(const Draw &d) {
     vp.minDepth = vp.minDepth < 0 ? 0 : (vp.minDepth > 1 ? 1 : vp.minDepth);
     vp.maxDepth = vp.maxDepth < 0 ? 0 : (vp.maxDepth > 1 ? 1 : vp.maxDepth);
     vkCmdSetViewport(g_cmd, 0, 1, &vp);
+    if (d.pbr) {
+        float prm[kPbrParamFloats];
+        std::memcpy(prm, d.pbr_params, sizeof prm);
+        // Pixel -> câmera: a inversa de g_Projection vezes a inversa do viewport usado na GPU.
+        vt::pbr::screen_to_view(d.pbr_params, vp.x, vp.y, vp.width, vp.height, vp.minDepth, vp.maxDepth, prm);
+        const uint32_t poff = (uint32_t)ring_put(prm, sizeof prm, g_ssbo_align);
+        VkDescriptorSet s34[2] = {pbr_set, g_pbrsets[g_fi]};
+        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 3, 2, s34, 1, &poff);
+    }
     VkRect2D sc{{0, 0}, {tgt->color.w, tgt->color.h}};
     vkCmdSetScissor(g_cmd, 0, 1, &sc);
     vkCmdSetStencilCompareMask(g_cmd, VK_STENCIL_FACE_FRONT_BIT, d.front.cmask);
@@ -1797,6 +1867,7 @@ void shutdown() {
         destroy(kv.second.color), destroy(kv.second.depth);
     }
     destroy(g_white);
+    destroy(g_pbr_flat), destroy(g_pbr_none);
     for (auto &kv : g_samplers)
         if (kv.second != g_sampler) vkDestroySampler(g_dev, kv.second, nullptr);
     vkDestroySampler(g_dev, g_sampler, nullptr);
