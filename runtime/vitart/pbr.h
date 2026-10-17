@@ -21,7 +21,14 @@ struct Config {
     float specular = 1.0f;        // especular das luzes
     float env_specular = 0.5f;    // especular de ambiente (céu/chão)
     float baked_max = 4.0f;       // teto da razão cor original / textura (luz assada)
-    float roughness_scale = 1.0f, metallic_scale = 1.0f, ao_strength = 1.0f;
+    float roughness_scale = 0.75f, metallic_scale = 1.0f, ao_strength = 1.0f;
+    // Luz-chave de relevo (vitarecomp/usse/pbr.py): direção em espaço de câmera, força do relevo e brilho.
+    float key_dir[3] = {-0.35f, 0.75f, 0.55f};
+    float relief = 0.8f, key_spec = 0.5f;
+    // Iluminação de tela (gxm_vk.cpp, runtime/vitart/post): oclusão de ambiente, bloom e curva fílmica.
+    bool post = true;
+    float ssao = 0.8f, ssao_radius = 40.f, bloom = 0.35f, bloom_threshold = 0.7f, exposure = 1.08f, tonemap = 0.6f,
+          saturation = 1.08f, vignette = 0.15f;
     float default_roughness = 0.8f; // material neutro (all_surfaces)
     int debug = 0;                  // 1 normal, 2 luz assada, 3 rugosidade, 4 metal, 5 oclusão, 6 posição, 7 detalhe
     float sky[3] = {0.55f, 0.60f, 0.70f}, ground[3] = {0.22f, 0.20f, 0.18f}, up[3] = {0.f, 1.f, 0.f};
@@ -52,6 +59,8 @@ struct VertexInfo {
 };
 // Parâmetros por desenho (layout PARAMS de pbr.py). vu: default uniform buffer do vértice. false se o
 // desenho não tem projeção em perspectiva (HUD, passadas de tela): fica sem PBR.
+// Inversa de g_Projection (NDC do GXM -> câmera, coluna a coluna); false se não é perspectiva.
+bool inv_projection(const VertexInfo &vi, const float *vu, uint32_t vu_words, float out[16]);
 bool params(const VertexInfo &vi, const float *vu, uint32_t vu_words, uint32_t present_frame,
             float out[gvk::kPbrParamFloats]);
 

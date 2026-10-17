@@ -522,6 +522,9 @@ static std::shared_ptr<std::vector<uint32_t>> spv_of(uint32_t prog) {
 // ------------------------------------------------------------------ PBR (pbr.h, docs/pbr.md)
 // Variante PBR do fragmento (<hash>.pbr.spv, gerada pelo usse_build_cache.py); nula se não existe.
 static std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint32_t>>> g_spv_pbr;
+// VITART_PBR_AB=1 com VITART_VK_DUMP: depois de cada captura, 4 quadros sem PBR e o último também é gravado
+// (comparar com e sem PBR na mesma cena, um quadro de distância).
+static bool g_pbr_ab_off = false;
 static std::shared_ptr<std::vector<uint32_t>> spv_pbr_of(uint32_t prog) {
     auto it = g_spv_pbr.find(prog);
     if (it != g_spv_pbr.end()) return it->second;
@@ -568,12 +571,11 @@ static const PbrProgInfo &pbr_prog(uint32_t prog) {
     }
     return cache[prog] = info;
 }
-// Blend que o PBR respeita: nenhum ou alfa comum. Aditivo e multiplicativo (fogo, brilho, sombras
-// pintadas) ficam com a cor original.
+// O PBR só entra em superfícies opacas (sem blend). Qualquer desenho com blend fica com a cor original:
+// aditivo e multiplicativo (fogo, brilho, sombras pintadas) e também o alfa comum, que no GoW é névoa,
+// fumaça e camadas de chuva; com PBR elas perdiam a névoa e ganhavam brilho onde não há superfície.
 static bool pbr_blend_ok(const gvk::Draw &d) {
-    if (!d.has_blend || ((d.blend >> 8) & 15) == 0) return true;
-    const uint32_t src = (d.blend >> 16) & 15, dst = (d.blend >> 20) & 15;
-    return dst != 1 && dst != 11 && src != 6 && src != 7;
+    return !d.has_blend || ((d.blend >> 8) & 15) == 0;
 }
 
 // Formato de atributo (SceGxmAttributeFormat) -> float, normalizado quando pedido.
@@ -828,9 +830,11 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
         }
         d.textures.push_back(t);
     }
+    if (c.vuniform && pbr::config().post)
+        d.view_inv_ok = pbr::inv_projection(pbr_prog(vp->program).vi, ptr<float>(c.vuniform), vsize / 4, d.view_inv);
     // PBR: troca o fragmento pela variante PBR quando a textura difusa tem material, o vértice tem
-    // projeção em perspectiva e o blend não é aditivo/multiplicativo.
-    if (diffuse_idx >= 0 && c.vuniform && pbr::enabled()) {
+    // projeção em perspectiva e a superfície é opaca.
+    if (diffuse_idx >= 0 && c.vuniform && pbr::enabled() && !g_pbr_ab_off) {
         const uint32_t frame = g_present_frame.load();
         std::shared_ptr<const pbr::Material> mat = pbr::material(diffuse_key, frame);
         if (!mat && pbr::config().all_surfaces) mat = pbr::neutral();
@@ -927,7 +931,14 @@ void gxm_present(uint32_t fb) {
     }
     static uint32_t frame = 0;
     static const uint32_t dump_at = getenv("VITART_VK_DUMP") ? (uint32_t)std::atoi(getenv("VITART_VK_DUMP")) : 0;
-    if (++frame == dump_at || (dump_at && frame % (dump_at < 300 ? dump_at : 300) == 0)) {
+    static const bool pbr_ab = getenv("VITART_PBR_AB") != nullptr;
+    // a leitura do alvo pode ver um quadro anterior (quadros em voo): o PBR fica desligado por 4 quadros
+    // e a captura sem ele é a do último
+    static int ab_left = 0;
+    const bool ab_dump = ab_left > 0 && --ab_left == 0;
+    if (ab_dump) g_pbr_ab_off = false, gvk::set_post_bypass(false);
+    if (++frame == dump_at || ab_dump || (dump_at && frame % (dump_at < 300 ? dump_at : 300) == 0)) {
+        if (pbr_ab && !ab_dump) g_pbr_ab_off = true, ab_left = 4, gvk::set_post_bypass(true);
         // Quadro apresentado em PPM (RGB): medir a imagem sem captura de tela.
         std::vector<uint8_t> px;
         uint32_t w, h;

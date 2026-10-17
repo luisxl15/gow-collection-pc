@@ -87,6 +87,10 @@ struct Draw {
     bool pbr = false;
     Texture pbr_maps[2];
     float pbr_params[kPbrParamFloats] = {};
+    // Inversa de g_Projection do desenho (como pbr_params[0..15]), para o pós-processamento reconstruir a
+    // posição pela profundidade; vale em qualquer desenho 3D, com ou sem PBR.
+    bool view_inv_ok = false;
+    float view_inv[16] = {};
 
 };
 
@@ -117,6 +121,8 @@ void set_fps_counter(bool on);
 uint32_t measured_fps();
 // Janela sem bordas ocupando o monitor (o mesmo modo do F11 / Alt+Enter).
 void set_borderless(bool on);
+// Teste: desliga o pós-processamento (iluminação de tela) enquanto ligado.
+void set_post_bypass(bool on);
 // Aviso de troféu igual ao do PS Vita (ícone, nível, nome), desenhado sobre o quadro.
 struct TrophyBanner;
 void notify_trophy(const TrophyBanner &t);

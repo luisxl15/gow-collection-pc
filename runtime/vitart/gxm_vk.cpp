@@ -8,6 +8,7 @@
 #include "gxm_vk.h"
 #include "pbr.h"
 #include "trophy_banner.h"
+#include "post_shaders.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -449,7 +450,8 @@ bool get_target(uint32_t addr, uint32_t w, uint32_t h, Target *&out) {
     Target t;
     w *= scale_now(), h *= scale_now();
     if (!make_image(t.color, w, h, kColor,
-                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                        VK_IMAGE_USAGE_STORAGE_BIT))
         return false;
     if (!make_image(t.depth, w, h, kDepth,
                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT))
@@ -1158,9 +1160,13 @@ static void overlay_fps(VkImage img, int32_t x0, int32_t y0) {
     vkCmdCopyBufferToImage(g_pcmd, g_ovl.buf, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
 }
 
+void post_at_present(uint32_t addr); // iluminação de tela (mais abaixo)
+void set_post_bypass(bool on);
+
 bool present(uint32_t addr) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (!g_dev) return false;
+    post_at_present(addr);
     // O quadro vai para a fila sem esperar; o blit vem depois na mesma fila, que garante a ordem.
     if (!frame_flush(false)) return false;
     if (!g_swap && !g_hwnd && !create_window()) return false;
@@ -1474,6 +1480,230 @@ bool init(bool validation, bool window) {
     return frame_flush(true);
 }
 
+// ------------------------------------------------------------------ iluminação de tela (runtime/vitart/post)
+// Oclusão de ambiente pela profundidade, bloom e curva fílmica, aplicados no alvo que vai para a tela
+// ANTES do HUD. Onde o HUD começa sai do quadro anterior: o índice logo depois do último desenho 3D
+// (teste ou escrita de profundidade) naquele alvo. A ordem dos desenhos do jogo é estável de um quadro
+// para o outro; quadros sem nada 3D (menus, vídeos) ficam como estão.
+struct PostRes {
+    Image col, dep, a, b; // cópias (amostradas) e as duas imagens de meia resolução
+    uint32_t w = 0, h = 0;
+};
+PostRes g_post;
+VkDescriptorSetLayout g_post_dsl = VK_NULL_HANDLE;
+VkPipelineLayout g_post_layout = VK_NULL_HANDLE;
+VkPipeline g_post_pipe[3] = {};
+VkDescriptorPool g_post_pool = VK_NULL_HANDLE;
+VkDescriptorSet g_post_sets[kSlots] = {};
+bool g_post_failed = false;
+bool g_post_bypass = false; // comparação com e sem (VITART_PBR_AB)
+uint32_t g_main_addr = 0, g_main_idx = 0, g_hud_at = UINT32_MAX;
+int g_last3d = -1;
+bool g_post_done = false, g_post_s2v_ok = false;
+float g_post_s2v[16];
+uint32_t g_post_frames = 0;
+
+struct PostPush {
+    float s2v[16];
+    float p0[4], p1[4], p2[4], p3[4];
+};
+
+bool post_init() {
+    if (g_post_layout) return true;
+    if (g_post_failed) return false;
+    g_post_failed = true;
+    VkDescriptorSetLayoutBinding b[6]{};
+    const VkDescriptorType types[6] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                       VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                       VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    for (uint32_t i = 0; i < 6; i++) {
+        b[i].binding = i;
+        b[i].descriptorType = types[i];
+        b[i].descriptorCount = 1;
+        b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo dl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    dl.bindingCount = 6;
+    dl.pBindings = b;
+    VKC(vkCreateDescriptorSetLayout(g_dev, &dl, nullptr, &g_post_dsl));
+    VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PostPush)};
+    VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pl.setLayoutCount = 1;
+    pl.pSetLayouts = &g_post_dsl;
+    pl.pushConstantRangeCount = 1;
+    pl.pPushConstantRanges = &pr;
+    VKC(vkCreatePipelineLayout(g_dev, &pl, nullptr, &g_post_layout));
+    const uint32_t *code[3] = {kPost_prep, kPost_blur, kPost_final};
+    const size_t size[3] = {sizeof kPost_prep, sizeof kPost_blur, sizeof kPost_final};
+    for (int i = 0; i < 3; i++) {
+        VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        mi.codeSize = size[i];
+        mi.pCode = code[i];
+        VkShaderModule m;
+        VKC(vkCreateShaderModule(g_dev, &mi, nullptr, &m));
+        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        ci.stage.module = m;
+        ci.stage.pName = "main";
+        ci.layout = g_post_layout;
+        const VkResult r = vkCreateComputePipelines(g_dev, g_pcache, 1, &ci, nullptr, &g_post_pipe[i]);
+        vkDestroyShaderModule(g_dev, m, nullptr);
+        if (r != VK_SUCCESS) return fail("pipeline do pós-processamento", r);
+    }
+    VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * kSlots},
+                                  {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 * kSlots}};
+    VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dp.maxSets = kSlots;
+    dp.poolSizeCount = 2;
+    dp.pPoolSizes = ps;
+    VKC(vkCreateDescriptorPool(g_dev, &dp, nullptr, &g_post_pool));
+    VkDescriptorSetLayout ls[kSlots];
+    for (auto &l : ls) l = g_post_dsl;
+    VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    da.descriptorPool = g_post_pool;
+    da.descriptorSetCount = kSlots;
+    da.pSetLayouts = ls;
+    VKC(vkAllocateDescriptorSets(g_dev, &da, g_post_sets));
+    g_post_failed = false;
+    return true;
+}
+
+bool post_resources(uint32_t w, uint32_t h) {
+    if (g_post.w == w && g_post.h == h) return true;
+    vkDeviceWaitIdle(g_dev); // as imagens antigas podem estar em uso no outro quadro em voo
+    destroy(g_post.col), destroy(g_post.dep), destroy(g_post.a), destroy(g_post.b);
+    g_post.w = g_post.h = 0;
+    const uint32_t hw = (w + 1) / 2, hh = (h + 1) / 2;
+    const VkImageUsageFlags half = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (!make_image(g_post.col, w, h, kColor, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
+        !make_image(g_post.dep, w, h, kDepth, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
+        !make_image(g_post.a, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT, half) ||
+        !make_image(g_post.b, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT, half))
+        return false;
+    g_post.w = w, g_post.h = h;
+    return true;
+}
+
+void compute_barrier() {
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(g_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0,
+                         nullptr, 0, nullptr);
+}
+
+// Aplica o pós-processamento no alvo (gravado no quadro atual). Marca o quadro como feito mesmo se não
+// houver o que fazer, para não tentar de novo.
+void run_post(Target &t) {
+    g_post_done = true;
+    const vt::pbr::Config &cfg = vt::pbr::config();
+    static const bool env_off = getenv("VITART_POST") && *getenv("VITART_POST") == '0';
+    if (env_off || g_post_bypass || !cfg.post || !g_post_s2v_ok || !post_init()) return;
+    if (!frame_begin()) return;
+    const uint32_t w = t.color.w, h = t.color.h;
+    if (!post_resources(w, h)) return;
+    end_pass();
+    // cópias amostráveis da cor e da profundidade do alvo
+    barrier(t.color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    barrier(t.depth, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    barrier(g_post.col, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    barrier(g_post.dep, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkImageCopy c{};
+    c.srcSubresource = c.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    c.extent = {w, h, 1};
+    vkCmdCopyImage(g_cmd, t.color.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_post.col.img,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+    c.srcSubresource.aspectMask = c.dstSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    vkCmdCopyImage(g_cmd, t.depth.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_post.dep.img,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+    barrier(g_post.col, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    barrier(g_post.dep, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    barrier(t.depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    barrier(t.color, VK_IMAGE_LAYOUT_GENERAL);
+    barrier(g_post.a, VK_IMAGE_LAYOUT_GENERAL);
+    barrier(g_post.b, VK_IMAGE_LAYOUT_GENERAL);
+
+    VkDescriptorSet set = g_post_sets[g_fi];
+    VkDescriptorImageInfo ii[6] = {
+        {g_sampler, g_post.col.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {g_sampler_nearest, g_post.dep.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {VK_NULL_HANDLE, g_post.a.view, VK_IMAGE_LAYOUT_GENERAL},
+        {VK_NULL_HANDLE, g_post.b.view, VK_IMAGE_LAYOUT_GENERAL},
+        {g_sampler, g_post.a.view, VK_IMAGE_LAYOUT_GENERAL},
+        {VK_NULL_HANDLE, t.color.view, VK_IMAGE_LAYOUT_GENERAL},
+    };
+    VkWriteDescriptorSet wr[6]{};
+    for (uint32_t i = 0; i < 6; i++) {
+        wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        wr[i].dstSet = set;
+        wr[i].dstBinding = i;
+        wr[i].descriptorCount = 1;
+        wr[i].descriptorType = (i == 2 || i == 3 || i == 5) ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+                                                            : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wr[i].pImageInfo = &ii[i];
+    }
+    vkUpdateDescriptorSets(g_dev, 6, wr, 0, nullptr);
+
+    // foco: pixels por unidade do jogo a 1 unidade de distância, medido na própria matriz
+    auto view = [&](float x, float y, float z, float o[3]) {
+        float v[4];
+        for (int r = 0; r < 4; r++) v[r] = g_post_s2v[r] * x + g_post_s2v[4 + r] * y + g_post_s2v[8 + r] * z + g_post_s2v[12 + r];
+        for (int k = 0; k < 3; k++) o[k] = v[k] / (std::fabs(v[3]) > 1e-12f ? v[3] : 1e-12f);
+    };
+    float q0[3], q1[3];
+    view(w * 0.5f, h * 0.5f, 0.5f, q0);
+    view(w * 0.5f + 1.f, h * 0.5f, 0.5f, q1);
+    const float upp = std::sqrt((q1[0] - q0[0]) * (q1[0] - q0[0]) + (q1[1] - q0[1]) * (q1[1] - q0[1]) + (q1[2] - q0[2]) * (q1[2] - q0[2]));
+    const float focal = upp > 1e-9f ? std::fabs(q0[2]) / upp : 0.f;
+
+    PostPush pp{};
+    std::memcpy(pp.s2v, g_post_s2v, sizeof pp.s2v);
+    const float hw = (float)((w + 1) / 2), hh = (float)((h + 1) / 2), rs = (float)scale_now();
+    pp.p0[0] = focal, pp.p0[1] = cfg.ssao_radius, pp.p0[2] = focal > 0 ? cfg.ssao : 0.f, pp.p0[3] = cfg.bloom_threshold;
+    pp.p1[0] = cfg.bloom, pp.p1[1] = cfg.exposure, pp.p1[2] = cfg.tonemap, pp.p1[3] = cfg.saturation;
+    pp.p2[0] = cfg.vignette, pp.p2[1] = (float)w, pp.p2[2] = (float)h, pp.p2[3] = 0.f;
+    pp.p3[0] = hw, pp.p3[1] = hh, pp.p3[2] = (float)(g_post_frames++ & 63), pp.p3[3] = 1.5f * rs;
+    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_post_layout, 0, 1, &set, 0, nullptr);
+    auto run = [&](int pipe, uint32_t gw, uint32_t gh) {
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_post_pipe[pipe]);
+        vkCmdPushConstants(g_cmd, g_post_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pp, &pp);
+        vkCmdDispatch(g_cmd, (gw + 7) / 8, (gh + 7) / 8, 1);
+        compute_barrier();
+    };
+    run(0, (uint32_t)hw, (uint32_t)hh);
+    pp.p2[3] = 0.f;
+    run(1, (uint32_t)hw, (uint32_t)hh);
+    pp.p2[3] = 1.f;
+    run(1, (uint32_t)hw, (uint32_t)hh);
+    run(2, w, h);
+    barrier(t.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    t.cver++;
+}
+
+// Chamado em cada desenho, antes de gravá-lo: conta os desenhos do alvo da tela e aplica o pós no ponto
+// onde o HUD começou no quadro anterior.
+void post_before_draw(const Draw &d, Target &t) {
+    if (d.target_addr != g_main_addr) return;
+    const bool is3d = d.depth_func != 7 || d.depth_write;
+    const uint32_t idx = g_main_idx++;
+    if (!is3d && !g_post_done && g_hud_at != UINT32_MAX && idx >= g_hud_at) run_post(t);
+    if (is3d) g_last3d = (int)idx;
+}
+
+void set_post_bypass(bool on) { g_post_bypass = on; }
+
+// No present: o quadro que não chegou ao ponto do HUD (sem HUD) recebe o pós aqui; prepara o próximo.
+void post_at_present(uint32_t addr) {
+    if (addr == g_main_addr && !g_post_done && g_last3d >= 0) {
+        auto it = g_targets.find(addr);
+        if (it != g_targets.end()) run_post(it->second);
+    }
+    g_hud_at = (addr == g_main_addr && g_last3d >= 0) ? (uint32_t)g_last3d + 1 : UINT32_MAX;
+    g_main_addr = addr;
+    g_main_idx = 0, g_last3d = -1, g_post_done = false, g_post_s2v_ok = false;
+}
+
 bool draw(const Draw &d) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (!d.vs || !d.fs || !d.index_count || !d.vertex_count || !d.target_w || !d.target_h) return true;
@@ -1512,6 +1742,7 @@ bool draw(const Draw &d) {
     Target *tgt;
     if (!get_target(d.target_addr, d.target_w, d.target_h, tgt)) return false;
     if (d.depth_addr) g_depth_owner[d.depth_addr] = d.target_addr;
+    post_before_draw(d, *tgt);
 
     // Texturas: imagens enviadas (cache por conteúdo) ou cópia de um alvo deste quadro.
     VkDescriptorImageInfo img_info[kTexBindings];
@@ -1696,6 +1927,10 @@ bool draw(const Draw &d) {
     vp.minDepth = vp.minDepth < 0 ? 0 : (vp.minDepth > 1 ? 1 : vp.minDepth);
     vp.maxDepth = vp.maxDepth < 0 ? 0 : (vp.maxDepth > 1 ? 1 : vp.maxDepth);
     vkCmdSetViewport(g_cmd, 0, 1, &vp);
+    if (d.view_inv_ok && d.target_addr == g_main_addr && (d.depth_func != 7 || d.depth_write)) {
+        vt::pbr::screen_to_view(d.view_inv, vp.x, vp.y, vp.width, vp.height, vp.minDepth, vp.maxDepth, g_post_s2v);
+        g_post_s2v_ok = true;
+    }
     if (d.pbr) {
         float prm[kPbrParamFloats];
         std::memcpy(prm, d.pbr_params, sizeof prm);
@@ -1802,7 +2037,8 @@ bool set_render_scale(uint32_t s) {
         const uint32_t w = t.color.w / cur * s, h = t.color.h / cur * s;
         Target n;
         if (!make_image(n.color, w, h, kColor,
-                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
+                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                            VK_IMAGE_USAGE_STORAGE_BIT) ||
             !make_image(n.depth, w, h, kDepth,
                         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT))
             return false;

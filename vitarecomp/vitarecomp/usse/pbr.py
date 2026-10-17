@@ -38,6 +38,13 @@ PARAMS = dict(
     tune_b=40,             # x modo de depuração, y multiplicador de rugosidade, z de metal, w força da oclusão
     sky=44, ground=48,     # cores do ambiente (lineares)
     up=52,                 # "para cima" em espaço de câmera
+    # Luz-chave de relevo (nas sobras .w dos vec4 acima): no GoW a luz do cenário é assada nos vértices e
+    # as luzes do desenho quase não mudam com a normal, então o normal map sozinho não aparecia. A
+    # luz-chave fixa (espaço de câmera) dá o relevo em meia-Lambert e um brilho, ambos na escala da luz
+    # assada do lugar (uma caverna escura continua escura).
+    key_x=19, key_y=23, key_z=27,  # direção PARA a luz-chave
+    relief=31,             # força do relevo pela luz-chave (0 = só as luzes do jogo)
+    key_spec=35,           # brilho da luz-chave
 )
 PARAM_FLOATS = 56
 PBR_SETS = (3, 4)
@@ -242,6 +249,10 @@ class PbrEmitter:
         nxy = tn.xy * tune_a.x
         N = m.normalize(self.T * nxy.x + self.B * nxy.y + self.Ng * tn.z)
         Ng, V = self.Ng, self.V
+        # Normal "de detalhe": o desvio do normal map sobre a direção da câmera, não sobre a normal da
+        # face. A normal geométrica vem das derivadas e é constante por triângulo; no brilho e no relevo
+        # ela desenhava cada polígono (rosto do Kratos, pedras). Assim só o relevo da textura aparece.
+        Ns = m.normalize(self.T * nxy.x + self.B * nxy.y + V * tn.z)
 
         ao = m.mix(1.0, self.orm.x, tune_b.w)
         rough = m.clamp(self.orm.y * tune_b.y, 0.045, 1.0)
@@ -262,18 +273,26 @@ class PbrEmitter:
             lit_geom = lit_geom + col * m.max(m.dot(Ng, L), 0.0)
             lit_map = lit_map + col * m.max(m.dot(N, L), 0.0)
         detail = m.clamp((m.luminance(lit_map) + 0.05) / (m.luminance(lit_geom) + 0.05), 0.0, 2.5)
+        # relevo pela luz-chave: razão meia-Lambert entre a normal mapeada e a geométrica
+        Lk = m.normalize(m.vec(self.param("key_x"), self.param("key_y"), self.param("key_z")))
+        hl_map = m.dot(Ns, Lk) * 0.5 + 0.5
+        hl_geo = m.dot(V, Lk) * 0.5 + 0.5
+        relief_ratio = m.clamp((hl_map + 0.05) / (hl_geo + 0.05), 0.0, 2.5)
+        detail = detail * m.mix(1.0, relief_ratio, self.param("relief"))
         diffuse = orig * detail * ao * (1.0 - metal)
+        local = m.clamp(m.luminance(baked), 0.0, 1.5)
 
         # Especular GGX das luzes do desenho.
         a = rough * rough
         a2 = a * a
-        NoV = m.max(m.dot(N, V), 1e-4)
+        NoV = m.max(m.dot(Ns, V), 1e-4)
         F0 = m.mix(m.const(0.04, 0.04, 0.04), albedo, metal)
         spec = m.const(0.0, 0.0, 0.0)
-        for L, col in lights:
+        key_col = m.vec(local, local, local) * self.param("key_spec")
+        for L, col in lights + [(Lk, key_col)]:
             H = m.normalize(V + L)
-            NoL = m.max(m.dot(N, L), 0.0)
-            NoH = m.max(m.dot(N, H), 0.0)
+            NoL = m.max(m.dot(Ns, L), 0.0)
+            NoH = m.max(m.dot(Ns, H), 0.0)
             VoH = m.max(m.dot(V, H), 0.0)
             d = NoH * NoH * (a2 - 1.0) + 1.0
             D = a2 / (3.14159265 * d * d)
@@ -286,7 +305,7 @@ class PbrEmitter:
         spec = spec * tune_a.y * ao
 
         # Ambiente analítico (Karis, "Physically Based Shading on Mobile").
-        R = N * (2.0 * NoV) - V
+        R = Ns * (2.0 * NoV) - V
         up = self.param("up", 3)
         sky, ground = self.param("sky", 3), self.param("ground", 3)
         env = m.mix(ground, sky, m.smoothstep(-0.3, 0.3, m.dot(R, up)))
@@ -294,7 +313,6 @@ class PbrEmitter:
         r = rough * m.const(-1.0, -0.0275, -0.572, 0.022) + m.const(1.0, 0.0425, 1.04, -0.04)
         a004 = m.min(r.x * r.x, m.exp2(NoV * -9.28)) * r.x + r.y
         env_brdf = F0 * (a004 * -1.04 + r.z) + (a004 * 1.04 + r.w)
-        local = m.clamp(m.luminance(baked), 0.0, 1.5)
         env_spec = env * env_brdf * (local * ao * tune_a.z)
 
         lin = diffuse + spec + env_spec

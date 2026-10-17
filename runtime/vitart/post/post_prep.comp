@@ -1,0 +1,51 @@
+#version 450
+// Meia resolução: brilho acima do limiar (fonte do bloom) e oclusão de ambiente pela profundidade.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 8, local_size_y = 8) in;
+#include "post_common.glsl"
+
+float ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+
+void main() {
+    ivec2 h = ivec2(gl_GlobalInvocationID.xy);
+    if (h.x >= int(pc.p3.x) || h.y >= int(pc.p3.y)) return;
+    ivec2 f = h * 2;
+    vec2 uv = (vec2(f) + 1.0) / pc.p2.yz;
+
+    // bloom: média 2x2 em linear, só o que passa do limiar (joelho suave)
+    vec3 c = srgb_to_lin(textureLod(uColor, uv, 0.0).rgb);
+    float l = lum(c), thr = pc.p0.w, knee = thr * 0.5;
+    float soft = clamp(l - thr + knee, 0.0, 2.0 * knee);
+    soft = soft * soft / (4.0 * knee + 1e-4);
+    vec3 bright = c * (max(soft, l - thr) / max(l, 1e-4));
+
+    // oclusão (estimador de Alchemy / McGuire): amostras num disco em volta, ponderadas pela normal
+    float ao = 1.0;
+    float d0 = texelFetch(uDepth, f, 0).r;
+    if (pc.p0.z > 0.0 && d0 < 0.99999 && d0 > 0.0) {
+        vec3 P = view_at(f);
+        vec3 px1 = view_at(f + ivec2(2, 0)), px0 = view_at(f - ivec2(2, 0));
+        vec3 py1 = view_at(f + ivec2(0, 2)), py0 = view_at(f - ivec2(0, 2));
+        vec3 dx = abs(px1.z - P.z) < abs(P.z - px0.z) ? px1 - P : P - px0;
+        vec3 dy = abs(py1.z - P.z) < abs(P.z - py0.z) ? py1 - P : P - py0;
+        vec3 N = normalize(cross(dx, dy));
+        if (dot(N, -P) < 0.0) N = -N;
+        float R = pc.p0.y, z = abs(P.z);
+        float rpx = clamp(R * pc.p0.x / max(z, 1e-3), 3.0, 96.0);
+        const int NS = 12;
+        float ang0 = ign(vec2(h) + pc.p3.z * 7.0) * 6.2831853;
+        float sum = 0.0;
+        for (int i = 0; i < NS; i++) {
+            float t = (float(i) + 0.5) / float(NS);
+            float a = ang0 + float(i) * 2.3999632; // ângulo de ouro
+            vec2 o = vec2(cos(a), sin(a)) * (rpx * sqrt(t));
+            vec3 Q = view_at(f + ivec2(o));
+            vec3 v = Q - P;
+            float vv = dot(v, v);
+            float fall = max(0.0, 1.0 - vv / (R * R * 1.5)); // nada além do raio (sem halo em silhuetas)
+            sum += max(0.0, dot(v, N) - 0.01 * z) / (vv + 0.01 * R * R + 1e-4) * fall;
+        }
+        ao = clamp(1.0 - 2.0 * R * sum / float(NS), 0.0, 1.0);
+    }
+    imageStore(uA, h, vec4(bright, ao));
+}

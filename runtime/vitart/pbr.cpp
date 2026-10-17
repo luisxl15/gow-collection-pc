@@ -43,9 +43,27 @@ void write_default_ini() {
                 "normal_strength=1.0\n"
                 "specular=1.0\n"
                 "env_specular=0.5\n"
-                "roughness_scale=1.0\n"
+                "roughness_scale=0.75\n"
                 "metallic_scale=1.0\n"
                 "ao_strength=1.0\n"
+                "# luz-chave de relevo: a luz do cenário do GoW vem assada nos vértices, e sem ela o normal map\n"
+                "# quase não aparece. relief = força do relevo (0 = só as luzes do jogo), key_spec = brilho,\n"
+                "# key_dir = direção para a luz em espaço de câmera\n"
+                "relief=0.8\n"
+                "key_spec=0.5\n"
+                "key_dir=-0.35 0.75 0.55\n"
+                "# iluminação de tela, antes do HUD: post=0 desliga tudo. ssao = força da oclusão de ambiente,\n"
+                "# ssao_radius em unidades do jogo, bloom = intensidade, bloom_threshold = limiar (linear),\n"
+                "# exposure, tonemap = força da curva fílmica (0 = cor do jogo), saturation, vignette\n"
+                "post=1\n"
+                "ssao=0.8\n"
+                "ssao_radius=40\n"
+                "bloom=0.35\n"
+                "bloom_threshold=0.7\n"
+                "exposure=1.08\n"
+                "tonemap=0.6\n"
+                "saturation=1.08\n"
+                "vignette=0.15\n"
                 "# teto da luz assada extraída do jogo (cor original / textura)\n"
                 "baked_max=4.0\n"
                 "# cores lineares do ambiente refletido e o 'para cima' em espaço de câmera\n"
@@ -91,6 +109,18 @@ void load_ini() {
         else if (k == "metallic_scale") c.metallic_scale = x;
         else if (k == "ao_strength") c.ao_strength = x;
         else if (k == "default_roughness") c.default_roughness = x;
+        else if (k == "relief") c.relief = x;
+        else if (k == "key_spec") c.key_spec = x;
+        else if (k == "key_dir") read_vec(v, c.key_dir);
+        else if (k == "post") c.post = x != 0;
+        else if (k == "ssao") c.ssao = x;
+        else if (k == "ssao_radius") c.ssao_radius = x;
+        else if (k == "bloom") c.bloom = x;
+        else if (k == "bloom_threshold") c.bloom_threshold = x;
+        else if (k == "exposure") c.exposure = x;
+        else if (k == "tonemap") c.tonemap = x;
+        else if (k == "saturation") c.saturation = x;
+        else if (k == "vignette") c.vignette = x;
         else if (k == "debug") c.debug = std::atoi(v);
         else if (k == "sky") read_vec(v, c.sky);
         else if (k == "ground") read_vec(v, c.ground);
@@ -340,6 +370,21 @@ std::shared_ptr<const Material> neutral() {
     return m;
 }
 
+bool inv_projection(const VertexInfo &vi, const float *vu, uint32_t vu_words, float out[16]) {
+    if (vi.proj < 0 || (uint32_t)vi.proj + 16 > vu_words) return false;
+    float p[16], cm[16];
+    std::memcpy(p, vu + vi.proj, sizeof p);
+    if (w_row_is_perspective(p, 3, 7, 11, 15)) {
+        std::memcpy(cm, p, sizeof cm);
+    } else if (w_row_is_perspective(p, 12, 13, 14, 15)) {
+        for (int r = 0; r < 4; r++)
+            for (int c = 0; c < 4; c++) cm[c * 4 + r] = p[r * 4 + c];
+    } else {
+        return false;
+    }
+    return invert4(cm, out);
+}
+
 bool params(const VertexInfo &vi, const float *vu, uint32_t vu_words, uint32_t present_frame,
             float out[gvk::kPbrParamFloats]) {
     if (vi.proj < 0 || (uint32_t)vi.proj + 16 > vu_words) return false;
@@ -390,6 +435,8 @@ bool params(const VertexInfo &vi, const float *vu, uint32_t vu_words, uint32_t p
     std::memcpy(out + 44, c.sky, 12);
     std::memcpy(out + 48, c.ground, 12);
     std::memcpy(out + 52, c.up, 12);
+    out[19] = c.key_dir[0], out[23] = c.key_dir[1], out[27] = c.key_dir[2];
+    out[31] = c.relief, out[35] = c.key_spec;
     return true;
 }
 
