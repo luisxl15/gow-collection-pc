@@ -2,6 +2,8 @@
 // Dispositivos do Vita -> pastas do PC: app0: = diretório do app; ux0:, savedata0:, addcont0: e
 // afins ficam sob o diretório de dados (--data).
 #include "vitart.h"
+#include "video_hd.h"
+#include <thread>
 
 #include <cctype>
 #include <chrono>
@@ -137,6 +139,30 @@ static uint32_t hbink_find(uint32_t w, uint32_t h, uint32_t frames) {
     }
     return 0;
 }
+// Quadro atual do Bink do jogo (para a cena remasterizada, video_hd.cpp); -1 enquanto o HBINK não foi
+// achado. A busca na memória do jogo roda numa thread à parte, uma vez por vídeo.
+static std::atomic<bool> g_hbink_busy{false};
+static std::atomic<uint32_t> g_hbink_async{0}, g_hbink_async_gen{0};
+int64_t video_bink_frame() {
+    if (!g_video_open) return -1;
+    const uint32_t gen = g_video_gen, w = g_video_w, h = g_video_h, frames = g_video_frames;
+    uint32_t at = g_hbink_async_gen == gen ? g_hbink_async.load() : 0;
+    if (at) {
+        uint32_t v[5];
+        std::memcpy(v, ptr<uint8_t>(at), 20);
+        if (hbink_matches(v, w, h, frames)) return v[3];
+        g_hbink_async = 0;
+    }
+    if (now_ms() - g_video_read_ms > 500 || g_hbink_busy.exchange(true)) return -1;
+    std::thread([gen, w, h, frames] {
+        const uint32_t a = hbink_find(w, h, frames);
+        if (a) g_hbink_async = a, g_hbink_async_gen = gen;
+        std::this_thread::sleep_for(std::chrono::milliseconds(a ? 0 : 200));
+        g_hbink_busy = false;
+    }).detach();
+    return -1;
+}
+
 void video_skip_request() {
     g_skip_gen++;
     if (g_video_open) g_skip_until_ms = now_ms() + 4000;
@@ -228,12 +254,13 @@ VT_HLE(sceIoOpen) {
     g_files[vfd].video = is_video(path);
     if (acc == 1) g_files[vfd].patch = psarc_patch(hp);
     if (g_files[vfd].video) {
-        uint32_t hd[7] = {};
+        uint32_t hd[9] = {};
         _lseeki64(fd, 0, SEEK_SET);
         if (_read(fd, hd, sizeof hd) == (int)sizeof hd) g_video_frames = hd[2], g_video_w = hd[5], g_video_h = hd[6];
         _lseeki64(fd, 0, SEEK_SET);
         g_video_open++;
         g_video_gen++;
+        video_hd_open(path, hd[2], hd[7], hd[8], 0, 0);
     }
     g_files[vfd].skip_gen = g_skip_gen.load();
     logf("vitart: sceIoOpen(%s, 0x%x) -> 0x%x", path.c_str(), flags, vfd);
@@ -268,7 +295,7 @@ VT_HLE(sceIoClose) {
     auto it = g_files.find(arg(ctx, 0));
     if (it == g_files.end()) return ret(ctx, SCE_ERROR_ERRNO_EBADF);
     _close(it->second.fd);
-    if (it->second.video && g_video_open) g_video_open--;
+    if (it->second.video && g_video_open && !--g_video_open) video_hd_close();
     g_files.erase(it);
     ret(ctx, 0);
 }

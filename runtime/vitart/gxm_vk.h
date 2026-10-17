@@ -123,6 +123,9 @@ uint32_t measured_fps();
 void set_borderless(bool on);
 // Teste: desliga o pós-processamento (iluminação de tela) enquanto ligado.
 void set_post_bypass(bool on);
+// Próximo present mostra esta imagem RGBA (cena remasterizada) no lugar do alvo do jogo. O ponteiro tem
+// de valer até o present.
+void set_video_frame(const uint8_t *rgba, uint32_t w, uint32_t h);
 // Aviso de troféu igual ao do PS Vita (ícone, nível, nome), desenhado sobre o quadro.
 struct TrophyBanner;
 void notify_trophy(const TrophyBanner &t);

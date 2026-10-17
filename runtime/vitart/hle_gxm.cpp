@@ -6,6 +6,7 @@
 #include "gxm_tex.h"
 #include "gxm_vk.h"
 #include "pbr.h"
+#include "video_hd.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
@@ -935,6 +936,10 @@ void gxm_present(uint32_t fb) {
     // a leitura do alvo pode ver um quadro anterior (quadros em voo): o PBR fica desligado por 4 quadros
     // e a captura sem ele é a do último
     static int ab_left = 0;
+    // cena remasterizada: o quadro dela vai para a tela no lugar do alvo (e para a captura também)
+    const uint8_t *vf = nullptr;
+    uint32_t vw = 0, vh = 0;
+    const bool vid = video_hd_frame(video_bink_frame(), vf, vw, vh);
     const bool ab_dump = ab_left > 0 && --ab_left == 0;
     if (ab_dump) g_pbr_ab_off = false, gvk::set_post_bypass(false);
     if (++frame == dump_at || ab_dump || (dump_at && frame % (dump_at < 300 ? dump_at : 300) == 0)) {
@@ -942,7 +947,8 @@ void gxm_present(uint32_t fb) {
         // Quadro apresentado em PPM (RGB): medir a imagem sem captura de tela.
         std::vector<uint8_t> px;
         uint32_t w, h;
-        if (gvk::read_target(fb, px, w, h)) {
+        if (vid) px.assign(vf, vf + (size_t)vw * vh * 4), w = vw, h = vh;
+        if (vid || gvk::read_target(fb, px, w, h)) {
             char path[64];
             std::snprintf(path, sizeof path, "vkframe_%05u.ppm", frame);
             if (FILE *f = fopen(path, "wb")) {
@@ -960,6 +966,7 @@ void gxm_present(uint32_t fb) {
         if (warned++ < 3) logf("vitart: apresentar 0x%08x: não é alvo de nenhuma cena", fb);
     }
     const uint64_t tp = now_ns();
+    if (vid) gvk::set_video_frame(vf, vw, vh);
     gvk::present(fb);
     g_t_present += now_ns() - tp;
     if (census() && frame % 600 == 0) {

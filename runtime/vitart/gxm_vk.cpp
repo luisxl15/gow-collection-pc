@@ -1161,6 +1161,12 @@ static void overlay_fps(VkImage img, int32_t x0, int32_t y0) {
 }
 
 void post_at_present(uint32_t addr); // iluminação de tela (mais abaixo)
+// Cena remasterizada (video_hd.cpp): imagem do próximo present no lugar do alvo do jogo.
+static const uint8_t *g_vid_px = nullptr;
+static uint32_t g_vid_w = 0, g_vid_h = 0;
+static Image g_vid_img;
+static Buffer g_vid_buf;
+void set_video_frame(const uint8_t *rgba, uint32_t w, uint32_t h) { g_vid_px = rgba, g_vid_w = w, g_vid_h = h; }
 void set_post_bypass(bool on);
 
 bool present(uint32_t addr) {
@@ -1200,7 +1206,32 @@ bool present(uint32_t addr) {
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VKC(vkBeginCommandBuffer(g_pcmd, &bi));
     g_cur = g_pcmd;
-    Image &src = it->second.color;
+    Image *srcp = &it->second.color;
+    if (g_vid_px) {
+        const VkDeviceSize bytes = (VkDeviceSize)g_vid_w * g_vid_h * 4;
+        bool ok = true;
+        if (g_vid_img.w != g_vid_w || g_vid_img.h != g_vid_h) {
+            destroy(g_vid_img);
+            ok = make_image(g_vid_img, g_vid_w, g_vid_h, kColor, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        }
+        if (ok && g_vid_buf.size < bytes) {
+            destroy(g_vid_buf);
+            ok = make_buffer(g_vid_buf, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, nullptr);
+        }
+        void *map = nullptr;
+        if (ok && vkMapMemory(g_dev, g_vid_buf.mem, 0, bytes, 0, &map) == VK_SUCCESS) {
+            std::memcpy(map, g_vid_px, bytes);
+            vkUnmapMemory(g_dev, g_vid_buf.mem);
+            barrier(g_vid_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            VkBufferImageCopy c{};
+            c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            c.imageExtent = {g_vid_w, g_vid_h, 1};
+            vkCmdCopyBufferToImage(g_pcmd, g_vid_buf.buf, g_vid_img.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+            srcp = &g_vid_img;
+        }
+        g_vid_px = nullptr;
+    }
+    Image &src = *srcp;
     Image dst;
     dst.img = g_swap_images[idx];
     dst.fmt = VK_FORMAT_B8G8R8A8_UNORM;
@@ -1224,7 +1255,7 @@ bool present(uint32_t addr) {
     const int32_t margin = (int32_t)(g_swap_extent.height / 60);
     overlay_fps(dst.img, dx + margin, dy + margin);
     overlay_banner(dst.img, dx, dy, dw, dh);
-    barrier(src, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    if (srcp == &it->second.color) barrier(src, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     barrier(dst, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     g_cur = g_cmd;
     VKC(vkEndCommandBuffer(g_pcmd));
