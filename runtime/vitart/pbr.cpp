@@ -55,8 +55,8 @@ void write_default_ini() {
                 "# iluminação de tela, antes do HUD: post=0 desliga tudo. ssao = força da oclusão de ambiente,\n"
                 "# ssao_radius em unidades do jogo, bloom = intensidade, bloom_threshold = limiar (linear),\n"
                 "# exposure, tonemap = força da curva fílmica (0 = cor do jogo), saturation, vignette\n"
-                "post=1\n"
-                "ssao=1.0\n"
+                "post=0\n"
+                "ssao=1.6\n"
                 "ssao_radius=40\n"
                 "bloom=0.35\n"
                 "bloom_threshold=0.7\n"
@@ -146,6 +146,8 @@ void load_ini() {
         else if (k == "chromatic_aberration") c.chroma = x;
         else if (k == "sharpen") c.sharpen = x;
         else if (k == "grade") c.grade = x;
+        else if (k == "post_split") c.post_split = x != 0;
+        else if (k == "post_debug") c.post_debug = std::atoi(v);
         else if (k == "contrast") c.contrast = x;
         else if (k == "lift") read_vec(v, c.lift);
         else if (k == "gain") read_vec(v, c.gain);

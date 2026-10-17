@@ -14,18 +14,19 @@ void main() {
         vec2 sun = pc.p5.xy * 0.5; // em meia resolução
         vec2 p = vec2(h) + 0.5;
         vec2 step = (sun - p) / 40.0;
-        float decay = pc.p5.w, w = 1.0, acc = 0.0;
+        float decay = pc.p5.w, w = 1.0, acc = 0.0, wsum = 0.0;
         float jit = fract(52.9829189 * fract(dot(vec2(h), vec2(0.06711056, 0.00583715)) + pc.p3.z * 0.618));
         p += step * jit;
         for (int i = 0; i < 40; i++) {
             vec2 q = clamp(p, vec2(0.0), vec2(hs) - 1.0);
             acc += imageLoad(uC, ivec2(q)).a * w;
+            wsum += w;
             w *= decay;
             p += step;
         }
         // mais forte perto da luz, some longe dela
         float dsun = length((vec2(h) - sun) / vec2(hs));
-        rays = pc.p6.rgb * (acc / 40.0) * (1.0 - smoothstep(0.2, 1.1, dsun)) * pc.p5.z;
+        rays = pc.p6.rgb * (acc / wsum) * (1.0 - smoothstep(0.15, 1.2, dsun)) * pc.p5.z * 1.6;
     }
     imageStore(uD, h, vec4(rays, 1.0));
 }

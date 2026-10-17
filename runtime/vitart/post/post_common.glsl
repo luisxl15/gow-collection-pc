@@ -26,7 +26,7 @@ layout(push_constant) uniform P {
     vec4 p7;    // x granulação, y aberração cromática, z nitidez, w adaptação do foco por quadro
     vec4 p8;    // rgb lift (sombras), a força do color grading
     vec4 p9;    // rgb gain (altas luzes), a contraste
-    vec4 p10;   // reservado
+    vec4 p10;   // x tela dividida, y vista de depuração, z distância de foco (suavizada pela CPU)
     vec4 p11;   // reservado
 } pc;
 
@@ -44,5 +44,7 @@ vec3 view_at(ivec2 px) {
 float dist_at(ivec2 px) { return length(view_at(px)); }
 bool is_sky(ivec2 px) {
     float d = texelFetch(uDepth, clamp(px, ivec2(0), ivec2(pc.p2.yz) - 1), 0).r;
-    return d >= 0.99999 || d <= 0.0;
+    return d >= 1.0 || d <= 0.0; // só o valor de limpeza: com o plano distante do GoW, a cena já fica acima de 0,9999
 }
+// céu para os raios de luz: vazio ou muito longe (o céu do GoW é geometria distante que grava profundidade)
+bool is_far(ivec2 px) { return is_sky(px) || dist_at(px) > 1500.0; }

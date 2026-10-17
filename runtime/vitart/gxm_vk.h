@@ -123,6 +123,10 @@ uint32_t measured_fps();
 void set_borderless(bool on);
 // Teste: desliga o pós-processamento (iluminação de tela) enquanto ligado.
 void set_post_bypass(bool on);
+// Contadores do pós-processamento desde a última chamada: aplicados, sem matriz, sem ponto do HUD,
+// alvo da tela, último desenho 3D, índice do HUD.
+void post_stats(uint32_t out[6]);
+void post_focus_values(float out[4]); // foco, alvo, distância e profundidade no centro (diagnóstico)
 // Próximo present mostra esta imagem RGBA (cena remasterizada) no lugar do alvo do jogo. O ponteiro tem
 // de valer até o present.
 void set_video_frame(const uint8_t *rgba, uint32_t w, uint32_t h);

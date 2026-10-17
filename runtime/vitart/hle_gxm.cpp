@@ -526,6 +526,10 @@ static std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint32_t>>> g_sp
 // VITART_PBR_AB=1 com VITART_VK_DUMP: depois de cada captura, 4 quadros sem PBR e o último também é gravado
 // (comparar com e sem PBR na mesma cena, um quadro de distância).
 static bool g_pbr_ab_off = false;
+// Por que um desenho com textura difusa não recebeu PBR (relatório a cada 10 s): sem material, blend,
+// sem variante .pbr.spv, sem projeção em perspectiva.
+static uint64_t g_pbr_why[4] = {};
+static std::map<uint32_t, uint64_t> g_pbr_blends; // blends recusados (diagnóstico)
 static std::shared_ptr<std::vector<uint32_t>> spv_pbr_of(uint32_t prog) {
     auto it = g_spv_pbr.find(prog);
     if (it != g_spv_pbr.end()) return it->second;
@@ -572,11 +576,14 @@ static const PbrProgInfo &pbr_prog(uint32_t prog) {
     }
     return cache[prog] = info;
 }
-// O PBR só entra em superfícies opacas (sem blend). Qualquer desenho com blend fica com a cor original:
-// aditivo e multiplicativo (fogo, brilho, sombras pintadas) e também o alfa comum, que no GoW é névoa,
-// fumaça e camadas de chuva; com PBR elas perdiam a névoa e ganhavam brilho onde não há superfície.
+// O PBR só entra em superfícies opacas: sem blend, ONE/ZERO ou o pré-multiplicado ONE/ONE_MINUS_SRC_ALPHA,
+// que é o modo do GoW para o cenário e os personagens (0x0051110f, medido: 90% dos desenhos com material).
+// Aditivo, multiplicativo (fogo, brilho, sombras pintadas) e o alfa comum SRC_ALPHA (névoa, fumaça, chuva)
+// ficam com a cor original: com PBR a névoa sumia.
 static bool pbr_blend_ok(const gvk::Draw &d) {
-    return !d.has_blend || ((d.blend >> 8) & 15) == 0;
+    if (!d.has_blend || ((d.blend >> 8) & 15) == 0) return true;
+    const uint32_t src = (d.blend >> 16) & 15, dst = (d.blend >> 20) & 15;
+    return src == 1 && (dst == 0 || dst == 5);
 }
 
 // Formato de atributo (SceGxmAttributeFormat) -> float, normalizado quando pedido.
@@ -734,6 +741,14 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
     std::memcpy(d.vps, c.viewport_s, sizeof d.vps);
     d.target_w = rd32(cs + 8), d.target_h = rd32(cs + 12), d.target_addr = rd32(cs + 20);
     d.depth_addr = c.scene.depth_surface ? rd32(c.scene.depth_surface + 8) : 0;
+    if (getenv("VITART_VPLOG") && d.depth_func != 7) {
+        static uint32_t last = 0;
+        if (g_present_frame.load() - last >= 300) {
+            last = g_present_frame.load();
+            logf("vitart: viewport z: desl %.4f escala %.4f, função %u escrita %d, alvo 0x%08x, prof 0x%08x", d.vps[4], d.vps[5],
+                 d.depth_func, (int)d.depth_write, d.target_addr, d.depth_addr);
+        }
+    }
     // Stencil só existe se a superfície tem o plano S8 (formato com S8 ou ponteiro de stencil).
     if (c.scene.depth_surface) {
         const uint32_t fmt = rd32(c.scene.depth_surface);
@@ -831,7 +846,7 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
         }
         d.textures.push_back(t);
     }
-    if (c.vuniform && pbr::config().post)
+    if (c.vuniform)
         d.view_inv_ok = pbr::inv_projection(pbr_prog(vp->program).vi, ptr<float>(c.vuniform), vsize / 4, d.view_inv);
     // PBR: troca o fragmento pela variante PBR quando a textura difusa tem material, o vértice tem
     // projeção em perspectiva e a superfície é opaca.
@@ -840,8 +855,13 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
         std::shared_ptr<const pbr::Material> mat = pbr::material(diffuse_key, frame);
         if (!mat && pbr::config().all_surfaces) mat = pbr::neutral();
         std::shared_ptr<std::vector<uint32_t>> pfs;
-        if (mat && pbr_blend_ok(d) && (pfs = spv_pbr_of(fp->program)) &&
-            pbr::params(pbr_prog(vp->program).vi, ptr<float>(c.vuniform), vsize / 4, frame, d.pbr_params)) {
+        bool use = false;
+        if (!mat) g_pbr_why[0]++;
+        else if (!pbr_blend_ok(d)) g_pbr_why[1]++, g_pbr_blends[d.blend]++;
+        else if (!(pfs = spv_pbr_of(fp->program))) g_pbr_why[2]++;
+        else if (!pbr::params(pbr_prog(vp->program).vi, ptr<float>(c.vuniform), vsize / 4, frame, d.pbr_params)) g_pbr_why[3]++;
+        else use = true;
+        if (use) {
             d.pbr = true;
             d.fs = pfs->data(), d.fs_size = (uint32_t)pfs->size() * 4;
             const gvk::Texture &dt = d.textures[diffuse_idx];
@@ -903,6 +923,22 @@ static void hitch_tick() {
             logf("vitart: PBR em %llu de %llu desenhos nos últimos 10 s", (unsigned long long)(g_pbr_draws - pbr_prev),
                  (unsigned long long)(g_vk_draws - draws_prev));
         pbr_prev = g_pbr_draws, draws_prev = g_vk_draws;
+        logf("vitart: PBR recusado: sem material %llu, blend %llu, sem variante %llu, sem perspectiva %llu",
+             (unsigned long long)g_pbr_why[0], (unsigned long long)g_pbr_why[1], (unsigned long long)g_pbr_why[2],
+             (unsigned long long)g_pbr_why[3]);
+        for (auto &[b, n] : g_pbr_blends)
+            if (n > 1000) logf("vitart:   blend recusado 0x%08x: %llu desenhos", b, (unsigned long long)n);
+        g_pbr_blends.clear();
+        g_pbr_why[0] = g_pbr_why[1] = g_pbr_why[2] = g_pbr_why[3] = 0;
+        {
+            uint32_t ps[6];
+            gvk::post_stats(ps);
+            logf("vitart: pós: %u aplicados, sem matriz %u, sem ponto do HUD %u, alvo da tela 0x%08x, último 3D %u, HUD em %u",
+                 ps[0], ps[1], ps[2], ps[3], ps[4], ps[5]);
+            float fv[4];
+            gvk::post_focus_values(fv);
+            logf("vitart: pós: foco %.3f, alvo %.3f, profundidade mín %.7f máx %.7f", fv[0], fv[1], fv[2], fv[3]);
+        }
         window = now, slow = 0, worst = 0, wframes = 0;
     }
 }

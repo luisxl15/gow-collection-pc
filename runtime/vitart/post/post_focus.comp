@@ -25,5 +25,21 @@ void main() {
     float prev = imageLoad(uF, ivec2(0)).r;
     float k = pc.p7.w;
     float f = (prev <= 0.0 || isnan(prev) || isinf(prev)) ? target : mix(prev, target, k);
+    // g/b/a: alvo deste quadro, distância no centro e a profundidade crua lá (diagnóstico pela CPU)
+    ivec2 cpx = ivec2(sz * 0.5);
+    // fonte dos raios de luz: centro de massa da parte mais clara do céu visível (brilho^6)
+    vec2 acc = vec2(0.0);
+    float wsum = 0.0, lsum = 0.0;
+    for (int y = 0; y < 18; y++)
+        for (int x = 0; x < 32; x++) {
+            vec2 uvs = vec2((float(x) + 0.5) / 32.0, (float(y) + 0.5) / 18.0);
+            ivec2 p = ivec2(sz * uvs);
+            if (!is_far(p)) continue;
+            float l = lum(srgb_to_lin(texelFetch(uColor, p, 0).rgb));
+            float w = pow(l, 6.0);
+            acc += uvs * w, wsum += w, lsum += l;
+        }
+    vec2 sun = wsum > 0.0 ? acc / wsum : vec2(0.5);
     imageStore(uF, ivec2(0), vec4(f, target, 0.0, 1.0));
+    imageStore(uF, ivec2(1, 0), vec4(sun, wsum, lsum));
 }

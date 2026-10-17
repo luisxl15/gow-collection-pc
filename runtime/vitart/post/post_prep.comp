@@ -54,6 +54,6 @@ void main() {
     }
     imageStore(uA, h, vec4(bright, ao));
     // céu claro: só onde não há geometria, ponderado pelo brilho (os raios saem dele)
-    float skym = sky ? smoothstep(0.15, 0.8, l) : 0.0;
+    float skym = (sky || is_far(f)) ? smoothstep(0.2, 0.75, l) : 0.0;
     imageStore(uC, h, vec4(c, skym));
 }

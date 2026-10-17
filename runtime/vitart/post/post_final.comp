@@ -36,17 +36,31 @@ void main() {
     }
     vec3 c = srgb_to_lin(c0);
     vec4 a = textureLod(uAs, uv, 0.0);
-    c *= mix(1.0, a.a, pc.p0.z);
+    // vistas de depuração (p10.y): 1 = oclusão, 2 = desfoque do DOF, 3 = raios de luz
+    if (pc.p10.y > 0.5) {
+        vec3 dv = vec3(0.0);
+        if (pc.p10.y < 1.5) dv = vec3(pow(a.a, pc.p0.z));
+        else if (pc.p10.y < 2.5) {
+            float focus = pc.p10.z > 0.0 ? pc.p10.z : imageLoad(uF, ivec2(0)).g;
+            float dpx = is_sky(f) ? 1e6 : dist_at(f);
+            float range = max(focus * pc.p4.y, 1.0);
+            dv = vec3(clamp((dpx - focus - range) / (range * 2.0), 0.0, 1.0) * pc.p4.x, 0.0, 0.0);
+        } else if (pc.p10.y < 3.5) dv = textureLod(uDs, uv, 0.0).rgb * 4.0;
+        else dv = is_sky(f) ? vec3(0.0, 0.0, 0.6) : vec3(fract(dist_at(f) / 200.0)); // 4 = profundidade
+        imageStore(uOut, f, vec4(dv, src.a));
+        return;
+    }
+    c *= pow(a.a, pc.p0.z); // força da oclusão como potência: frestas escurecem bem, superfícies abertas não
 
     // profundidade de campo: mistura com a cor desfocada pelo círculo de confusão
     if (pc.p4.x > 0.0) {
-        float focus = imageLoad(uF, ivec2(0)).r;
+        float focus = pc.p10.z > 0.0 ? pc.p10.z : imageLoad(uF, ivec2(0)).g;
         float dpx = is_sky(f) ? 1e6 : dist_at(f);
         float range = max(focus * pc.p4.y, 1.0);
         float far = clamp((dpx - focus - range) / (range * 2.0), 0.0, 1.0);
         float near = pc.p4.z > 0.5 ? clamp((focus * 0.6 - dpx) / (focus * 0.4 + 1.0), 0.0, 1.0) : 0.0;
         float coc = max(far, near) * pc.p4.x;
-        vec3 blurred = textureLod(uCs, uv, 0.0).rgb * mix(1.0, a.a, pc.p0.z);
+        vec3 blurred = textureLod(uCs, uv, 0.0).rgb * pow(a.a, pc.p0.z);
         c = mix(c, blurred, coc);
     }
     c += a.rgb * pc.p1.x;
@@ -73,6 +87,11 @@ void main() {
     if (pc.p7.x > 0.0) {
         float g = fract(sin(dot(vec2(f) + pc.p3.z * 17.13, vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
         o += g * pc.p7.x * (1.0 - 0.6 * lum(o));
+    }
+    // comparação na mesma imagem (p10.x): metade direita sem o pós, com uma linha no meio
+    if (pc.p10.x > 0.5) {
+        if (f.x > sz.x / 2 + 1) o = src.rgb;
+        else if (f.x >= sz.x / 2 - 1) o = vec3(1.0);
     }
     imageStore(uOut, f, vec4(o, src.a));
 }

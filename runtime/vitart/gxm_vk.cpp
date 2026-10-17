@@ -1078,12 +1078,15 @@ bool is_depth(uint32_t addr) {
     return g_depth_owner.count(addr) != 0;
 }
 
+void post_save_depth(uint32_t addr, Image &dep); // iluminação de tela (mais abaixo)
+
 void begin_scene(uint32_t color_addr, uint8_t stencil) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     auto it = g_targets.find(color_addr);
     if (!g_dev || it == g_targets.end() || !frame_begin()) return;
     end_pass();
     Image &dep = it->second.depth;
+    post_save_depth(color_addr, dep);
     barrier(dep, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkClearDepthStencilValue dc{1.0f, stencil};
     VkImageSubresourceRange dr{kDepthAspects, 0, 1, 0, 1};
@@ -1535,9 +1538,20 @@ uint32_t g_main_addr = 0, g_main_idx = 0, g_hud_at = UINT32_MAX;
 int g_last3d = -1;
 bool g_post_done = false, g_post_s2v_ok = false;
 float g_post_s2v[16];
+float g_post_s2v_dep[16]; // a matriz da passada cuja profundidade foi guardada
 float g_post_sun[3] = {0, 0, 0}, g_post_sun_col[3] = {0, 0, 0}; // luz do último desenho com PBR (câmera)
 bool g_post_sun_ok = false;
 uint32_t g_post_frames = 0;
+uint32_t g_post_runs = 0, g_post_nomat = 0, g_post_nohud = 0;
+// O jogo desenha a cena em várias passadas (cenas do GXM) no mesmo alvo, e cada uma limpa a profundidade:
+// quando o pós roda, a profundidade do mundo já foi apagada. Antes de cada limpeza no alvo da cena, a
+// profundidade é copiada se aquela passada teve mais desenhos 3D que a cópia guardada.
+uint32_t g_scene3d = 0, g_dep_best = 0;
+uint32_t g_dbg_saves = 0, g_dbg_cur = 0, g_dbg_saved = 0, g_dbg_none = 0, g_dbg_begin = 0;
+bool g_post_dep_ok = false;
+Buffer g_focus_rb;          // leitura do foco (diagnóstico)
+float g_focus_vals[8] = {}; // foco, alvo, -, -, luz x, y (0..1), peso, brilho do céu
+float *g_focus_vals_cpu = nullptr;
 
 struct PostPush {
     float s2v[16];
@@ -1623,7 +1637,7 @@ bool post_resources(uint32_t w, uint32_t h) {
         !make_image(g_post.dep, w, h, kDepth, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
         !make_image(g_post.a, hw, hh, f16, half) || !make_image(g_post.b, hw, hh, f16, half) ||
         !make_image(g_post.c, hw, hh, f16, half) || !make_image(g_post.d, hw, hh, f16, half) ||
-        !make_image(g_post.focus, 1, 1, f16, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+        !make_image(g_post.focus, 2, 1, f16, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT))
         return false;
     // foco começa em 0 (o primeiro quadro pega o valor medido direto)
     barrier(g_post.focus, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -1640,6 +1654,28 @@ void compute_barrier() {
     mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     vkCmdPipelineBarrier(g_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0,
                          nullptr, 0, nullptr);
+}
+
+void post_save_depth(uint32_t addr, Image &dep) {
+    if (addr != g_main_addr) return;
+    g_dbg_begin++;
+    const uint32_t n = g_scene3d;
+    g_scene3d = 0;
+    if (!n || n <= g_dep_best || !g_post_s2v_ok) return;
+    end_pass();
+    if (!post_resources(dep.w, dep.h)) return;
+    barrier(dep, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    barrier(g_post.dep, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkImageCopy c{};
+    c.srcSubresource = c.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+    c.extent = {dep.w, dep.h, 1};
+    vkCmdCopyImage(g_cmd, dep.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_post.dep.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1, &c);
+    barrier(dep, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    barrier(g_post.dep, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    std::memcpy(g_post_s2v_dep, g_post_s2v, sizeof g_post_s2v);
+    g_dep_best = n, g_post_dep_ok = true;
+    g_dbg_saves++;
 }
 
 bool invert4x4(const float *m, float *inv) {
@@ -1672,7 +1708,10 @@ void run_post(Target &t) {
     g_post_done = true;
     const vt::pbr::Config &cfg = vt::pbr::config();
     static const bool env_off = getenv("VITART_POST") && *getenv("VITART_POST") == '0';
-    if (env_off || g_post_bypass || !cfg.post || !g_post_s2v_ok || !post_init()) return;
+    if (!g_post_s2v_ok) g_post_nomat++;
+    static const bool env_on = getenv("VITART_POST") && *getenv("VITART_POST") == '1';
+    if (env_off || g_post_bypass || !(cfg.post || env_on) || !g_post_s2v_ok || !post_init()) return;
+    g_post_runs++;
     if (!frame_begin()) return;
     const uint32_t w = t.color.w, h = t.color.h;
     end_pass();
@@ -1687,9 +1726,18 @@ void run_post(Target &t) {
     c.extent = {w, h, 1};
     vkCmdCopyImage(g_cmd, t.color.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_post.col.img,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
-    c.srcSubresource.aspectMask = c.dstSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    vkCmdCopyImage(g_cmd, t.depth.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_post.dep.img,
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+    // profundidade: a da passada atual, se ela teve 3D e é a maior; senão a guardada antes de uma limpeza
+    if (g_scene3d && g_scene3d > g_dep_best) {
+        g_dbg_cur++;
+        c.srcSubresource.aspectMask = c.dstSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        vkCmdCopyImage(g_cmd, t.depth.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_post.dep.img,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+    } else if (g_post_dep_ok) {
+        g_dbg_saved++;
+        std::memcpy(g_post_s2v, g_post_s2v_dep, sizeof g_post_s2v);
+    } else {
+        g_dbg_none++;
+    }
     barrier(g_post.col, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     barrier(g_post.dep, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     barrier(t.depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
@@ -1727,25 +1775,20 @@ void run_post(Target &t) {
     const float upp = std::sqrt((q1[0] - q0[0]) * (q1[0] - q0[0]) + (q1[1] - q0[1]) * (q1[1] - q0[1]) + (q1[2] - q0[2]) * (q1[2] - q0[2]));
     const float focal = upp > 1e-9f ? std::fabs(q0[2]) / upp : 0.f;
 
-    // luz na tela: a direção da luz do jogo (câmera) projetada; só se estiver na frente da câmera
+    // fonte dos raios de luz: a parte mais clara do céu visível (medida na GPU, post_focus.comp, lida com
+    // um ou dois quadros de atraso) suavizada aqui; sem céu claro na tela, sem raios
     float sun_px[2] = {0, 0};
     bool sun_vis = false;
-    float fwd[16];
-    if (g_post_sun_ok && cfg.shafts > 0 && invert4x4(g_post_s2v, fwd)) {
-        const float len = std::sqrt(g_post_sun[0] * g_post_sun[0] + g_post_sun[1] * g_post_sun[1] + g_post_sun[2] * g_post_sun[2]);
-        const float fz = q0[2] < 0 ? -1.f : 1.f; // sinal de z na frente da câmera
-        if (len > 1e-6f && g_post_sun[2] * fz > 0.15f * len) {
-            const float d = std::fabs(q0[2]) * 50.f / len;
-            const float p[4] = {g_post_sun[0] * d, g_post_sun[1] * d, g_post_sun[2] * d, 1.f};
-            float s[4];
-            for (int r = 0; r < 4; r++) s[r] = fwd[r] * p[0] + fwd[4 + r] * p[1] + fwd[8 + r] * p[2] + fwd[12 + r] * p[3];
-            if (std::fabs(s[3]) > 1e-9f) {
-                sun_px[0] = s[0] / s[3], sun_px[1] = s[1] / s[3];
-                sun_vis = sun_px[0] > -0.5f * w && sun_px[0] < 1.5f * w && sun_px[1] > -0.5f * h && sun_px[1] < 1.5f * h;
-            }
-        }
+    {
+        static float sx = 0.5f, sy = 0.3f, sw = 0.f;
+        const float wx = g_focus_vals[4], wy = g_focus_vals[5], ww = g_focus_vals[6];
+        const bool ok = std::isfinite(wx) && std::isfinite(wy) && ww > 0.02f;
+        if (ok) sx += (wx - sx) * 0.1f, sy += (wy - sy) * 0.1f;
+        sw += ((ok ? 1.f : 0.f) - sw) * 0.05f; // aparece e some devagar
+        sun_px[0] = sx * w, sun_px[1] = sy * h;
+        sun_vis = sw > 0.05f;
+        g_post_sun_col[0] = sw, g_post_sun_col[1] = sw * 0.96f, g_post_sun_col[2] = sw * 0.88f; // tom quente, com a força do fade
     }
-
     PostPush pp{};
     std::memcpy(pp.s2v, g_post_s2v, sizeof pp.s2v);
     const float hw = (float)((w + 1) / 2), hh = (float)((h + 1) / 2), rs = (float)scale_now();
@@ -1756,11 +1799,19 @@ void run_post(Target &t) {
     set4(3, hw, hh, (float)(g_post_frames++ & 63), 1.5f * rs);
     set4(4, focal > 0 ? cfg.dof : 0.f, cfg.dof_range, cfg.dof_near ? 1.f : 0.f, 1.25f * rs);
     set4(5, sun_px[0], sun_px[1], cfg.shafts, 0.965f);
-    const float sc = std::max({g_post_sun_col[0], g_post_sun_col[1], g_post_sun_col[2], 1e-3f});
-    set4(6, g_post_sun_col[0] / sc, g_post_sun_col[1] / sc, g_post_sun_col[2] / sc, sun_vis ? 1.f : 0.f);
+    set4(6, g_post_sun_col[0], g_post_sun_col[1], g_post_sun_col[2], sun_vis ? 1.f : 0.f);
     set4(7, cfg.grain, cfg.chroma, cfg.sharpen, cfg.focus_speed);
     set4(8, cfg.lift[0], cfg.lift[1], cfg.lift[2], cfg.grade);
     set4(9, cfg.gain[0], cfg.gain[1], cfg.gain[2], cfg.contrast);
+    // foco suavizado na CPU a partir do alvo medido pela GPU (lido com um ou dois quadros de atraso)
+    static float focus_s = 0.f;
+    g_focus_vals_cpu = &focus_s;
+    {
+        const float tgt = g_focus_vals[1];
+        if (std::isfinite(tgt) && tgt > 0.f) focus_s = focus_s <= 0.f ? tgt : focus_s + (tgt - focus_s) * std::clamp(cfg.focus_speed, 0.001f, 1.f);
+    }
+    static const int env_dbg = getenv("VITART_POST_DEBUG") ? std::atoi(getenv("VITART_POST_DEBUG")) : -1;
+    set4(10, cfg.post_split ? 1.f : 0.f, (float)(env_dbg >= 0 ? env_dbg : cfg.post_debug), focus_s, 0.f);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_post_layout, 0, 1, &set, 0, nullptr);
     auto run = [&](int pipe, uint32_t gw, uint32_t gh) {
         vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_post_pipe[pipe]);
@@ -1773,11 +1824,33 @@ void run_post(Target &t) {
     run(1, (uint32_t)hw, (uint32_t)hh); // desfoque horizontal
     pp.p[2][3] = 1.f;
     run(1, (uint32_t)hw, (uint32_t)hh); // vertical
-    if (cfg.dof > 0) {
+    if (cfg.dof > 0 || cfg.shafts > 0) {
         vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_post_pipe[2]);
         vkCmdPushConstants(g_cmd, g_post_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pp, &pp);
         vkCmdDispatch(g_cmd, 1, 1, 1); // foco automático
         compute_barrier();
+        // valores do quadro anterior (o buffer já foi escrito e a GPU terminou aquele quadro) e cópia nova
+        if (g_focus_rb.buf) {
+            void *m = nullptr;
+            if (vkMapMemory(g_dev, g_focus_rb.mem, 0, 16, 0, &m) == VK_SUCCESS) {
+                const uint16_t *hv = static_cast<const uint16_t *>(m);
+                for (int i = 0; i < 8; i++) {
+                    const uint32_t hb = hv[i], sgn = (hb >> 15) & 1, ex = (hb >> 10) & 31, mt = hb & 1023;
+                    float v = ex == 0 ? std::ldexp((float)mt, -24) : ex == 31 ? INFINITY : std::ldexp((float)(mt | 1024), (int)ex - 25);
+                    g_focus_vals[i] = sgn ? -v : v;
+                }
+                vkUnmapMemory(g_dev, g_focus_rb.mem);
+            }
+        } else {
+            make_buffer(g_focus_rb, 64, VK_BUFFER_USAGE_TRANSFER_DST_BIT, nullptr);
+        }
+        if (g_focus_rb.buf) {
+            VkBufferImageCopy bc{};
+            bc.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            bc.imageExtent = {2, 1, 1};
+            vkCmdCopyImageToBuffer(g_cmd, g_post.focus.img, VK_IMAGE_LAYOUT_GENERAL, g_focus_rb.buf, 1, &bc);
+            compute_barrier();
+        }
     }
     run(3, (uint32_t)hw, (uint32_t)hh); // raios de luz (zera uD sem luz)
     run(4, w, h);                       // final
@@ -1785,27 +1858,75 @@ void run_post(Target &t) {
     t.cver++;
 }
 
-// Chamado em cada desenho, antes de gravá-lo: conta os desenhos do alvo da tela e aplica o pós no ponto
-// onde o HUD começou no quadro anterior.
+// O jogo desenha a cena 3D num alvo próprio e depois compõe na tela (com o HUD por cima). O pós vai no
+// alvo da CENA (o de mais desenhos 3D no quadro anterior), assim que ela está completa (todos os desenhos
+// 3D que ela teve no quadro anterior já passaram): no primeiro desenho 2D nela, no primeiro desenho que a
+// lê como textura (a composição) ou no present.
+struct TgtCount {
+    uint32_t n = 0, n3d = 0, nw = 0; // desenhos, com teste de profundidade, que gravam profundidade
+    int last3d = -1;
+};
+std::unordered_map<uint32_t, TgtCount> g_tgt_count;
+
 void post_before_draw(const Draw &d, Target &t) {
-    if (d.target_addr != g_main_addr) return;
+    // o jogo limpa a profundidade com um desenho de tela cheia (teste ALWAYS gravando): guarda antes
+    if (d.target_addr == g_main_addr && d.depth_write && d.depth_func == 7) post_save_depth(d.target_addr, t.depth);
+    TgtCount &tc = g_tgt_count[d.target_addr];
     const bool is3d = d.depth_func != 7 || d.depth_write;
-    const uint32_t idx = g_main_idx++;
-    if (!is3d && !g_post_done && g_hud_at != UINT32_MAX && idx >= g_hud_at) run_post(t);
-    if (is3d) g_last3d = (int)idx;
+    const uint32_t idx = tc.n++;
+    if (is3d) tc.last3d = (int)idx, tc.n3d++;
+    if (d.depth_write) tc.nw++;
+    if (d.depth_write && d.target_addr == g_main_addr) g_scene3d++;
+    if (g_post_done || g_hud_at == UINT32_MAX || !g_main_addr) return;
+    if (d.target_addr == g_main_addr) {
+        if (!is3d && idx >= g_hud_at) run_post(t);
+        return;
+    }
+    // lê a cena como textura depois de ela estar completa: composição
+    for (const Texture &tx : d.textures)
+        if (tx.target_addr == g_main_addr && !tx.depth) {
+            auto s = g_tgt_count.find(g_main_addr);
+            auto it = g_targets.find(g_main_addr);
+            if (s != g_tgt_count.end() && s->second.n >= g_hud_at && it != g_targets.end()) run_post(it->second);
+            return;
+        }
 }
 
 void set_post_bypass(bool on) { g_post_bypass = on; }
+void post_focus_values(float out[4]) {
+    std::memcpy(out, g_focus_vals, 4 * sizeof(float));
+    out[2] = g_focus_vals[4], out[3] = g_focus_vals[6];
+    out[0] = g_focus_vals_cpu ? *g_focus_vals_cpu : -1.f; // o foco usado (suavizado na CPU)
+}
+void post_stats(uint32_t out[6]) {
+    out[0] = g_post_runs, out[1] = g_post_nomat, out[2] = g_post_nohud, out[3] = g_main_addr, out[4] = (uint32_t)g_last3d,
+    out[5] = g_hud_at;
+    out[2] = g_dbg_begin * 1000000u + g_dbg_saves * 10000u + g_dbg_cur * 100u + (g_dbg_saved ? 1 : 0) + (g_dbg_none ? 2 : 0);
+    g_dbg_begin = g_dbg_saves = g_dbg_cur = g_dbg_saved = g_dbg_none = 0;
+    g_post_runs = g_post_nomat = g_post_nohud = 0;
+}
 
-// No present: o quadro que não chegou ao ponto do HUD (sem HUD) recebe o pós aqui; prepara o próximo.
+// No present: a cena que não foi lida nem recebeu desenho 2D (apresentada direto) recebe o pós aqui;
+// depois escolhe a cena do próximo quadro.
 void post_at_present(uint32_t addr) {
-    if (addr == g_main_addr && !g_post_done && g_last3d >= 0) {
+    if (!g_post_done && g_main_addr == addr) {
         auto it = g_targets.find(addr);
-        if (it != g_targets.end()) run_post(it->second);
+        auto s = g_tgt_count.find(addr);
+        if (it != g_targets.end() && s != g_tgt_count.end() && s->second.nw) run_post(it->second);
     }
-    g_hud_at = (addr == g_main_addr && g_last3d >= 0) ? (uint32_t)g_last3d + 1 : UINT32_MAX;
-    g_main_addr = addr;
-    g_main_idx = 0, g_last3d = -1, g_post_done = false, g_post_s2v_ok = false, g_post_sun_ok = false;
+    uint32_t best = 0, best_n = 0;
+    int best_last = -1;
+    // a cena é o alvo com mais desenhos que GRAVAM profundidade (o mundo); efeitos 3D (partículas) só
+    // testam e podem ir para outro alvo
+    for (auto &[a, c] : g_tgt_count)
+        if (c.nw > best_n) best = a, best_n = c.nw, best_last = c.last3d;
+    if (!best_n) g_post_nohud++;
+    g_main_addr = best;
+    g_hud_at = best_n ? (uint32_t)best_last + 1 : UINT32_MAX;
+    g_last3d = best_last;
+    g_tgt_count.clear();
+    g_post_done = false, g_post_s2v_ok = false, g_post_sun_ok = false;
+    g_scene3d = 0, g_dep_best = 0, g_post_dep_ok = false;
 }
 
 bool draw(const Draw &d) {

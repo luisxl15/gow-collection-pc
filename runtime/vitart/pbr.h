@@ -26,13 +26,15 @@ struct Config {
     float key_dir[3] = {-0.35f, 0.75f, 0.55f};
     float relief = 0.8f, key_spec = 0.5f;
     // Iluminação de tela (gxm_vk.cpp, runtime/vitart/post): oclusão de ambiente, bloom e curva fílmica.
-    bool post = true;
-    float ssao = 1.0f, ssao_radius = 40.f, bloom = 0.35f, bloom_threshold = 0.7f, exposure = 1.08f, tonemap = 0.6f,
+    bool post = false; // desligado por padrão (o usuário não quer o filtro); post=1 no pbr.ini liga
+    float ssao = 1.6f, ssao_radius = 40.f, bloom = 0.35f, bloom_threshold = 0.7f, exposure = 1.08f, tonemap = 0.6f,
           saturation = 1.08f, vignette = 0.15f;
     // profundidade de campo (foco automático no centro), raios de luz, acabamento e color grading
     float dof = 0.65f, dof_range = 0.6f, focus_speed = 0.08f;
     bool dof_near = false;
     float shafts = 0.6f, grain = 0.03f, chroma = 0.004f, sharpen = 0.4f;
+    bool post_split = false; // metade esquerda com o pós, direita sem (comparação)
+    int post_debug = 0;      // 1 oclusão, 2 desfoque do DOF, 3 raios de luz
     float grade = 1.0f, contrast = 1.08f, lift[3] = {0.004f, 0.008f, 0.016f}, gain[3] = {1.04f, 1.0f, 0.95f};
     float default_roughness = 0.8f; // material neutro (all_surfaces)
     int debug = 0;                  // 1 normal, 2 luz assada, 3 rugosidade, 4 metal, 5 oclusão, 6 posição, 7 detalhe
