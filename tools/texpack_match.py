@@ -255,6 +255,14 @@ def main():
                             Image.fromarray(rgba, 'RGBA').save(os.path.join(dump_dir, '%016x.png' % vk))
         print(f'{fn}: {stats}', flush=True)
 
+    # trocas recusadas na revisão a olho (texpack_gow1_recusadas.tsv): ficam com a textura do Vita
+    rej_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'texpack_gow1_recusadas.tsv')
+    if os.path.exists(rej_path):
+        rej = {int(l.split(chr(9))[0], 16) for l in open(rej_path, encoding='utf-8') if l.strip() and not l.startswith('#')}
+        for vk in [vk for vk in index if vk in rej]:
+            del index[vk]
+            how.pop(vk, None)
+        print(f'recusadas na revisão: {len(rej)}', flush=True)
     used = {}
     for vk, member in index.items():
         used[member.filename.replace('\\', '/').rsplit('/', 1)[-1]] = member

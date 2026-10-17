@@ -10,6 +10,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#pragma comment(lib, "gdi32.lib")
 
 #define STBI_ONLY_PNG
 #include "stb_image.h" // implementação em hle_gxm.cpp

@@ -387,17 +387,49 @@ static std::shared_ptr<std::vector<uint8_t>> texpack_take(uint64_t key, const gx
         if (rejected++ < 8) logf("vitart: pack de texturas: %s recusado (PNG vazio)", g_texpack[key].c_str());
         return nullptr;
     }
-    // Alfa na escala do Vita. O pack vem do PS2: lá 128 é opaco, e várias texturas de personagem usam o
-    // alfa para outra coisa (valor uniforme, p. ex. 93), enquanto o Vita tem o próprio valor; o shader do
-    // Vita lê o alfa como o Vita o gravou, e o PNG cru deixava inimigos e harpias meio transparentes.
-    // O alfa do PNG é escalado para ter a mesma média do da textura do Vita (cortes e bordas em HD ficam).
+    // Alfa na escala do Vita. O pack vem do PS2: lá 128 é opaco, e várias texturas usam o alfa para outra
+    // coisa (valor uniforme, p. ex. 93, ou máscara de brilho), enquanto o shader do Vita lê o alfa como o
+    // Vita o gravou. O PNG cru deixava inimigos meio transparentes e recortes onde o Vita não tem nenhum.
+    //  - Vita com alfa uniforme: o PNG fica com esse mesmo alfa, constante;
+    //  - desenho do alfa diferente (correlação < 0,55 nas 16x16 células, ou PNG sem recorte onde o Vita
+    //    tem): o alfa vem da textura do Vita, ampliada (o recorte fica igual ao do jogo);
+    //  - mesmo desenho: o alfa do PNG é escalado para a média do Vita (cortes e bordas em HD ficam).
     double mo = 0, mp = 0;
     for (int c = 0; c < 256; c++) mo += so[256 + c], mp += sp[256 + c];
-    if (mp > 0.5 && std::fabs(mo / mp - 1.0) > 0.06) {
+    mo /= 256, mp /= 256;
+    double vo = 0, vp = 0, cov = 0;
+    for (int c = 0; c < 256; c++) {
+        const double a = so[256 + c] - mo, b = sp[256 + c] - mp;
+        vo += a * a, vp += b * b, cov += a * b;
+    }
+    const double sdo = std::sqrt(vo / 256), sdp = std::sqrt(vp / 256);
+    const double corr = sdo > 1e-6 && sdp > 1e-6 ? cov / std::sqrt(vo * vp) : 0.0;
+    uint8_t *px = job->px->data();
+    const size_t npx = (size_t)job->w * job->h;
+    static int fixed = 0;
+    if (sdo < 6.0) {
+        const uint8_t a = (uint8_t)std::lround(std::min(255.0, mo));
+        for (size_t i = 0; i < npx; i++) px[4 * i + 3] = a;
+        if (fixed++ < 8) logf("vitart: pack de texturas: alfa de %s = %u (uniforme como no Vita)", g_texpack[key].c_str(), a);
+    } else if (sdp < 6.0 || corr < 0.55) {
+        const uint32_t ow = info.width, oh = info.height;
+        for (uint32_t y = 0; y < job->h; y++) {
+            const float fy = std::max(0.f, (y + 0.5f) * oh / job->h - 0.5f);
+            const uint32_t y0 = std::min((uint32_t)fy, oh - 1), y1 = std::min(y0 + 1, oh - 1);
+            const float ty = fy - y0;
+            for (uint32_t x = 0; x < job->w; x++) {
+                const float fx = std::max(0.f, (x + 0.5f) * ow / job->w - 0.5f);
+                const uint32_t x0 = std::min((uint32_t)fx, ow - 1), x1 = std::min(x0 + 1, ow - 1);
+                const float tx = fx - x0;
+                auto A = [&](uint32_t xx, uint32_t yy) { return (float)orig[4 * ((size_t)yy * ow + xx) + 3]; };
+                const float a = (A(x0, y0) * (1 - tx) + A(x1, y0) * tx) * (1 - ty) + (A(x0, y1) * (1 - tx) + A(x1, y1) * tx) * ty;
+                px[4 * ((size_t)y * job->w + x) + 3] = (uint8_t)(a + 0.5f);
+            }
+        }
+        if (fixed++ < 8) logf("vitart: pack de texturas: alfa de %s vindo do Vita (correlação %.2f)", g_texpack[key].c_str(), corr);
+    } else if (mp > 0.5 && std::fabs(mo / mp - 1.0) > 0.06) {
         const double k = mo / mp;
-        uint8_t *px = job->px->data();
         for (size_t i = 3, n = job->px->size(); i < n; i += 4) px[i] = (uint8_t)std::min(255.0, px[i] * k + 0.5);
-        static int fixed = 0;
         if (fixed++ < 8) logf("vitart: pack de texturas: alfa de %s ajustado ao do Vita (x%.2f)", g_texpack[key].c_str(), k);
     }
     w = job->w, h = job->h;
