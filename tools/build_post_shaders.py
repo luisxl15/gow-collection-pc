@@ -17,7 +17,7 @@ GLSLC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.environ.get('VULKA
 def main():
     out = ['// Gerado por tools/build_post_shaders.py a partir de runtime/vitart/post/*.comp. Não edite.', '#pragma once',
            '#include <cstdint>', '']
-    for name in ('prep', 'blur', 'final'):
+    for name in ('prep', 'blur', 'focus', 'shafts', 'final'):
         src = os.path.join(HERE, 'post_%s.comp' % name)
         spv = os.path.join(HERE, 'post_%s.spv' % name)
         subprocess.check_call([GLSLC, '--target-env=vulkan1.1', '-O', '-o', spv, src])

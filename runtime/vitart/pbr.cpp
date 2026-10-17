@@ -56,7 +56,7 @@ void write_default_ini() {
                 "# ssao_radius em unidades do jogo, bloom = intensidade, bloom_threshold = limiar (linear),\n"
                 "# exposure, tonemap = força da curva fílmica (0 = cor do jogo), saturation, vignette\n"
                 "post=1\n"
-                "ssao=0.8\n"
+                "ssao=1.0\n"
                 "ssao_radius=40\n"
                 "bloom=0.35\n"
                 "bloom_threshold=0.7\n"
@@ -64,6 +64,22 @@ void write_default_ini() {
                 "tonemap=0.6\n"
                 "saturation=1.08\n"
                 "vignette=0.15\n"
+                "# profundidade de campo: dof = força (0 desliga), dof_range = faixa nítida em volta do foco\n"
+                "# (fração da distância), dof_near = desfocar também o que está perto, focus_speed = adaptação\n"
+                "dof=0.65\n"
+                "dof_range=0.6\n"
+                "dof_near=0\n"
+                "focus_speed=0.08\n"
+                "# raios de luz (da direção da luz do jogo, onde o céu aparece), granulação, aberração cromática,\n"
+                "# nitidez e color grading (lift = sombras, gain = altas luzes, contrast em torno do cinza médio)\n"
+                "god_rays=0.6\n"
+                "grain=0.03\n"
+                "chromatic_aberration=0.004\n"
+                "sharpen=0.4\n"
+                "grade=1.0\n"
+                "contrast=1.08\n"
+                "lift=0.004 0.008 0.016\n"
+                "gain=1.04 1.0 0.95\n"
                 "# teto da luz assada extraída do jogo (cor original / textura)\n"
                 "baked_max=4.0\n"
                 "# cores lineares do ambiente refletido e o 'para cima' em espaço de câmera\n"
@@ -121,6 +137,18 @@ void load_ini() {
         else if (k == "tonemap") c.tonemap = x;
         else if (k == "saturation") c.saturation = x;
         else if (k == "vignette") c.vignette = x;
+        else if (k == "dof") c.dof = x;
+        else if (k == "dof_range") c.dof_range = x;
+        else if (k == "dof_near") c.dof_near = x != 0;
+        else if (k == "focus_speed") c.focus_speed = x;
+        else if (k == "god_rays") c.shafts = x;
+        else if (k == "grain") c.grain = x;
+        else if (k == "chromatic_aberration") c.chroma = x;
+        else if (k == "sharpen") c.sharpen = x;
+        else if (k == "grade") c.grade = x;
+        else if (k == "contrast") c.contrast = x;
+        else if (k == "lift") read_vec(v, c.lift);
+        else if (k == "gain") read_vec(v, c.gain);
         else if (k == "debug") c.debug = std::atoi(v);
         else if (k == "sky") read_vec(v, c.sky);
         else if (k == "ground") read_vec(v, c.ground);

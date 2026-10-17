@@ -1,0 +1,29 @@
+#version 450
+// Foco automático: mediana das distâncias de 25 pontos no centro da tela (um pouco abaixo do meio, onde
+// fica o personagem na câmera do GoW), suavizada entre quadros (uF guarda o valor do quadro anterior).
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 1, local_size_y = 1) in;
+#include "post_common.glsl"
+
+void main() {
+    vec2 sz = pc.p2.yz;
+    float d[25];
+    int n = 0;
+    for (int y = 0; y < 5; y++)
+        for (int x = 0; x < 5; x++) {
+            ivec2 p = ivec2(sz * vec2(0.38 + 0.06 * float(x), 0.42 + 0.06 * float(y)));
+            d[n++] = is_sky(p) ? 1e6 : dist_at(p);
+        }
+    // ordenação simples (25 valores)
+    for (int i = 1; i < 25; i++) {
+        float v = d[i];
+        int j = i - 1;
+        while (j >= 0 && d[j] > v) { d[j + 1] = d[j]; j--; }
+        d[j + 1] = v;
+    }
+    float target = min(d[8], 60000.0); // um pouco abaixo da mediana: prefere o que está mais perto
+    float prev = imageLoad(uF, ivec2(0)).r;
+    float k = pc.p7.w;
+    float f = (prev <= 0.0 || isnan(prev) || isinf(prev)) ? target : mix(prev, target, k);
+    imageStore(uF, ivec2(0), vec4(f, target, 0.0, 1.0));
+}

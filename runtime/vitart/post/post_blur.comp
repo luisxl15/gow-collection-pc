@@ -1,6 +1,6 @@
 #version 450
-// Desfoque separável em meia resolução: largo no bloom (rgb), curto e respeitando a profundidade na
-// oclusão (a). p2.w = 0: uA -> uB na horizontal; 1: uB -> uA na vertical.
+// Desfoque separável em meia resolução. p2.w = 0: horizontal (uA -> uB, uC -> uD); 1: vertical (uB -> uA,
+// uD -> uC). Bloom largo, cor do DOF com o passo do DOF, oclusão curta respeitando a profundidade.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 8, local_size_y = 8) in;
 #include "post_common.glsl"
@@ -11,17 +11,20 @@ void main() {
     if (h.x >= hs.x || h.y >= hs.y) return;
     bool vert = pc.p2.w > 0.5;
     ivec2 dir = vert ? ivec2(0, 1) : ivec2(1, 0);
-    float br = max(pc.p3.w, 1.0); // passo do bloom em texels
-    vec3 acc = vec3(0.0);
-    float wsum = 0.0;
+    float br = max(pc.p3.w, 1.0), dr = max(pc.p4.w, 1.0);
+    vec3 acc = vec3(0.0), dacc = vec3(0.0);
+    float wsum = 0.0, sky = 0.0;
     for (int i = -6; i <= 6; i++) {
         float w = exp(-float(i * i) / 18.0);
         ivec2 q = clamp(h + dir * int(round(float(i) * br)), ivec2(0), hs - 1);
+        ivec2 qd = clamp(h + dir * int(round(float(i) * dr)), ivec2(0), hs - 1);
         vec3 s = vert ? imageLoad(uB, q).rgb : imageLoad(uA, q).rgb;
+        vec4 sd = vert ? imageLoad(uD, qd) : imageLoad(uC, qd);
         acc += s * w;
+        dacc += sd.rgb * w;
+        sky += sd.a * w;
         wsum += w;
     }
-    // oclusão: 5 vizinhos, peso pela diferença de profundidade (a borda de um personagem não escurece o fundo)
     float zc = texelFetch(uDepth, h * 2, 0).r;
     float ao = 0.0, aw = 0.0;
     for (int i = -2; i <= 2; i++) {
@@ -33,5 +36,12 @@ void main() {
         aw += w;
     }
     vec4 o = vec4(acc / wsum, ao / max(aw, 1e-4));
-    if (vert) imageStore(uA, h, o); else imageStore(uB, h, o);
+    vec4 od = vec4(dacc / wsum, sky / wsum);
+    if (vert) {
+        imageStore(uA, h, o);
+        imageStore(uC, h, od);
+    } else {
+        imageStore(uB, h, o);
+        imageStore(uD, h, od);
+    }
 }

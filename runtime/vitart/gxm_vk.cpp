@@ -1512,18 +1512,21 @@ bool init(bool validation, bool window) {
 }
 
 // ------------------------------------------------------------------ iluminação de tela (runtime/vitart/post)
-// Oclusão de ambiente pela profundidade, bloom e curva fílmica, aplicados no alvo que vai para a tela
-// ANTES do HUD. Onde o HUD começa sai do quadro anterior: o índice logo depois do último desenho 3D
-// (teste ou escrita de profundidade) naquele alvo. A ordem dos desenhos do jogo é estável de um quadro
-// para o outro; quadros sem nada 3D (menus, vídeos) ficam como estão.
+// Pós-processamento no estilo dos jogos atuais, no alvo que vai para a tela ANTES do HUD: oclusão de
+// ambiente em duas escalas, profundidade de campo com foco automático, raios de luz da direção da luz do
+// jogo, bloom, curva fílmica, color grading, nitidez, aberração cromática e granulação. Onde o HUD
+// começa sai do quadro anterior: o índice logo depois do último desenho 3D (teste ou escrita de
+// profundidade) naquele alvo. A ordem dos desenhos do jogo é estável; quadros sem nada 3D (menus,
+// vídeos) ficam como estão.
 struct PostRes {
-    Image col, dep, a, b; // cópias (amostradas) e as duas imagens de meia resolução
+    Image col, dep, a, b, c, d, focus; // cópias, meia resolução (bloom/AO, cor do DOF/raios) e o foco 1x1
     uint32_t w = 0, h = 0;
 };
 PostRes g_post;
+constexpr uint32_t kPostBindings = 11, kPostPipes = 5;
 VkDescriptorSetLayout g_post_dsl = VK_NULL_HANDLE;
 VkPipelineLayout g_post_layout = VK_NULL_HANDLE;
-VkPipeline g_post_pipe[3] = {};
+VkPipeline g_post_pipe[kPostPipes] = {};
 VkDescriptorPool g_post_pool = VK_NULL_HANDLE;
 VkDescriptorSet g_post_sets[kSlots] = {};
 bool g_post_failed = false;
@@ -1532,29 +1535,36 @@ uint32_t g_main_addr = 0, g_main_idx = 0, g_hud_at = UINT32_MAX;
 int g_last3d = -1;
 bool g_post_done = false, g_post_s2v_ok = false;
 float g_post_s2v[16];
+float g_post_sun[3] = {0, 0, 0}, g_post_sun_col[3] = {0, 0, 0}; // luz do último desenho com PBR (câmera)
+bool g_post_sun_ok = false;
 uint32_t g_post_frames = 0;
 
 struct PostPush {
     float s2v[16];
-    float p0[4], p1[4], p2[4], p3[4];
+    float p[12][4];
 };
+static_assert(sizeof(PostPush) == 256, "push constants do pós");
 
 bool post_init() {
     if (g_post_layout) return true;
     if (g_post_failed) return false;
     g_post_failed = true;
-    VkDescriptorSetLayoutBinding b[6]{};
-    const VkDescriptorType types[6] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                       VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                                       VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
-    for (uint32_t i = 0; i < 6; i++) {
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(g_phys, &props);
+    if (props.limits.maxPushConstantsSize < sizeof(PostPush)) {
+        g_err = "pós-processamento desligado: a GPU aceita menos de 256 bytes de push constants";
+        return false;
+    }
+    VkDescriptorSetLayoutBinding b[kPostBindings]{};
+    const bool sampled[kPostBindings] = {true, true, false, false, true, false, false, false, true, true, false};
+    for (uint32_t i = 0; i < kPostBindings; i++) {
         b[i].binding = i;
-        b[i].descriptorType = types[i];
+        b[i].descriptorType = sampled[i] ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo dl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    dl.bindingCount = 6;
+    dl.bindingCount = kPostBindings;
     dl.pBindings = b;
     VKC(vkCreateDescriptorSetLayout(g_dev, &dl, nullptr, &g_post_dsl));
     VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PostPush)};
@@ -1564,9 +1574,10 @@ bool post_init() {
     pl.pushConstantRangeCount = 1;
     pl.pPushConstantRanges = &pr;
     VKC(vkCreatePipelineLayout(g_dev, &pl, nullptr, &g_post_layout));
-    const uint32_t *code[3] = {kPost_prep, kPost_blur, kPost_final};
-    const size_t size[3] = {sizeof kPost_prep, sizeof kPost_blur, sizeof kPost_final};
-    for (int i = 0; i < 3; i++) {
+    const uint32_t *code[kPostPipes] = {kPost_prep, kPost_blur, kPost_focus, kPost_shafts, kPost_final};
+    const size_t size[kPostPipes] = {sizeof kPost_prep, sizeof kPost_blur, sizeof kPost_focus, sizeof kPost_shafts,
+                                     sizeof kPost_final};
+    for (uint32_t i = 0; i < kPostPipes; i++) {
         VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         mi.codeSize = size[i];
         mi.pCode = code[i];
@@ -1582,8 +1593,8 @@ bool post_init() {
         vkDestroyShaderModule(g_dev, m, nullptr);
         if (r != VK_SUCCESS) return fail("pipeline do pós-processamento", r);
     }
-    VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * kSlots},
-                                  {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 * kSlots}};
+    VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 5 * kSlots},
+                                  {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 6 * kSlots}};
     VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dp.maxSets = kSlots;
     dp.poolSizeCount = 2;
@@ -1603,15 +1614,22 @@ bool post_init() {
 bool post_resources(uint32_t w, uint32_t h) {
     if (g_post.w == w && g_post.h == h) return true;
     vkDeviceWaitIdle(g_dev); // as imagens antigas podem estar em uso no outro quadro em voo
-    destroy(g_post.col), destroy(g_post.dep), destroy(g_post.a), destroy(g_post.b);
+    for (Image *im : {&g_post.col, &g_post.dep, &g_post.a, &g_post.b, &g_post.c, &g_post.d, &g_post.focus}) destroy(*im);
     g_post.w = g_post.h = 0;
     const uint32_t hw = (w + 1) / 2, hh = (h + 1) / 2;
     const VkImageUsageFlags half = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    const VkFormat f16 = VK_FORMAT_R16G16B16A16_SFLOAT;
     if (!make_image(g_post.col, w, h, kColor, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
         !make_image(g_post.dep, w, h, kDepth, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
-        !make_image(g_post.a, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT, half) ||
-        !make_image(g_post.b, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT, half))
+        !make_image(g_post.a, hw, hh, f16, half) || !make_image(g_post.b, hw, hh, f16, half) ||
+        !make_image(g_post.c, hw, hh, f16, half) || !make_image(g_post.d, hw, hh, f16, half) ||
+        !make_image(g_post.focus, 1, 1, f16, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
         return false;
+    // foco começa em 0 (o primeiro quadro pega o valor medido direto)
+    barrier(g_post.focus, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    const VkClearColorValue zero{};
+    const VkImageSubresourceRange all{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdClearColorImage(g_cmd, g_post.focus.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &all);
     g_post.w = w, g_post.h = h;
     return true;
 }
@@ -1624,6 +1642,30 @@ void compute_barrier() {
                          nullptr, 0, nullptr);
 }
 
+bool invert4x4(const float *m, float *inv) {
+    float t[16];
+    t[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+    t[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+    t[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+    t[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+    t[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+    t[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+    t[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+    t[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+    t[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+    t[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+    t[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+    t[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+    t[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+    t[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+    t[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+    t[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+    const float det = m[0] * t[0] + m[1] * t[4] + m[2] * t[8] + m[3] * t[12];
+    if (std::fabs(det) < 1e-30f) return false;
+    for (int i = 0; i < 16; i++) inv[i] = t[i] / det;
+    return true;
+}
+
 // Aplica o pós-processamento no alvo (gravado no quadro atual). Marca o quadro como feito mesmo se não
 // houver o que fazer, para não tentar de novo.
 void run_post(Target &t) {
@@ -1633,8 +1675,8 @@ void run_post(Target &t) {
     if (env_off || g_post_bypass || !cfg.post || !g_post_s2v_ok || !post_init()) return;
     if (!frame_begin()) return;
     const uint32_t w = t.color.w, h = t.color.h;
-    if (!post_resources(w, h)) return;
     end_pass();
+    if (!post_resources(w, h)) return;
     // cópias amostráveis da cor e da profundidade do alvo
     barrier(t.color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     barrier(t.depth, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -1652,29 +1694,26 @@ void run_post(Target &t) {
     barrier(g_post.dep, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     barrier(t.depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     barrier(t.color, VK_IMAGE_LAYOUT_GENERAL);
-    barrier(g_post.a, VK_IMAGE_LAYOUT_GENERAL);
-    barrier(g_post.b, VK_IMAGE_LAYOUT_GENERAL);
+    for (Image *im : {&g_post.a, &g_post.b, &g_post.c, &g_post.d, &g_post.focus}) barrier(*im, VK_IMAGE_LAYOUT_GENERAL);
 
     VkDescriptorSet set = g_post_sets[g_fi];
-    VkDescriptorImageInfo ii[6] = {
-        {g_sampler, g_post.col.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-        {g_sampler_nearest, g_post.dep.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-        {VK_NULL_HANDLE, g_post.a.view, VK_IMAGE_LAYOUT_GENERAL},
-        {VK_NULL_HANDLE, g_post.b.view, VK_IMAGE_LAYOUT_GENERAL},
-        {g_sampler, g_post.a.view, VK_IMAGE_LAYOUT_GENERAL},
-        {VK_NULL_HANDLE, t.color.view, VK_IMAGE_LAYOUT_GENERAL},
+    const VkImageLayout G = VK_IMAGE_LAYOUT_GENERAL, R = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorImageInfo ii[kPostBindings] = {
+        {g_sampler, g_post.col.view, R},       {g_sampler_nearest, g_post.dep.view, R}, {VK_NULL_HANDLE, g_post.a.view, G},
+        {VK_NULL_HANDLE, g_post.b.view, G},    {g_sampler, g_post.a.view, G},           {VK_NULL_HANDLE, t.color.view, G},
+        {VK_NULL_HANDLE, g_post.c.view, G},    {VK_NULL_HANDLE, g_post.d.view, G},      {g_sampler, g_post.c.view, G},
+        {g_sampler, g_post.d.view, G},         {VK_NULL_HANDLE, g_post.focus.view, G},
     };
-    VkWriteDescriptorSet wr[6]{};
-    for (uint32_t i = 0; i < 6; i++) {
+    VkWriteDescriptorSet wr[kPostBindings]{};
+    for (uint32_t i = 0; i < kPostBindings; i++) {
         wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         wr[i].dstSet = set;
         wr[i].dstBinding = i;
         wr[i].descriptorCount = 1;
-        wr[i].descriptorType = (i == 2 || i == 3 || i == 5) ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
-                                                            : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wr[i].descriptorType = ii[i].sampler ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         wr[i].pImageInfo = &ii[i];
     }
-    vkUpdateDescriptorSets(g_dev, 6, wr, 0, nullptr);
+    vkUpdateDescriptorSets(g_dev, kPostBindings, wr, 0, nullptr);
 
     // foco: pixels por unidade do jogo a 1 unidade de distância, medido na própria matriz
     auto view = [&](float x, float y, float z, float o[3]) {
@@ -1688,13 +1727,40 @@ void run_post(Target &t) {
     const float upp = std::sqrt((q1[0] - q0[0]) * (q1[0] - q0[0]) + (q1[1] - q0[1]) * (q1[1] - q0[1]) + (q1[2] - q0[2]) * (q1[2] - q0[2]));
     const float focal = upp > 1e-9f ? std::fabs(q0[2]) / upp : 0.f;
 
+    // luz na tela: a direção da luz do jogo (câmera) projetada; só se estiver na frente da câmera
+    float sun_px[2] = {0, 0};
+    bool sun_vis = false;
+    float fwd[16];
+    if (g_post_sun_ok && cfg.shafts > 0 && invert4x4(g_post_s2v, fwd)) {
+        const float len = std::sqrt(g_post_sun[0] * g_post_sun[0] + g_post_sun[1] * g_post_sun[1] + g_post_sun[2] * g_post_sun[2]);
+        const float fz = q0[2] < 0 ? -1.f : 1.f; // sinal de z na frente da câmera
+        if (len > 1e-6f && g_post_sun[2] * fz > 0.15f * len) {
+            const float d = std::fabs(q0[2]) * 50.f / len;
+            const float p[4] = {g_post_sun[0] * d, g_post_sun[1] * d, g_post_sun[2] * d, 1.f};
+            float s[4];
+            for (int r = 0; r < 4; r++) s[r] = fwd[r] * p[0] + fwd[4 + r] * p[1] + fwd[8 + r] * p[2] + fwd[12 + r] * p[3];
+            if (std::fabs(s[3]) > 1e-9f) {
+                sun_px[0] = s[0] / s[3], sun_px[1] = s[1] / s[3];
+                sun_vis = sun_px[0] > -0.5f * w && sun_px[0] < 1.5f * w && sun_px[1] > -0.5f * h && sun_px[1] < 1.5f * h;
+            }
+        }
+    }
+
     PostPush pp{};
     std::memcpy(pp.s2v, g_post_s2v, sizeof pp.s2v);
     const float hw = (float)((w + 1) / 2), hh = (float)((h + 1) / 2), rs = (float)scale_now();
-    pp.p0[0] = focal, pp.p0[1] = cfg.ssao_radius, pp.p0[2] = focal > 0 ? cfg.ssao : 0.f, pp.p0[3] = cfg.bloom_threshold;
-    pp.p1[0] = cfg.bloom, pp.p1[1] = cfg.exposure, pp.p1[2] = cfg.tonemap, pp.p1[3] = cfg.saturation;
-    pp.p2[0] = cfg.vignette, pp.p2[1] = (float)w, pp.p2[2] = (float)h, pp.p2[3] = 0.f;
-    pp.p3[0] = hw, pp.p3[1] = hh, pp.p3[2] = (float)(g_post_frames++ & 63), pp.p3[3] = 1.5f * rs;
+    auto set4 = [&](int i, float a, float b, float c2, float d) { pp.p[i][0] = a, pp.p[i][1] = b, pp.p[i][2] = c2, pp.p[i][3] = d; };
+    set4(0, focal, cfg.ssao_radius, focal > 0 ? cfg.ssao : 0.f, cfg.bloom_threshold);
+    set4(1, cfg.bloom, cfg.exposure, cfg.tonemap, cfg.saturation);
+    set4(2, cfg.vignette, (float)w, (float)h, 0.f);
+    set4(3, hw, hh, (float)(g_post_frames++ & 63), 1.5f * rs);
+    set4(4, focal > 0 ? cfg.dof : 0.f, cfg.dof_range, cfg.dof_near ? 1.f : 0.f, 1.25f * rs);
+    set4(5, sun_px[0], sun_px[1], cfg.shafts, 0.965f);
+    const float sc = std::max({g_post_sun_col[0], g_post_sun_col[1], g_post_sun_col[2], 1e-3f});
+    set4(6, g_post_sun_col[0] / sc, g_post_sun_col[1] / sc, g_post_sun_col[2] / sc, sun_vis ? 1.f : 0.f);
+    set4(7, cfg.grain, cfg.chroma, cfg.sharpen, cfg.focus_speed);
+    set4(8, cfg.lift[0], cfg.lift[1], cfg.lift[2], cfg.grade);
+    set4(9, cfg.gain[0], cfg.gain[1], cfg.gain[2], cfg.contrast);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_post_layout, 0, 1, &set, 0, nullptr);
     auto run = [&](int pipe, uint32_t gw, uint32_t gh) {
         vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_post_pipe[pipe]);
@@ -1702,12 +1768,19 @@ void run_post(Target &t) {
         vkCmdDispatch(g_cmd, (gw + 7) / 8, (gh + 7) / 8, 1);
         compute_barrier();
     };
-    run(0, (uint32_t)hw, (uint32_t)hh);
-    pp.p2[3] = 0.f;
-    run(1, (uint32_t)hw, (uint32_t)hh);
-    pp.p2[3] = 1.f;
-    run(1, (uint32_t)hw, (uint32_t)hh);
-    run(2, w, h);
+    run(0, (uint32_t)hw, (uint32_t)hh); // bloom, AO, cor e céu
+    pp.p[2][3] = 0.f;
+    run(1, (uint32_t)hw, (uint32_t)hh); // desfoque horizontal
+    pp.p[2][3] = 1.f;
+    run(1, (uint32_t)hw, (uint32_t)hh); // vertical
+    if (cfg.dof > 0) {
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_post_pipe[2]);
+        vkCmdPushConstants(g_cmd, g_post_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pp, &pp);
+        vkCmdDispatch(g_cmd, 1, 1, 1); // foco automático
+        compute_barrier();
+    }
+    run(3, (uint32_t)hw, (uint32_t)hh); // raios de luz (zera uD sem luz)
+    run(4, w, h);                       // final
     barrier(t.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     t.cver++;
 }
@@ -1732,7 +1805,7 @@ void post_at_present(uint32_t addr) {
     }
     g_hud_at = (addr == g_main_addr && g_last3d >= 0) ? (uint32_t)g_last3d + 1 : UINT32_MAX;
     g_main_addr = addr;
-    g_main_idx = 0, g_last3d = -1, g_post_done = false, g_post_s2v_ok = false;
+    g_main_idx = 0, g_last3d = -1, g_post_done = false, g_post_s2v_ok = false, g_post_sun_ok = false;
 }
 
 bool draw(const Draw &d) {
@@ -1961,6 +2034,11 @@ bool draw(const Draw &d) {
     if (d.view_inv_ok && d.target_addr == g_main_addr && (d.depth_func != 7 || d.depth_write)) {
         vt::pbr::screen_to_view(d.view_inv, vp.x, vp.y, vp.width, vp.height, vp.minDepth, vp.maxDepth, g_post_s2v);
         g_post_s2v_ok = true;
+    }
+    if (d.pbr && d.target_addr == g_main_addr) {
+        std::memcpy(g_post_sun, d.pbr_params + 16, 12);
+        std::memcpy(g_post_sun_col, d.pbr_params + 20, 12);
+        g_post_sun_ok = true;
     }
     if (d.pbr) {
         float prm[kPbrParamFloats];

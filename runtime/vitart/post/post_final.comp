@@ -1,6 +1,7 @@
 #version 450
-// Resolução cheia: oclusão, bloom, exposição, curva fílmica (ACES ajustada, normalizada para não
-// escurecer os meios-tons do jogo), saturação e vinheta; grava no próprio alvo de cor.
+// Resolução cheia: nitidez adaptativa, aberração cromática, oclusão, profundidade de campo, bloom, raios
+// de luz, exposição, curva fílmica (ACES normalizada no cinza médio), color grading, saturação, vinheta
+// e granulação; grava no próprio alvo de cor.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 8, local_size_y = 8) in;
 #include "post_common.glsl"
@@ -9,6 +10,7 @@ vec3 aces(vec3 x) {
     const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
+vec3 col_at(ivec2 p) { return texelFetch(uColor, clamp(p, ivec2(0), ivec2(pc.p2.yz) - 1), 0).rgb; }
 
 void main() {
     ivec2 f = ivec2(gl_GlobalInvocationID.xy);
@@ -16,17 +18,61 @@ void main() {
     if (f.x >= sz.x || f.y >= sz.y) return;
     vec2 uv = (vec2(f) + 0.5) / vec2(sz);
     vec4 src = texelFetch(uColor, f, 0);
-    vec3 c = srgb_to_lin(src.rgb);
+    vec3 c0 = src.rgb;
+
+    // nitidez adaptativa (no espírito do CAS da AMD): mais onde há pouco contraste local
+    vec3 n = col_at(f + ivec2(0, -1)), s = col_at(f + ivec2(0, 1)), e = col_at(f + ivec2(1, 0)), w = col_at(f + ivec2(-1, 0));
+    vec3 mn = min(c0, min(min(n, s), min(e, w))), mx = max(c0, max(max(n, s), max(e, w)));
+    vec3 amp = sqrt(clamp(min(mn, 1.0 - mx) / max(mx, 1e-4), 0.0, 1.0));
+    vec3 wgt = -amp * mix(0.125, 0.2, pc.p7.z);
+    vec3 sharp = clamp((c0 + (n + s + e + w) * wgt) / (1.0 + 4.0 * wgt), 0.0, 1.0);
+    c0 = mix(c0, sharp, step(0.001, pc.p7.z));
+
+    // aberração cromática nas bordas
+    if (pc.p7.y > 0.0) {
+        vec2 off = (uv - 0.5) * pc.p7.y;
+        c0.r = textureLod(uColor, uv + off, 0.0).r;
+        c0.b = textureLod(uColor, uv - off, 0.0).b;
+    }
+    vec3 c = srgb_to_lin(c0);
     vec4 a = textureLod(uAs, uv, 0.0);
     c *= mix(1.0, a.a, pc.p0.z);
+
+    // profundidade de campo: mistura com a cor desfocada pelo círculo de confusão
+    if (pc.p4.x > 0.0) {
+        float focus = imageLoad(uF, ivec2(0)).r;
+        float dpx = is_sky(f) ? 1e6 : dist_at(f);
+        float range = max(focus * pc.p4.y, 1.0);
+        float far = clamp((dpx - focus - range) / (range * 2.0), 0.0, 1.0);
+        float near = pc.p4.z > 0.5 ? clamp((focus * 0.6 - dpx) / (focus * 0.4 + 1.0), 0.0, 1.0) : 0.0;
+        float coc = max(far, near) * pc.p4.x;
+        vec3 blurred = textureLod(uCs, uv, 0.0).rgb * mix(1.0, a.a, pc.p0.z);
+        c = mix(c, blurred, coc);
+    }
     c += a.rgb * pc.p1.x;
+    c += textureLod(uDs, uv, 0.0).rgb;
     c *= pc.p1.y;
-    // curva fílmica normalizada: 0,18 (cinza médio) continua 0,18; altas luzes comprimem suave
     vec3 t = aces(c * 0.8) * (0.18 / aces(vec3(0.18 * 0.8)).r);
     c = mix(c, min(t, vec3(1.0)), pc.p1.z);
+
+    // color grading: contraste em torno do cinza médio, lift nas sombras, gain nas altas luzes
+    if (pc.p8.a > 0.0) {
+        vec3 g = c;
+        g = 0.18 * pow(max(g / 0.18, 0.0), vec3(pc.p9.a));
+        float l = clamp(lum(g), 0.0, 1.0);
+        g = g + pc.p8.rgb * (1.0 - l) * (1.0 - l);
+        g = g * mix(vec3(1.0), pc.p9.rgb, smoothstep(0.1, 0.8, l));
+        c = mix(c, g, pc.p8.a);
+    }
     float l = lum(c);
     c = max(mix(vec3(l), c, pc.p1.w), 0.0);
     vec2 r = uv - 0.5;
     c *= 1.0 - pc.p2.x * dot(r, r) * 2.0;
-    imageStore(uOut, f, vec4(lin_to_srgb(c), src.a));
+    vec3 o = lin_to_srgb(c);
+    // granulação de filme (mais nas sombras e meios-tons), nova a cada quadro
+    if (pc.p7.x > 0.0) {
+        float g = fract(sin(dot(vec2(f) + pc.p3.z * 17.13, vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
+        o += g * pc.p7.x * (1.0 - 0.6 * lum(o));
+    }
+    imageStore(uOut, f, vec4(o, src.a));
 }

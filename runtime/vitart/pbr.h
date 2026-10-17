@@ -27,8 +27,13 @@ struct Config {
     float relief = 0.8f, key_spec = 0.5f;
     // Iluminação de tela (gxm_vk.cpp, runtime/vitart/post): oclusão de ambiente, bloom e curva fílmica.
     bool post = true;
-    float ssao = 0.8f, ssao_radius = 40.f, bloom = 0.35f, bloom_threshold = 0.7f, exposure = 1.08f, tonemap = 0.6f,
+    float ssao = 1.0f, ssao_radius = 40.f, bloom = 0.35f, bloom_threshold = 0.7f, exposure = 1.08f, tonemap = 0.6f,
           saturation = 1.08f, vignette = 0.15f;
+    // profundidade de campo (foco automático no centro), raios de luz, acabamento e color grading
+    float dof = 0.65f, dof_range = 0.6f, focus_speed = 0.08f;
+    bool dof_near = false;
+    float shafts = 0.6f, grain = 0.03f, chroma = 0.004f, sharpen = 0.4f;
+    float grade = 1.0f, contrast = 1.08f, lift[3] = {0.004f, 0.008f, 0.016f}, gain[3] = {1.04f, 1.0f, 0.95f};
     float default_roughness = 0.8f; // material neutro (all_surfaces)
     int debug = 0;                  // 1 normal, 2 luz assada, 3 rugosidade, 4 metal, 5 oclusão, 6 posição, 7 detalhe
     float sky[3] = {0.55f, 0.60f, 0.70f}, ground[3] = {0.22f, 0.20f, 0.18f}, up[3] = {0.f, 1.f, 0.f};
