@@ -19,6 +19,9 @@
 // Texturas e áudio: 1 Off, 2 On, 3 indisponível. Resolução: 1..4 (escala interna). FPS: 1 = 30, 2 = 60.
 // Proporção: reservada (1 = 16:9). As escolhas ficam em <dados>/vitart_options.ini.
 #include "vitart.h"
+#include <cmath>
+#include <vector>
+#include <chrono>
 #include "gxm_vk.h"
 
 #include <cstdio>
@@ -38,6 +41,7 @@ bool texpack_available();
 void ps2audio_set_enabled(bool on);
 bool ps2audio_available();
 void display_set_fps60(bool on);
+void display_set_fps_target(uint32_t fps);
 
 namespace {
 
@@ -48,7 +52,8 @@ constexpr uint32_t kState = 0x2bc;            // PS2_Cheat
 constexpr uint32_t kStrncmpStub = 0x811d1a70; // import strncmp chamado pelo tratador de FSCommand
 constexpr uint32_t kFsPrefix = 0x811fbdf4;    // "FSCommand:"
 struct Options {
-    bool tex = true, audio = true, fps60 = false, counter = false, borderless = false;
+    bool tex = true, audio = true, counter = false, borderless = false;
+    uint32_t fps = 1; // 1 = 30, 2 = 60, 3 = máximo (taxa do monitor, sem acelerar o jogo)
     uint32_t scale = 0; // 0 = automática pelo monitor
 };
 Options g_opt;
@@ -63,9 +68,9 @@ void save() {
     if (const char *e = getenv("VITART_PS2_AUDIO"); e && *e) iso = e;
     if (FILE *f = fopen(ini_path().c_str(), "w")) {
         fprintf(f, "# Opções do PC (mudam pelo menu de pausa do jogo: Options)\n");
-        fprintf(f, "hd_textures=%u\nps2_audio=%u\nresolution=%u\nfps=%u\nfps_counter=%u\nborderless=%u\n",
-                g_opt.tex ? 1u : 0u, g_opt.audio ? 1u : 0u, g_opt.scale, g_opt.fps60 ? 60u : 30u, g_opt.counter ? 1u : 0u,
-                g_opt.borderless ? 1u : 0u);
+        fprintf(f, "hd_textures=%u\nps2_audio=%u\nresolution=%u\nfps=%s\nfps_counter=%u\nborderless=%u\n",
+                g_opt.tex ? 1u : 0u, g_opt.audio ? 1u : 0u, g_opt.scale, g_opt.fps == 3 ? "max" : g_opt.fps == 2 ? "60" : "30",
+                g_opt.counter ? 1u : 0u, g_opt.borderless ? 1u : 0u);
         if (!iso.empty()) fprintf(f, "ps2_iso=%s\n", iso.c_str());
         fclose(f);
     }
@@ -79,7 +84,8 @@ void load() {
             if (sscanf(line, "hd_textures=%u", &v) == 1) g_opt.tex = v != 0;
             if (sscanf(line, "ps2_audio=%u", &v) == 1) g_opt.audio = v != 0;
             if (sscanf(line, "resolution=%u", &v) == 1) g_opt.scale = v <= 4 ? v : 0;
-            if (sscanf(line, "fps=%u", &v) == 1) g_opt.fps60 = v == 60;
+            if (sscanf(line, "fps=%u", &v) == 1) g_opt.fps = v == 60 ? 2 : v > 60 ? 3 : 1;
+            if (!strncmp(line, "fps=max", 7)) g_opt.fps = 3;
             if (sscanf(line, "fps_counter=%u", &v) == 1) g_opt.counter = v != 0;
             if (sscanf(line, "borderless=%u", &v) == 1) g_opt.borderless = v != 0;
             if (!strncmp(line, "ps2_iso=", 8)) {
@@ -102,7 +108,7 @@ uint32_t encode() {
     const uint32_t aud = ps2audio_available() ? (g_opt.audio ? 2u : 1u) : 3u;
     uint32_t fps = g_opt.counter ? gvk::measured_fps() : 0;
     fps = fps > 127 ? 127 : fps; // a palavra passa por float no menu: até 2^24
-    return 0x10000u | tex | aud << 2 | cur_scale() << 4 | (g_opt.fps60 ? 2u : 1u) << 7 | 1u << 9 |
+    return 0x10000u | tex | aud << 2 | cur_scale() << 4 | g_opt.fps << 7 | 1u << 9 |
            (g_opt.counter ? 2u : 1u) << 12 | (g_opt.borderless ? 2u : 1u) << 14 | fps << 17;
 }
 
@@ -166,10 +172,54 @@ void game_options_tick() {
         else if (++settle > 3) g_opt.borderless = applied_borderless = gvk::is_borderless(), save(), settle = 0;
     }
     if (!is_gow1()) return;
-    // 60 FPS: o jogo espera 2 vblanks por quadro e calcula dt = max(tempo real do quadro, 1/60) (estrutura
-    // em 0x812b75dc; dt usado em 0x812b75f0). Com 1 vblank o dt real é 1/60: o dobro de quadros na mesma
-    // velocidade. Acima de 60 o dt trava em 1/60 e o jogo acelera, por isso só 30 ou 60.
-    display_set_fps60(g_opt.fps60);
+    // VITART_FPS=n (teste): FPS acima de 60; o piso do dt do jogo (tools/patch_gow1_dt.py) cai para 1/240 s
+    if (const char *e = getenv("VITART_FPS")) {
+        const uint32_t fps = (uint32_t)std::atoi(e);
+        display_set_fps_target(fps);
+        const float floor = fps > 60 ? 25.f : 0.f; // centésimos de quadro de 60 Hz
+        uint32_t fb;
+        std::memcpy(&fb, &floor, 4);
+        if (rd32(0x812b75d0) != fb) wr32(0x812b75d0, fb);
+    }
+    // VITART_TIMEDUMP=1 (depuração): a estrutura de tempo do jogo a cada 2 s
+    if (getenv("VITART_TIMEDUMP")) {
+        static uint32_t n = 0;
+        if (n++ % 120 == 0) {
+            char b[512];
+            int k = 0;
+            for (uint32_t a = 0x812b75d0; a < 0x812b7610; a += 4) {
+                const uint32_t v = rd32(a);
+                float f;
+                std::memcpy(&f, &v, 4);
+                k += std::snprintf(b + k, sizeof b - k, " %x:%08x(%g)", a & 0xff, v, f);
+            }
+            logf("vitart: tempo:%s", b);
+        }
+    }
+    // 60 FPS: o jogo espera 2 vblanks por quadro e calcula dt = max(e8, clamp(tempo real em quadros, 1, 4)) / 60
+    // (estrutura em 0x812b75dc; dt usado em 0x812b75f0). Com 1 vblank o dt real é 1/60: o dobro de quadros
+    // na mesma velocidade. Acima de 60 o piso de 1 quadro fazia o jogo acelerar; a DLL remendada
+    // (tools/patch_gow1_dt.py) lê o piso em 0x812b75d0: no máximo ele cai para 1/4 de quadro (240 FPS) e o
+    // quadro sai no ritmo do monitor (120 se o monitor for de 60 Hz).
+    display_set_fps60(g_opt.fps >= 2);
+    {
+        static uint32_t refresh = 0;
+        if (!refresh) {
+            DEVMODEW dm{};
+            dm.dmSize = sizeof dm;
+            refresh = EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) ? dm.dmDisplayFrequency : 60;
+            if (refresh <= 61) refresh = 120;
+            if (refresh > 240) refresh = 240;
+        }
+        const uint32_t target = g_opt.fps == 3 ? refresh : 0;
+        if (!getenv("VITART_FPS")) {
+            display_set_fps_target(target);
+            const float floor = target > 60 ? 25.f : 0.f; // centésimos de quadro de 60 Hz
+            uint32_t fb;
+            std::memcpy(&fb, &floor, 4);
+            if (rd32(0x812b75d0) != fb) wr32(0x812b75d0, fb);
+        }
+    }
     // VITART_RES_AT="quadro:escala,..." (teste): troca a resolução ao vivo em quadros definidos, como o menu.
     {
         static uint32_t frame = 0;
@@ -200,9 +250,9 @@ void game_options_tick() {
         gvk::set_render_scale(v);
         logf("vitart: resolução interna %ux (%ux%u)", v, 960 * v, 544 * v);
     }
-    if (const uint32_t v = g_req_fps.exchange(0); (v == 1 || v == 2) && (v == 2) != g_opt.fps60) {
-        g_opt.fps60 = v == 2, changed = true;
-        logf("vitart: %u FPS", g_opt.fps60 ? 60u : 30u);
+    if (const uint32_t v = g_req_fps.exchange(0); v >= 1 && v <= 3 && v != g_opt.fps) {
+        g_opt.fps = v, changed = true;
+        logf("vitart: FPS %s", v == 3 ? "máximo" : v == 2 ? "60" : "30");
     }
     if (const uint32_t v = g_req_cnt.exchange(0); (v == 1 || v == 2) && (v == 2) != g_opt.counter) {
         g_opt.counter = v == 2, changed = true;

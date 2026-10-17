@@ -362,6 +362,9 @@ VT_HLE(sceDisplayGetVcount) {
 // do jogo também em 60, 1 vblank dá 60 FPS na velocidade certa.
 static std::atomic<bool> g_fps60{false};
 void display_set_fps60(bool on) { g_fps60 = on; }
+// FPS acima de 60 (game_options.cpp): o quadro sai a cada 1/fps s em vez de por vblanks.
+static std::atomic<uint32_t> g_fps_target{0};
+void display_set_fps_target(uint32_t fps) { g_fps_target = fps; }
 // Ritmo por prazo no laço principal do jogo (que chama esta função uma vez por quadro): o próximo quadro
 // sai 1/30 s (ou 1/60 s) depois do anterior. Esperar o próximo vblank da grade transformava um quadro de
 // 17 ms em 33 ms (60 -> 30/40 FPS em degrau); com prazo, um quadro atrasado não espera nada e o seguinte
@@ -371,7 +374,9 @@ static void wait_frame(uint32_t vblanks) {
     if (novsync) return;
     using clk = std::chrono::steady_clock;
     static clk::time_point last{};
-    const auto interval = VBLANK * (vblanks ? vblanks : 1);
+    const uint32_t fps = g_fps_target;
+    const auto interval = fps > 60 ? std::chrono::duration_cast<clk::duration>(std::chrono::duration<double>(1.0 / fps))
+                                   : std::chrono::duration_cast<clk::duration>(VBLANK * (vblanks ? vblanks : 1));
     const auto now = clk::now();
     const auto target = last + interval;
     if (last.time_since_epoch().count() && now < target) {

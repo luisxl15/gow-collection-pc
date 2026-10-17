@@ -38,7 +38,7 @@ ROWS = [  # (estado da página, nome do clipe, rótulo, variável decodificada, 
     (10, 'VtDisplayMode', 'Display Mode', '_level0/:VtDsp', 16384, '_level0/:VtDspText'),
 ]
 RES_TEXT = {1: '1x  (960x544)', 2: '2x  (1920x1088)', 3: '3x  (2880x1632)', 4: '4x  (3840x2176)'}
-FPS_TEXT = {1: '30 FPS', 2: '60 FPS'}
+FPS_TEXT = {1: '30 FPS', 2: '60 FPS', 3: 'Max FPS'}  # Max: taxa do monitor, sem acelerar (patch_gow1_dt.py)
 # estado -> (caminho do clipe da linha, grupo: A = ajustável com esquerda/direita, B = seleciona com X)
 PATH = {1: ('PauseMenu/MusicVolume', 'A'), 2: ('PauseMenu/SFXVolume', 'A'), 5: ('PauseMenu/VtTextures', 'A'),
         6: ('PauseMenu/VtAudio', 'A'), 7: ('PauseMenu/VtResolution', 'A'), 8: ('PauseMenu/VtFrameRate', 'A'),
@@ -200,17 +200,18 @@ def change_script(f, step):
             choose(s, var, 1)
             a.label('on%d' % s)
             choose(s, var, 2)
-        elif s == 7:  # resolução 1..4
-            for v in range(1, 5):
+        elif s in (7, 8):  # resolução 1..4, FPS 1..3 (30, 60, máximo)
+            top = 4 if s == 7 else 3
+            for v in range(1, top + 1):
                 nv = v + step
-                a.getv(var).push(v).eq().not_().jumpif('r%d' % v)
-                if 1 <= nv <= 4:
+                a.getv(var).push(v).eq().not_().jumpif('r%d_%d' % (s, v))
+                if 1 <= nv <= top:
                     choose(s, var, nv)
                 else:
                     a.jump('trava')
-                a.label('r%d' % v)
+                a.label('r%d_%d' % (s, v))
             a.jump('trava')
-        else:  # 30 / 60 FPS, contador Off / On
+        else:  # contador Off / On, modo de exibição
             a.getv(var).push(2).eq().not_().jumpif('dois%d' % s)
             choose(s, var, 1)
             a.label('dois%d' % s)
