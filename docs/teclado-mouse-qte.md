@@ -52,6 +52,8 @@ O runtime lê o ícone que o HUD está mostrando e aperta o botão (ou gira o an
 - **GoW2:** `sub_81070b60(slot, valor)` grava em `0x812ec588 + 4*slot` o hash do nome do clipe
   (`h = h*127 + maiúscula`, `sub_811346de`): `PB_XBtn`, `PB_360CW`, `PB_CircleBtnSmash`, `PB_R1BtnHold`...
   Os ícones "Static" (baú, inimigo para agarrar) ficam de fora.
+  Estado do jogo em `0x812ec498`: 0xc correndo, 0xd pausa (medido do mesmo jeito); fora do 0xc nada é
+  apertado.
 
 Toques a cerca de 14 por segundo (serve para os QTEs de repetir), "Hold" segurado, voltas a 2,5 por segundo.
 Diagnóstico: `VITART_QTELOG=1` registra cada ícone; `VITART_AUTO_QTE=1` liga sem o menu.

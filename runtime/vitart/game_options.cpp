@@ -421,6 +421,7 @@ uint32_t game_qte_auto(uint8_t &lx, uint8_t &ly) {
         seen = menu ? 0xfffffffeu : idx;
         if (!menu) q = qte_gow1(idx);
     } else {
+        if (rd32(0x812ec498) != 0xc) return 0; // estado do jogo no GoW2: 0xc = correndo, 0xd = pausa (memória comparada)
         for (uint32_t s = 0; s < 8 && q.kind == QNone; s++) {
             const uint32_t v = rd32(0x812ec588 + 4 * s);
             if (!v) continue;
