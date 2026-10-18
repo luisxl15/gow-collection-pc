@@ -115,6 +115,19 @@ uint32_t encode() {
            (g_opt.counter ? 2u : 1u) << 12 | (g_opt.borderless ? 2u : 1u) << 14 | fps << 17;
 }
 
+bool is_gow1();
+bool is_gow2() {
+    static int ok = -1;
+    if (ok < 0) {
+        constexpr uint32_t kNameWide2 = 0x81214970; // "WideScreen" no gow2 (0x214a70 no ELF)
+        MEMORY_BASIC_INFORMATION mi{};
+        if (!VirtualQuery(mem_base() + kNameWide2, &mi, sizeof mi) || mi.State != MEM_COMMIT) return (ok = 0) == 1;
+        char name[11] = {};
+        std::memcpy(name, ptr<char>(kNameWide2), 10);
+        ok = !std::strcmp(name, "WideScreen") && !is_gow1();
+    }
+    return ok == 1;
+}
 bool is_gow1() {
     static int ok = -1;
     if (ok < 0) {
@@ -175,77 +188,62 @@ void game_options_tick() {
         if (gvk::is_borderless() == applied_borderless) settle = 0;
         else if (++settle > 3) g_opt.borderless = applied_borderless = gvk::is_borderless(), save(), settle = 0;
     }
-    if (!is_gow1()) return;
-    // VITART_FPS=n (teste): FPS acima de 60; o piso do dt do jogo (tools/patch_gow1_dt.py) cai para 1/240 s
-    if (const char *e = getenv("VITART_FPS")) {
-        const uint32_t fps = (uint32_t)std::atoi(e);
-        display_set_fps_target(fps);
-        const float floor = fps > 60 ? 25.f : 0.f; // centésimos de quadro de 60 Hz
-        uint32_t fb;
-        std::memcpy(&fb, &floor, 4);
-        if (rd32(0x812b75d0) != fb) wr32(0x812b75d0, fb);
-    }
-    // VITART_MEMSNAP="q1,q2,...": grava a memória global do jogo (0x81000000..0x81800000, só o mapeado) nos
-    // quadros pedidos, em memsnap_<quadro>.bin (diagnóstico)
-    if (const char *ms = getenv("VITART_MEMSNAP")) {
-        static uint32_t q = 0;
-        q++;
-        for (const char *e = ms; e && *e;) {
-            if ((uint32_t)std::atoi(e) == q) {
-                char path[64];
-                std::snprintf(path, sizeof path, "memsnap_%05u.bin", q);
-                if (FILE *f = fopen(path, "wb")) {
-                    std::vector<uint8_t> buf(0x800000, 0);
-                    for (uint32_t a = 0x81000000; a < 0x81800000;) {
-                        MEMORY_BASIC_INFORMATION mi{};
-                        if (!VirtualQuery(mem_base() + a, &mi, sizeof mi)) break;
-                        const uint32_t end = (uint32_t)std::min<uint64_t>(0x81800000ull, (uint64_t)((uint8_t *)mi.BaseAddress - mem_base()) + mi.RegionSize);
-                        if (mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
-                            std::memcpy(&buf[a - 0x81000000], mem_base() + a, end - a);
-                        a = end;
+    // Tempo e ritmo, por jogo: endereços da estrutura de tempo e das palavras do remendo do dt
+    // (tools/patch_gow1_dt.py, tools/patch_gow2_dt.py) e da flag do menu principal.
+    struct TimeProfile {
+        uint32_t floor, dt, menu; // piso do dt (float, centésimos de quadro), dt do quadro, = 1 no menu principal
+    };
+    static const TimeProfile kGow1{0x812b75d0, 0x812b75e0, 0x812bc0c0};
+    static const TimeProfile kGow2{0x812df6d0, 0x812df6e0, 0x812e40e0}; // menu: 1 só no menu principal (memória comparada)
+    const TimeProfile *tp = is_gow1() ? &kGow1 : is_gow2() ? &kGow2 : nullptr;
+    if (tp) {
+        // VITART_MEMSNAP="q1,q2,...": grava a memória global do jogo (0x81000000..0x81800000, só o mapeado)
+        // nos quadros pedidos, em memsnap_<quadro>.bin (diagnóstico; assim foi achada a flag do menu)
+        if (const char *ms = getenv("VITART_MEMSNAP")) {
+            static uint32_t q = 0;
+            q++;
+            for (const char *e = ms; e && *e;) {
+                if ((uint32_t)std::atoi(e) == q) {
+                    char path[64];
+                    std::snprintf(path, sizeof path, "memsnap_%05u.bin", q);
+                    if (FILE *f = fopen(path, "wb")) {
+                        std::vector<uint8_t> buf(0x800000, 0);
+                        for (uint32_t a = 0x81000000; a < 0x81800000;) {
+                            MEMORY_BASIC_INFORMATION mi{};
+                            if (!VirtualQuery(mem_base() + a, &mi, sizeof mi)) break;
+                            const uint32_t end = (uint32_t)std::min<uint64_t>(0x81800000ull, (uint64_t)((uint8_t *)mi.BaseAddress - mem_base()) + mi.RegionSize);
+                            if (mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+                                std::memcpy(&buf[a - 0x81000000], mem_base() + a, end - a);
+                            a = end;
+                        }
+                        fwrite(buf.data(), 1, buf.size(), f);
+                        fclose(f);
                     }
-                    fwrite(buf.data(), 1, buf.size(), f);
-                    fclose(f);
                 }
+                e = std::strchr(e, ',');
+                if (e) e++;
             }
-            e = std::strchr(e, ',');
-            if (e) e++;
         }
-    }
-    // VITART_TIMEDUMP=1 (depuração): a estrutura de tempo do jogo a cada 2 s e a soma do dt contra o relógio
-    if (getenv("VITART_TIMEDUMP")) {
-        static double game_t = 0;
-        static uint32_t nframes = 0;
-        static auto t0 = std::chrono::steady_clock::now();
-        float dtv;
-        const uint32_t raw = rd32(0x812b75e0);
-        std::memcpy(&dtv, &raw, 4);
-        if (std::isfinite(dtv) && dtv > 0 && dtv < 1) game_t += dtv, nframes++;
-        const double real = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        if (real >= 10) {
-            logf("vitart: tempo do jogo %.2f s em %.2f s reais (%u quadros, razão %.3f)", game_t, real, nframes, game_t / real);
-            game_t = 0, nframes = 0, t0 = std::chrono::steady_clock::now();
-        }
-        static uint32_t n = 0;
-        if (n++ % 120 == 0) {
-            char b[512];
-            int k = 0;
-            for (uint32_t a = 0x812b75d0; a < 0x812b7610; a += 4) {
-                const uint32_t v = rd32(a);
-                float f;
-                std::memcpy(&f, &v, 4);
-                k += std::snprintf(b + k, sizeof b - k, " %x:%08x(%g)", a & 0xff, v, f);
+        // VITART_TIMEDUMP=1 (depuração): a soma do dt do jogo contra o relógio, a cada 10 s
+        if (getenv("VITART_TIMEDUMP")) {
+            static double game_t = 0;
+            static uint32_t nframes = 0;
+            static auto t0 = std::chrono::steady_clock::now();
+            float dtv;
+            const uint32_t raw = rd32(tp->dt);
+            std::memcpy(&dtv, &raw, 4);
+            if (std::isfinite(dtv) && dtv > 0 && dtv < 1) game_t += dtv, nframes++;
+            const double real = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            if (real >= 10) {
+                logf("vitart: tempo do jogo %.2f s em %.2f s reais (%u quadros, razão %.3f), menu %u", game_t, real, nframes,
+                     game_t / real, tp->menu ? rd32(tp->menu) : 0u);
+                game_t = 0, nframes = 0, t0 = std::chrono::steady_clock::now();
             }
-            logf("vitart: tempo: f4=%u a7cc=%u d8=%u a83c=%u a7d4=%u quadro %u", rd32(0x812b75f4), rd32(0x8163a7cc), rd32(0x812b75d8), rd32(0x8163a83c), rd32(0x8163a7d4), n), logf("vitart: profundidade no quadro: %u desenhos", gvk::last_frame_depth_writes());
         }
-    }
-    // 60 FPS: o jogo espera 2 vblanks por quadro e calcula dt = max(e8, clamp(tempo real em quadros, 1, 4)) / 60
-    // (estrutura em 0x812b75dc; dt usado em 0x812b75f0). Com 1 vblank o dt real é 1/60: o dobro de quadros
-    // na mesma velocidade. Acima de 60 o piso de 1 quadro fazia o jogo acelerar; a DLL remendada
-    // (tools/patch_gow1_dt.py) lê o piso em 0x812b75d0: no máximo ele cai para 1/4 de quadro (240 FPS) e o
-    // quadro sai no ritmo do monitor (120 se o monitor for de 60 Hz).
-    display_set_fps60(g_opt.fps >= 2);
-    {
+        // 30/60 FPS: o jogo espera 2 vblanks por quadro e calcula dt = max(60/taxa, clamp(tempo real em
+        // quadros, 1, 4)) / 60. Com 1 vblank o dt real é 1/60: o dobro de quadros na mesma velocidade. Acima de
+        // 60 o piso de 1 quadro fazia o jogo acelerar; a DLL remendada lê o piso em tp->floor.
+        display_set_fps60(g_opt.fps >= 2);
         static uint32_t refresh = 0;
         if (!refresh) {
             DEVMODEW dm{};
@@ -256,19 +254,19 @@ void game_options_tick() {
         }
         // VSync desligado: sem limite (o jogo roda o mais rápido que der) e piso do dt em 1/3000 s;
         // ligado: 30, 60 ou a taxa do monitor
-        const uint32_t target = !g_opt.vsync ? UINT32_MAX : g_opt.fps == 3 ? refresh : 0;
+        uint32_t target = !g_opt.vsync ? UINT32_MAX : g_opt.fps == 3 ? refresh : 0;
+        if (const char *e = getenv("VITART_FPS")) target = (uint32_t)std::atoi(e); // teste
         gvk::set_vsync(g_opt.vsync);
-        // 0x812bc0c0 = 1 no menu principal (0 na cena de abertura, nos vídeos e na jogatina; achado comparando
-        // a memória global nas fases): o menu anima por quadro, então nele o ritmo é o do jogo mesmo sem VSync
-        display_set_fixed_step_addr(0x812bc0c0);
-        if (!getenv("VITART_FPS")) {
-            display_set_fps_target(target);
-            const float floor = target == UINT32_MAX ? 2.f : target > 60 ? 25.f : 0.f; // centésimos de quadro de 60 Hz
-            uint32_t fb;
-            std::memcpy(&fb, &floor, 4);
-            if (rd32(0x812b75d0) != fb) wr32(0x812b75d0, fb);
-        }
+        // o menu principal anima por quadro, não pelo tempo: nele o ritmo é o do jogo mesmo sem VSync
+        // (GoW1: 0x812bc0c0 = 1 só no menu principal, achado comparando a memória global nas fases)
+        display_set_fixed_step_addr(tp->menu);
+        display_set_fps_target(target);
+        const float floor = target == UINT32_MAX ? 2.f : target > 60 ? 25.f : 0.f; // centésimos de quadro de 60 Hz
+        uint32_t fb;
+        std::memcpy(&fb, &floor, 4);
+        if (rd32(tp->floor) != fb) wr32(tp->floor, fb);
     }
+    if (!is_gow1()) return;
     // VITART_RES_AT="quadro:escala,..." (teste): troca a resolução ao vivo em quadros definidos, como o menu.
     {
         static uint32_t frame = 0;
