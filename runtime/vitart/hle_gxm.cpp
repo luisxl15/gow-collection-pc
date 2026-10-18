@@ -379,7 +379,7 @@ static uint64_t texpack_key(const gxmtex::Info &info, size_t base_bytes) {
     return g_texpack.count(key) && !g_texpack_rejected.count(key) ? key : 0;
 }
 // VITART_TEXDUMP=dir (diagnóstico): cada textura (até 2048x2048) decodificada pela primeira vez vai para
-// dir/<chave do pack>_<l>x<a>.rgba (RGBA cru), com a chave como em texpack_key (com a paleta, se P8).
+// dir/<chave do pack>_<l>x<a>_<hash do conteúdo>.rgba (RGBA cru), com a chave como em texpack_key (com a paleta, se P8).
 // Serve para montar entradas de pack (tools/texpack_*.py) para texturas que o pack do PS2 não cobre.
 static void texdump(const gxmtex::Info &info, size_t base_bytes, const std::vector<uint8_t> &px) {
     static const char *dir = getenv("VITART_TEXDUMP");
@@ -387,11 +387,13 @@ static void texdump(const gxmtex::Info &info, size_t base_bytes, const std::vect
     const uint32_t wh[2] = {info.width, info.height};
     uint64_t key = fnv64(ptr<uint8_t>(info.data), std::min<size_t>(4096, base_bytes), fnv64(reinterpret_cast<const uint8_t *>(wh), 8));
     if (info.base == 0x95000000u && info.palette) key = fnv64(ptr<uint8_t>(info.palette), 1024, key);
+    // atlas com o começo igual (topo transparente) têm a mesma chave: o arquivo leva também o hash do conteúdo
+    const uint64_t full = fnv64(ptr<uint8_t>(info.data), base_bytes, key);
     static std::set<uint64_t> seen;
-    if (!seen.insert(key).second) return;
+    if (!seen.insert(full).second) return;
     std::filesystem::create_directories(dir);
-    char name[64];
-    std::snprintf(name, sizeof name, "/%016llx_%ux%u.rgba", (unsigned long long)key, info.width, info.height);
+    char name[80];
+    std::snprintf(name, sizeof name, "/%016llx_%ux%u_%08x.rgba", (unsigned long long)key, info.width, info.height, (uint32_t)full);
     if (FILE *f = std::fopen((std::string(dir) + name).c_str(), "wb")) {
         std::fwrite(px.data(), 1, 4ull * info.width * info.height, f);
         std::fclose(f);
