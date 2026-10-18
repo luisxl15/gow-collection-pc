@@ -46,12 +46,19 @@ void display_set_fixed_step_addr(uint32_t a);
 
 namespace {
 
-constexpr uint32_t kOptionsPtr = 0x812a681c;  // ponteiro para o objeto de opções (gow1)
-constexpr uint32_t kOptionsVtbl = 0x8120c534; // vtable do objeto (0x8120c52c + 8)
 constexpr uint32_t kNameWide = 0x811f036c;    // "WideScreen" (confere que o módulo é o gow1)
-constexpr uint32_t kState = 0x2bc;            // PS2_Cheat
-constexpr uint32_t kStrncmpStub = 0x811d1a70; // import strncmp chamado pelo tratador de FSCommand
-constexpr uint32_t kFsPrefix = 0x811fbdf4;    // "FSCommand:"
+// Canal com o menu, por jogo: objeto de opções (ponteiro global e vtable + 8), campo da palavra de estado e
+// a chamada de strncmp do tratador de FSCommand com o endereço de "FSCommand:".
+//   GoW1: PS2_Cheat (+0x2bc, só leitura para os scripts, registrada em sub_81014640).
+//   GoW2: não tem Cheat; PS2_OverUnder (+0x3e0, o modo 3D acima/abaixo do PS3, sem uso no Vita). Objeto
+//     criado em 0x8106c49e (construtor sub_81016fe0, vtable 0x8122e048), ponteiro em 0x812cb1b8; tratador de
+//     FSCommand em 0x8111669e chamando strncmp (stub 0x811f5510) com "FSCommand:" em 0x8121e8d0.
+struct OptProfile {
+    uint32_t optr, vtbl, field, strncmp_stub, fs_prefix;
+};
+constexpr OptProfile kOptGow1{0x812a681c, 0x8120c534, 0x2bc, 0x811d1a70, 0x811fbdf4};
+constexpr OptProfile kOptGow2{0x812cb1b8, 0x8122e050, 0x3e0, 0x811f5510, 0x8121e8d0};
+const OptProfile *opt_profile();
 struct Options {
     bool tex = true, audio = true, counter = false, borderless = false;
     uint32_t fps = 1; // 1 = 30, 2 = 60, 3 = máximo (taxa do monitor, sem acelerar o jogo)
@@ -107,8 +114,10 @@ uint32_t cur_scale() {
 }
 
 uint32_t encode() {
-    const uint32_t tex = texpack_available() ? (g_opt.tex ? 2u : 1u) : 3u;
-    const uint32_t aud = ps2audio_available() ? (g_opt.audio ? 2u : 1u) : 3u;
+    // pack de texturas e áudio do PS2 só existem para o GoW1: no GoW2 o menu mostra "Unavailable"
+    const bool g1 = opt_profile() == &kOptGow1;
+    const uint32_t tex = g1 && texpack_available() ? (g_opt.tex ? 2u : 1u) : 3u;
+    const uint32_t aud = g1 && ps2audio_available() ? (g_opt.audio ? 2u : 1u) : 3u;
     uint32_t fps = g_opt.counter ? gvk::measured_fps() : 0;
     fps = fps > 127 ? 127 : fps; // a palavra passa por float no menu: até 2^24
     return 0x10000u | tex | aud << 2 | cur_scale() << 4 | g_opt.fps << 7 | (g_opt.vsync ? 2u : 1u) << 9 |
@@ -116,6 +125,8 @@ uint32_t encode() {
 }
 
 bool is_gow1();
+bool is_gow2();
+const OptProfile *opt_profile() { return is_gow1() ? &kOptGow1 : is_gow2() ? &kOptGow2 : nullptr; }
 bool is_gow2() {
     static int ok = -1;
     if (ok < 0) {
@@ -141,7 +152,8 @@ bool is_gow1() {
 }
 
 void on_import(arc_ctx *ctx, uint32_t stub) {
-    if (stub != kStrncmpStub || ctx->r[1] != kFsPrefix || !ctx->r[0]) return;
+    const OptProfile *op = opt_profile();
+    if (!op || stub != op->strncmp_stub || ctx->r[1] != op->fs_prefix || !ctx->r[0]) return;
     const char *c = gstr(ctx->r[0]);
     if (std::strncmp(c, "FSCommand:VT_", 13) != 0) return;
     char key[8] = {};
@@ -165,7 +177,7 @@ void game_options_init() {
     texpack_set_enabled(g_opt.tex);
     ps2audio_set_enabled(g_opt.audio);
     if (g_opt.scale) gvk::set_render_scale(g_opt.scale);
-    gvk::set_fps_counter(g_opt.counter && !is_gow1());
+    gvk::set_fps_counter(g_opt.counter && !opt_profile()); // nos dois GoW o contador é o do HUD (FLP)
     gvk::set_borderless(g_opt.borderless);
 }
 
@@ -266,7 +278,8 @@ void game_options_tick() {
         std::memcpy(&fb, &floor, 4);
         if (rd32(tp->floor) != fb) wr32(tp->floor, fb);
     }
-    if (!is_gow1()) return;
+    const OptProfile *op = opt_profile();
+    if (!op) return;
     // VITART_RES_AT="quadro:escala,..." (teste): troca a resolução ao vivo em quadros definidos, como o menu.
     {
         static uint32_t frame = 0;
@@ -288,9 +301,9 @@ void game_options_tick() {
     }
     // pedidos do menu
     bool changed = false;
-    if (const uint32_t v = g_req_tex.exchange(0); v && texpack_available() && (v == 2) != g_opt.tex)
+    if (const uint32_t v = g_req_tex.exchange(0); v && op == &kOptGow1 && texpack_available() && (v == 2) != g_opt.tex)
         g_opt.tex = v == 2, texpack_set_enabled(g_opt.tex), changed = true;
-    if (const uint32_t v = g_req_aud.exchange(0); v && ps2audio_available() && (v == 2) != g_opt.audio)
+    if (const uint32_t v = g_req_aud.exchange(0); v && op == &kOptGow1 && ps2audio_available() && (v == 2) != g_opt.audio)
         g_opt.audio = v == 2, ps2audio_set_enabled(g_opt.audio), changed = true;
     if (const uint32_t v = g_req_res.exchange(0); v >= 1 && v <= 4 && v != cur_scale()) {
         g_opt.scale = v, changed = true;
@@ -310,10 +323,18 @@ void game_options_tick() {
     }
     if (changed) save();
     // estado para o menu mostrar
-    const uint32_t obj = rd32(kOptionsPtr);
-    if (!obj || rd32(obj) != kOptionsVtbl) return;
+    const uint32_t obj = rd32(op->optr);
+    if (getenv("VITART_OPTLOG")) {
+        static uint32_t n = 0, prev = 0, overwritten = 0;
+        if (obj && rd32(obj) == op->vtbl && prev && rd32(obj + op->field) != prev) overwritten++;
+        if (n++ % 600 == 0)
+            logf("vitart: opções: objeto 0x%08x vtable 0x%08x (esperada 0x%08x), campo 0x%08x, sobrescrito pelo jogo %u vezes",
+                 obj, obj ? rd32(obj) : 0, op->vtbl, obj ? rd32(obj + op->field) : 0, overwritten);
+        prev = encode();
+    }
+    if (!obj || rd32(obj) != op->vtbl) return;
     const uint32_t want = encode();
-    if (rd32(obj + kState) != want) wr32(obj + kState, want);
+    if (rd32(obj + op->field) != want) wr32(obj + op->field, want);
 }
 
 } // namespace vt

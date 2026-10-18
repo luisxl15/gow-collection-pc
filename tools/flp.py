@@ -15,6 +15,10 @@ eventos de botão (Data6), 7 clipe (Data7), 8 raiz, 9 transformação, 10 cor.
 import struct
 import sys
 
+# Versão do arquivo sendo lido/gravado: o GoW2 (FLP_MAGIC 0x1b) tem cabeçalho de 0x5c e vários campos em
+# outros deslocamentos (god_of_war_browser, pack/wad/flp/parser.go). As classes consultam G2.
+G2 = False
+
 
 def pad4(p):
     return (p + 3) & ~3
@@ -47,7 +51,7 @@ class W:
 class Mesh:  # MeshPartReference: cabeçalho de 8 + materiais de 8
     def head(self, b, p):
         self.h = bytearray(b[p:p + 8])
-        self.nmat = struct.unpack_from('<H', b, p + 2)[0]
+        self.nmat = struct.unpack_from('<H', b, p + (6 if G2 else 2))[0]
         return p + 8
 
     def body(self, b, p):
@@ -55,7 +59,7 @@ class Mesh:  # MeshPartReference: cabeçalho de 8 + materiais de 8
         return p + 8 * self.nmat
 
     def w_head(self, w):
-        struct.pack_into('<H', self.h, 2, len(self.mats))
+        struct.pack_into('<H', self.h, 6 if G2 else 2, len(self.mats))
         w.raw(self.h)
 
     def w_body(self, w):
@@ -66,9 +70,14 @@ class Mesh:  # MeshPartReference: cabeçalho de 8 + materiais de 8
 class Font:
     def head(self, b, p):
         self.h = bytearray(b[p:p + 0x24])
-        self.count = struct.unpack_from('<I', b, p)[0]
-        self.size = struct.unpack_from('<h', b, p + 6)[0]
-        self.flags = struct.unpack_from('<H', b, p + 0xc)[0]
+        if G2:
+            self.count = struct.unpack_from('<I', b, p + 0x10)[0]
+            self.size = struct.unpack_from('<h', b, p + 0x1a)[0]
+            self.flags = struct.unpack_from('<H', b, p + 0x20)[0]
+        else:
+            self.count = struct.unpack_from('<I', b, p)[0]
+            self.size = struct.unpack_from('<h', b, p + 6)[0]
+            self.flags = struct.unpack_from('<H', b, p + 0xc)[0]
         return p + 0x24
 
     def body(self, b, p):
@@ -99,11 +108,12 @@ class Font:
         w.pad()
 
 
-class Static:  # rótulo estático: transformação (0x14) + tamanho dos comandos em +0x14 ... 0x24
+class Static:  # rótulo estático: transformação + tamanho dos comandos (GoW1: +0x14 de 0x24; GoW2: +0x18 de 0x1c)
     def head(self, b, p):
-        self.h = bytearray(b[p:p + 0x24])
-        self.n = struct.unpack_from('<I', b, p + 0x14)[0]
-        return p + 0x24
+        size, lo = (0x1c, 0x18) if G2 else (0x24, 0x14)
+        self.h = bytearray(b[p:p + size])
+        self.n = struct.unpack_from('<I', b, p + lo)[0]
+        return p + size
 
     def body(self, b, p):
         self.cmds = parse_label(b[p:p + self.n])
@@ -111,7 +121,7 @@ class Static:  # rótulo estático: transformação (0x14) + tamanho dos comando
 
     def w_head(self, w):
         self.data = write_label(self.cmds)
-        struct.pack_into('<I', self.h, 0x14, len(self.data))
+        struct.pack_into('<I', self.h, 0x18 if G2 else 0x14, len(self.data))
         w.raw(self.h)
 
     def w_body(self, w):
@@ -175,8 +185,9 @@ def write_label(cmds):
 class Clip:  # Data6Subtype1 (0x18): quadros, animações de elementos, rótulos de quadro com scripts
     def head(self, b, p):
         self.h = bytearray(b[p:p + 0x18])
-        self.frames = struct.unpack_from('<H', b, p)[0]
-        self.nanim, self.nlab = struct.unpack_from('<HH', b, p + 2)
+        o = 8 if G2 else 0
+        self.frames = struct.unpack_from('<H', b, p + o)[0]
+        self.nanim, self.nlab = struct.unpack_from('<HH', b, p + o + 2)
         return p + 0x18
 
     def body(self, b, p):
@@ -187,7 +198,7 @@ class Clip:  # Data6Subtype1 (0x18): quadros, animações de elementos, rótulos
             p += 8
         for a in self.anims:
             p = pad4(p)
-            nk = struct.unpack_from('<H', a[0], 2)[0]
+            nk = struct.unpack_from('<H', a[0], 6 if G2 else 2)[0]
             a[1] = [bytearray(b[p + 10 * k:p + 10 * k + 10]) for k in range(nk)]
             p += 10 * nk
         p = pad4(p)
@@ -197,26 +208,26 @@ class Clip:  # Data6Subtype1 (0x18): quadros, animações de elementos, rótulos
             p += 0xc
         for lab in self.labels:
             p = pad4(p)
-            ns = struct.unpack_from('<H', lab[0], 2)[0]
+            ns = struct.unpack_from('<H', lab[0], 6 if G2 else 2)[0]
             heads = []
             for _ in range(ns):
                 heads.append(bytearray(b[p:p + 8]))
                 p += 8
             for h in heads:
                 p = pad4(p)
-                n = struct.unpack_from('<I', h, 0)[0]
+                n = struct.unpack_from('<I', h, 4 if G2 else 0)[0]
                 lab[1].append([h, bytes(b[p:p + n])])
                 p += n
         return p
 
     def w_head(self, w):
-        struct.pack_into('<HH', self.h, 2, len(self.anims), len(self.labels))
+        struct.pack_into('<HH', self.h, (8 if G2 else 0) + 2, len(self.anims), len(self.labels))
         w.raw(self.h)
 
     def w_body(self, w):
         w.pad()
         for h, keys in self.anims:
-            struct.pack_into('<H', h, 2, len(keys))
+            struct.pack_into('<H', h, 6 if G2 else 2, len(keys))
             w.raw(h)
         for h, keys in self.anims:
             w.pad()
@@ -224,12 +235,12 @@ class Clip:  # Data6Subtype1 (0x18): quadros, animações de elementos, rótulos
                 w.raw(k)
         w.pad()
         for h, subs in self.labels:
-            struct.pack_into('<H', h, 2, len(subs))
+            struct.pack_into('<H', h, 6 if G2 else 2, len(subs))
             w.raw(h)
         for h, subs in self.labels:
             w.pad()
             for sh, code in subs:
-                struct.pack_into('<I', sh, 0, len(code))  # tamanho antes de gravar o cabeçalho
+                struct.pack_into('<I', sh, 4 if G2 else 0, len(code))  # tamanho antes de gravar o cabeçalho
                 w.raw(sh)
             for sh, code in subs:
                 w.pad()
@@ -254,7 +265,7 @@ class Clip6:  # Data6: cabeçalho de 0xc (eventos em +8) + Clip + eventos de bot
         self.events = []
         for h in heads:
             p = pad4(p)
-            n = struct.unpack_from('<I', h, 0)[0]
+            n = struct.unpack_from('<I', h, 4 if G2 else 0)[0]
             self.events.append([h, bytes(b[p:p + n])])
             p += n
         return p
@@ -268,7 +279,7 @@ class Clip6:  # Data6: cabeçalho de 0xc (eventos em +8) + Clip + eventos de bot
         self.clip.w_head(w)
         self.clip.w_body(w)
         for h, code in self.events:
-            struct.pack_into('<I', h, 0, len(code))
+            struct.pack_into('<I', h, 4 if G2 else 0, len(code))
             w.raw(h)
         for h, code in self.events:
             w.pad()
@@ -277,12 +288,16 @@ class Clip6:  # Data6: cabeçalho de 0xc (eventos em +8) + Clip + eventos de bot
 
 class FLP:
     def __init__(self, b):
-        self.hdr = bytearray(b[:0x60])
+        global G2
+        self.g2 = G2 = struct.unpack_from('<I', b, 0)[0] == 0x1b
+        hs = 0x5c if G2 else 0x60
+        self.hdr = bytearray(b[:hs])
         r = R(b)
         cnt = lambda o: r.u32(o)
-        nh, nm, nf, ns, nd, n6, n7 = (cnt(o) for o in (0xc, 0x14, 0x1c, 0x24, 0x2c, 0x34, 0x3c))
-        nt, nc = r.u16(0x48), r.u16(0x50)
-        p = 0x60
+        offs = (0x38, 0x3c, 0x40, 0x44, 0x48, 0x4c, 0x50) if G2 else (0xc, 0x14, 0x1c, 0x24, 0x2c, 0x34, 0x3c)
+        nh, nm, nf, ns, nd, n6, n7 = (cnt(o) for o in offs)
+        nt, nc = (r.u16(0x54), r.u16(0x56)) if G2 else (r.u16(0x48), r.u16(0x50))
+        p = hs
         self.handlers = [struct.unpack_from('<HH', b, p + 4 * i) for i in range(nh)]
         p += 4 * nh
         self.meshes = [Mesh() for _ in range(nm)]
@@ -348,14 +363,18 @@ class FLP:
         return off
 
     def write(self):
+        global G2
+        G2 = self.g2
         w = W()
         h = self.hdr
-        for o, v in ((0xc, len(self.handlers)), (0x14, len(self.meshes)), (0x1c, len(self.fonts)),
-                     (0x24, len(self.statics)), (0x2c, len(self.dyns)), (0x34, len(self.c6)), (0x3c, len(self.c7))):
+        offs = (0x38, 0x3c, 0x40, 0x44, 0x48, 0x4c, 0x50) if G2 else (0xc, 0x14, 0x1c, 0x24, 0x2c, 0x34, 0x3c)
+        for o, v in zip(offs, (len(self.handlers), len(self.meshes), len(self.fonts), len(self.statics), len(self.dyns),
+                               len(self.c6), len(self.c7))):
             struct.pack_into('<I', h, o, v)
-        struct.pack_into('<H', h, 0x48, len(self.xforms))
-        struct.pack_into('<H', h, 0x50, len(self.colors))
-        struct.pack_into('<H', h, 0x58, len(self.strings) & 0xffff)
+        struct.pack_into('<H', h, 0x54 if G2 else 0x48, len(self.xforms))
+        struct.pack_into('<H', h, 0x56 if G2 else 0x50, len(self.colors))
+        if not G2:
+            struct.pack_into('<H', h, 0x58, len(self.strings) & 0xffff)
         w.raw(h)
         for a, b_ in self.handlers:
             w.raw(struct.pack('<HH', a, b_))

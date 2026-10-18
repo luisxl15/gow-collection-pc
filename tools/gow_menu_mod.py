@@ -1,6 +1,10 @@
-"""Opções do PC no menu de pausa do God of War 1 (Vita): Options ganha HD Textures, PS2 Audio e Resolution.
+"""Opções do PC no menu de pausa do God of War 1 e 2 (Vita): a página Options ganha as linhas do vitart.
 
-    python tools/gow_menu_mod.py <gow1_psp2_SCEA.psarc> <saída .vtpatch> [--dump <pasta>]
+    python tools/gow_menu_mod.py <gow1_psp2_SCEA.psarc | gow2_psp2_SCEA.psarc> <saída .vtpatch> [--dump <pasta>]
+
+GoW1: HD Textures, PS2 Audio, Resolution, Frame Rate, VSync, FPS Counter, Display Mode (estados 5..11, FLP_HUD,
+tag 30, canal PS2_Cheat). GoW2: Resolution, Frame Rate, VSync, FPS Counter, Display Mode (estados 7..11; o
+FLP_HUDA, tag 1, é a versão 0x1b do formato; rótulos das linhas são textos dinâmicos; canal PS2_OverUnder).
 
 Edita o FLP_HUD de wad/r_perma.wad_psp2 e wad/_VitaTV/r_perma.wad_psp2 (o menu de pausa, em inglês como o
 resto do jogo) e grava um patch do psarc que o vitart aplica na leitura (runtime/vitart/hle_io.cpp). O
@@ -26,28 +30,60 @@ import psarc_gxp as P  # noqa: E402
 # Estado de todas as opções num número só, na variável PS2_Cheat (campo +0x2bc do objeto de opções,
 # sem tratador no jogo): 0x10000 | textura | áudio << 2 | resolução << 4 | fps << 7 | vsync << 9 | contador << 12 | modo << 14.
 # Ver runtime/vitart/game_options.cpp.
-STATE = 'PS2_Cheat'
 FIELDS = [('_level0/:VtDsp', 16384, 3), ('_level0/:VtCnt', 4096, 3), ('_level0/:VtVsync', 512, 3), ('_level0/:VtFps', 128, 3), ('_level0/:VtRes', 16, 7),
           ('_level0/:VtAud', 4, 3), ('_level0/:VtTex', 1, 3)]
-ROWS = [  # (estado da página, nome do clipe, rótulo, variável decodificada, peso, variável do texto)
-    (5, 'VtTextures', 'HD Textures', '_level0/:VtTex', 1, '_level0/:VtTexText'),
-    (6, 'VtAudio', 'PS2 Audio', '_level0/:VtAud', 4, '_level0/:VtAudText'),
-    (7, 'VtResolution', 'Resolution', '_level0/:VtRes', 16, '_level0/:VtResText'),
-    (8, 'VtFrameRate', 'Frame Rate', '_level0/:VtFps', 128, '_level0/:VtFpsText'),
-    (9, 'VtFpsCounter', 'FPS Counter', '_level0/:VtCnt', 4096, '_level0/:VtCntText'),
-    (10, 'VtDisplayMode', 'Display Mode', '_level0/:VtDsp', 16384, '_level0/:VtDspText'),
-    (11, 'VtVsync', 'VSync', '_level0/:VtVsync', 512, '_level0/:VtVsyncText'),
-]
 RES_TEXT = {1: '1x  (960x544)', 2: '2x  (1920x1088)', 3: '3x  (2880x1632)', 4: '4x  (3840x2176)'}
-FPS_TEXT = {1: '30 FPS', 2: '60 FPS', 3: 'Max FPS'}  # Max: taxa do monitor; VSync Off: sem limite (patch_gow1_dt.py)
-# estado -> (caminho do clipe da linha, grupo: A = ajustável com esquerda/direita, B = seleciona com X)
-PATH = {1: ('PauseMenu/MusicVolume', 'A'), 2: ('PauseMenu/SFXVolume', 'A'), 5: ('PauseMenu/VtTextures', 'A'),
-        6: ('PauseMenu/VtAudio', 'A'), 7: ('PauseMenu/VtResolution', 'A'), 8: ('PauseMenu/VtFrameRate', 'A'),
-        9: ('PauseMenu/VtFpsCounter', 'A'), 10: ('PauseMenu/VtDisplayMode', 'A'), 11: ('PauseMenu/VtVsync', 'A'),
-        3: ('PauseMenu/Controller', 'B'), 4: ('PauseMenu/Return', 'B')}
-ORDER = [1, 2, 5, 6, 7, 8, 11, 9, 10, 3, 4]
-Y = {s: -175.0 + 350.0 / (len(ORDER) - 1) * i for i, s in enumerate(ORDER)}
-FIRST_NEW, LAST_NEW = 5, 11
+FPS_TEXT = {1: '30 FPS', 2: '60 FPS', 3: 'Max FPS'}  # Max: taxa do monitor; VSync Off: sem limite (patch_gow*_dt.py)
+# linha: (chave do fscommand, nome do clipe, rótulo, variável decodificada, variável do texto, tipo, textos)
+LINES = {
+    'tex': ('VtTextures', 'HD Textures', '_level0/:VtTex', '_level0/:VtTexText', 'avail', None),
+    'aud': ('VtAudio', 'PS2 Audio', '_level0/:VtAud', '_level0/:VtAudText', 'avail', None),
+    'res': ('VtResolution', 'Resolution', '_level0/:VtRes', '_level0/:VtResText', 'list', RES_TEXT),
+    'fps': ('VtFrameRate', 'Frame Rate', '_level0/:VtFps', '_level0/:VtFpsText', 'list', FPS_TEXT),
+    'vsync': ('VtVsync', 'VSync', '_level0/:VtVsync', '_level0/:VtVsyncText', 'toggle', {1: 'Off', 2: 'On'}),
+    'cnt': ('VtFpsCounter', 'FPS Counter', '_level0/:VtCnt', '_level0/:VtCntText', 'toggle', {1: 'Off', 2: 'On'}),
+    'dsp': ('VtDisplayMode', 'Display Mode', '_level0/:VtDsp', '_level0/:VtDspText', 'toggle', {1: 'Windowed', 2: 'Borderless'}),
+}
+GAMES = {
+    'gow1': dict(
+        state='PS2_Cheat', wad=(30, b'FLP_HUD'), nobody=(24,),
+        new=[(5, 'tex'), (6, 'aud'), (7, 'res'), (8, 'fps'), (11, 'vsync'), (9, 'cnt'), (10, 'dsp')],
+        old={1: ('MusicVolume', 'A'), 2: ('SFXVolume', 'A'), 3: ('Controller', 'B'), 4: ('Return', 'B')},
+        order=[1, 2, 5, 6, 7, 8, 11, 9, 10, 3, 4], y=(-175.0, 175.0), frames=(7, 8, 9), kx=22, x_state='3',
+        dyn_label=False),
+    'gow2': dict(
+        state='PS2_OverUnder', wad=(1, b'FLP_HUDA'), nobody=(0, 24),  # tag 0: parâmetro (o tamanho é o valor)
+        new=[(7, 'res'), (8, 'fps'), (9, 'vsync'), (10, 'cnt'), (11, 'dsp')],
+        old={1: ('MessageTips', 'A'), 2: ('MusicVolume', 'A'), 3: ('SFXVolume', 'A'), 4: ('Controller', 'B'),
+             5: ('FlightControls', 'A'), 6: ('Return', 'B')},
+        order=[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 6], y=(-165.0, 207.5), frames=(9, 10, 11), kx=19, x_state='4',
+        dyn_label=True),
+}
+
+
+def configure(game):
+    """Põe nas variáveis do módulo a configuração do jogo (as funções abaixo as usam)."""
+    global GAME, CFG, STATE, ROWS, PATH, ORDER, Y, FIRST_NEW, LAST_NEW, KEY, LO
+    GAME, CFG = game, GAMES[game]
+    STATE = CFG['state']
+    # ROWS: (estado, nome do clipe, rótulo, variável decodificada, peso, variável do texto) nas linhas novas
+    weights = {name: w for name, w, _ in FIELDS}
+    ROWS = []
+    for st, key in sorted(CFG['new']):
+        clip, text, var, txt, _, _ = LINES[key]
+        ROWS.append((st, clip, text, var, weights[var], txt))
+    KEY = {st: key for st, key in CFG['new']}
+    PATH = {st: ('PauseMenu/' + name, grp) for st, (name, grp) in CFG['old'].items()}
+    for st, key in CFG['new']:
+        PATH[st] = ('PauseMenu/' + LINES[key][0], 'A')
+    ORDER = CFG['order']
+    y0, y1 = CFG['y']
+    Y = {st: y0 + (y1 - y0) / (len(ORDER) - 1) * i for i, st in enumerate(ORDER)}
+    FIRST_NEW, LAST_NEW = min(KEY), max(KEY)
+    LO = 4 if game == 'gow2' else 0  # quadro dos rótulos e profundidade das animações (versão 0x1b do FLP)
+
+
+configure('gow1')
 VALUE_RISE = 25.0  # unidades da linha
 ST = 'PauseOptions_State'
 
@@ -161,28 +197,32 @@ def show_script(f):
 
 
 def texts_script(f):
-    """Textos dos valores a partir das variáveis _level0/:Vt*."""
+    """Textos dos valores a partir das variáveis _level0/:Vt* (e, no GoW2, os rótulos das linhas)."""
     a = flp.Asm()
-    for _, _, _, var, _, txt in ROWS[:2]:
-        a.getv(var).push(2).eq().not_().jumpif('x' + txt)
-        a.setv(txt, 'On').jump('y' + txt)
-        a.label('x' + txt)
-        a.getv(var).push(3).eq().not_().jumpif('z' + txt)
-        a.setv(txt, 'Unavailable').jump('y' + txt)
-        a.label('z' + txt)
-        a.setv(txt, 'Off')
-        a.label('y' + txt)
-    for (_, _, _, var, _, txt), table in ((ROWS[2], RES_TEXT), (ROWS[3], FPS_TEXT), (ROWS[4], {1: 'Off', 2: 'On'}),
-                                     (ROWS[5], {1: 'Windowed', 2: 'Borderless'}), (ROWS[6], {1: 'Off', 2: 'On'})):
-        for v, t in table.items():
-            a.getv(var).push(v).eq().not_().jumpif('t%s%d' % (txt, v))
-            a.setv(txt, t)
-            a.label('t%s%d' % (txt, v))
+    for st, key in CFG['new']:
+        clip, text, var, txt, kind, table = LINES[key]
+        if CFG['dyn_label']:
+            a.setv(label_var(key), text)
+        if kind == 'avail':
+            a.getv(var).push(2).eq().not_().jumpif('x' + txt)
+            a.setv(txt, 'On').jump('y' + txt)
+            a.label('x' + txt)
+            a.getv(var).push(3).eq().not_().jumpif('z' + txt)
+            a.setv(txt, 'Unavailable').jump('y' + txt)
+            a.label('z' + txt)
+            a.setv(txt, 'Off')
+            a.label('y' + txt)
+        else:
+            for v, t in table.items():
+                a.getv(var).push(v).eq().not_().jumpif('t%s%d' % (txt, v))
+                a.setv(txt, t)
+                a.label('t%s%d' % (txt, v))
     a.end()
     return flp.encode(f, a.build())
 
 
-KEY = {5: 'tex', 6: 'aud', 7: 'res', 8: 'fps', 9: 'cnt', 10: 'dsp', 11: 'vsync'}
+def label_var(key):
+    return '_level0/:Vt%sLabel' % key.capitalize()
 
 
 def change_script(f, step):
@@ -194,15 +234,16 @@ def change_script(f, step):
         a.setv(var, v).fscommand('FSCommand:VT_%s_%d' % (KEY[s], v)).jump('mostra')
 
     for s, _, _, var, w, _ in ROWS:
+        kind, table = LINES[KEY[s]][4], LINES[KEY[s]][5]
         a.getv(ST).push(s).eq().not_().jumpif('n%d' % s)
-        if s in (5, 6):  # liga/desliga
+        if kind == 'avail':  # liga/desliga, travado se indisponível
             a.getv(var).push(3).eq().jumpif('trava')
             a.getv(var).push(2).eq().not_().jumpif('on%d' % s)
             choose(s, var, 1)
             a.label('on%d' % s)
             choose(s, var, 2)
-        elif s in (7, 8):  # resolução 1..4, FPS 1..3 (30, 60, máximo)
-            top = 4 if s == 7 else 3
+        elif kind == 'list':  # resolução 1..4, FPS 1..3 (30, 60, máximo)
+            top = len(table)
             for v in range(1, top + 1):
                 nv = v + step
                 a.getv(var).push(v).eq().not_().jumpif('r%d_%d' % (s, v))
@@ -212,7 +253,7 @@ def change_script(f, step):
                     a.jump('trava')
                 a.label('r%d_%d' % (s, v))
             a.jump('trava')
-        else:  # contador Off / On, modo de exibição
+        else:  # VSync, contador, modo de exibição: alterna
             a.getv(var).push(2).eq().not_().jumpif('dois%d' % s)
             choose(s, var, 1)
             a.label('dois%d' % s)
@@ -263,9 +304,11 @@ def make_label(f, ref, text):
     return st
 
 
-def make_dyn(f, var):
-    tpl = next(d for d in f.dyns if f.s(struct.unpack_from('<H', d, 0)[0]) == 'PS2_MoveName1')
-    d = bytearray(tpl)  # PS2_MoveName1: texto alinhado à esquerda
+def make_dyn(f, var, tpl=None):
+    if tpl is None:
+        tpl = next(d for d in f.dyns if f.s(struct.unpack_from('<H', d, 0)[0]) == 'PS2_MoveName1')
+    d = bytearray(tpl)  # PS2_MoveName1 (GoW1): texto alinhado à esquerda
+    d[0x1e] = 0         # alinhamento à esquerda (no GoW2 o molde é o rótulo da linha, alinhado à direita)
     struct.pack_into('<H', d, 0, f.add_string(var))
     struct.pack_into('<H', d, 2, 0xffff)
     struct.pack_into('<H', d, 6, 760)                # altura da fonte: a das maiúsculas dos rótulos (medido)
@@ -295,15 +338,26 @@ def mod_flp(b):
     f = flp.FLP(b)
     pm = f.c7[obj(f, named(f.root, f, 'PauseMenu'), 7)]
     sfx = f.c7[obj(f, named(pm, f, 'SFXVolume'), 7)]  # linha SFX Volume
-    sfx_label = f.statics[obj(f, struct.unpack_from('<H', sfx.anims[0][1][0], 2)[0], 4)]
+    if CFG['dyn_label']:  # GoW2: o rótulo da linha é um texto dinâmico (variável de texto traduzido)
+        sfx_label_dyn = f.dyns[obj(f, struct.unpack_from('<H', sfx.anims[0][1][0], 2)[0], 5)]
+    else:
+        sfx_label = f.statics[obj(f, struct.unpack_from('<H', sfx.anims[0][1][0], 2)[0], 4)]
+    F0, F1, F2 = CFG['frames']
 
     # ---- linhas novas
     rows = {}
     for s, clip_name, text, _, _, txt_var in ROWS:
-        st = make_label(f, sfx_label, text)
-        f.statics.append(st)
-        h_lab = handler(f, 4, len(f.statics) - 1)
-        f.dyns.append(make_dyn(f, txt_var))
+        if CFG['dyn_label']:
+            d = bytearray(sfx_label_dyn)
+            struct.pack_into('<H', d, 0, f.add_string(label_var(KEY[s])))
+            f.dyns.append(d)
+            h_lab = handler(f, 5, len(f.dyns) - 1)
+            f.dyns.append(make_dyn(f, txt_var, sfx_label_dyn))
+        else:
+            st = make_label(f, sfx_label, text)
+            f.statics.append(st)
+            h_lab = handler(f, 4, len(f.statics) - 1)
+            f.dyns.append(make_dyn(f, txt_var))
         h_dyn = handler(f, 5, len(f.dyns) - 1)
         c = flp.Clip()
         c.h = bytearray(sfx.h)
@@ -324,32 +378,32 @@ def mod_flp(b):
         f.c7.append(c)
         rows[s] = (handler(f, 7, len(f.c7) - 1), clip_name)
 
-    # ---- posições: SFX e Controller descem/sobem para abrir espaço; as novas entre eles
+    # ---- posições: as linhas originais redistribuídas pela ordem nova (as das pontas ficam onde estão)
     def move(elem_name, y):
         for h, keys in pm.anims:
             for k in keys:
-                if f.s(struct.unpack_from('<H', k, 8)[0]) == elem_name and struct.unpack_from('<H', k, 0)[0] in (7, 8):
+                if f.s(struct.unpack_from('<H', k, 8)[0]) == elem_name and struct.unpack_from('<H', k, 0)[0] in (F0, F1):
                     struct.pack_into('<H', k, 4, xform(f, struct.unpack_from('<H', k, 4)[0], y=y))
-    move('SFXVolume', Y[2])
-    move('Controller', Y[3])
+    for st, (name, _) in CFG['old'].items():
+        move(name, Y[st])
     sfx_key = next(k for h, keys in pm.anims for k in keys
-                   if f.s(struct.unpack_from('<H', k, 8)[0]) == 'SFXVolume' and struct.unpack_from('<H', k, 0)[0] == 7)
+                   if f.s(struct.unpack_from('<H', k, 8)[0]) == 'SFXVolume' and struct.unpack_from('<H', k, 0)[0] == F0)
     t_sfx = struct.unpack_from('<H', sfx_key, 4)[0]
-    depth = max(struct.unpack_from('<H', h, 0)[0] for h, _ in pm.anims)
+    depth = max(struct.unpack_from('<H', h, LO)[0] for h, _ in pm.anims)
     for s, (h_row, name) in rows.items():
         depth += 1
         t = xform(f, t_sfx, y=Y[s])
         nm = f.add_string(name)
-        keys = [bytearray(struct.pack('<HHHHH', 7, h_row, t, 22, nm)),
-                bytearray(struct.pack('<HHHHH', 8, h_row, t, 0, nm)),
-                bytearray(struct.pack('<HHHHH', 9, 0, 0, 0, 0xffff))]
+        keys = [bytearray(struct.pack('<HHHHH', F0, h_row, t, CFG['kx'], nm)),
+                bytearray(struct.pack('<HHHHH', F1, h_row, t, 0, nm)),
+                bytearray(struct.pack('<HHHHH', F2, 0, 0, 0, 0xffff))]
         head = bytearray(pm.anims[0][0])
-        struct.pack_into('<H', head, 0, depth)
+        struct.pack_into('<H', head, LO, depth)
         pm.anims.append([head, keys])
 
     # ---- contador de FPS no estilo do contador de HITS: número grande (o rótulo dinâmico do HITS) com
     # "FPS" menor embaixo, num clipe de 2 quadros em laço no canto superior direito do HUD (800x600)
-    hit = next(d for d in f.dyns if f.s(struct.unpack_from('<H', d, 0)[0]) == '_level0/:HitCounter')
+    hit = next(d for d in f.dyns if f.s(struct.unpack_from('<H', d, 0)[0]) in ('_level0/:HitCounter', '/:HitCounter'))
     d_num = bytearray(hit)
     struct.pack_into('<H', d_num, 0, f.add_string('_level0/:VtFpsNum'))
     f.dyns.append(d_num)
@@ -360,14 +414,27 @@ def mod_flp(b):
     f.dyns.append(d_unit)
     h_unit = handler(f, 5, len(f.dyns) - 1)
     hit_clip = f.c7[obj(f, named(f.root, f, 'HitCounter'), 7)]
-    shake = f.c7[obj(f, struct.unpack_from('<H', hit_clip.anims[0][1][0], 2)[0], 7)]
-    t_num = struct.unpack_from('<H', shake.anims[0][1][0], 4)[0]
-    t_unit = struct.unpack_from('<H', shake.anims[1][1][0], 4)[0]
     c = flp.Clip()
-    c.h = bytearray(shake.h)
     c.frames = 2
-    a0 = [bytearray(shake.anims[0][0]), [bytearray(struct.pack('<HHHHH', 0, h_num, t_num, 0, 0xffff))]]
-    a1 = [bytearray(shake.anims[1][0]), [bytearray(struct.pack('<HHHHH', 0, h_unit, t_unit, 0, 0xffff))]]
+    if GAME == 'gow1':  # o clipe que treme do contador de HITS: número e "Hits" nas posições dele
+        shake = f.c7[obj(f, struct.unpack_from('<H', hit_clip.anims[0][1][0], 2)[0], 7)]
+        t_num = struct.unpack_from('<H', shake.anims[0][1][0], 4)[0]
+        t_unit = struct.unpack_from('<H', shake.anims[1][1][0], 4)[0]
+        c.h = bytearray(shake.h)
+        a0 = [bytearray(shake.anims[0][0]), [bytearray(struct.pack('<HHHHH', 0, h_num, t_num, 0, 0xffff))]]
+        a1 = [bytearray(shake.anims[1][0]), [bytearray(struct.pack('<HHHHH', 0, h_unit, t_unit, 0, 0xffff))]]
+    else:  # GoW2: clipes aninhados de outro jeito; as mesmas posições do GoW1, (74, -493) e (7, 113) em 1/16
+        t_num, t_unit = len(f.xforms), len(f.xforms) + 1
+        for x, y in ((74, -493), (7, 113)):
+            t = bytearray(f.xforms[0])
+            struct.pack_into('<4ihh', t, 0, 65536, 0, 0, 65536, x, y)
+            f.xforms.append(t)
+        c.h = bytearray(hit_clip.h)
+        anim_h = bytearray(hit_clip.anims[0][0])
+        a0 = [bytearray(anim_h), [bytearray(struct.pack('<HHHHH', 0, h_num, t_num, 0, 0xffff))]]
+        a1 = [bytearray(anim_h), [bytearray(struct.pack('<HHHHH', 0, h_unit, t_unit, 0, 0xffff))]]
+        struct.pack_into('<H', a0[0], LO, 1)
+        struct.pack_into('<H', a1[0], LO, 2)
     c.anims = [a0, a1]
     lab_h = bytearray(hit_clip.labels[0][0])  # cabeçalho de rótulo de quadro
     sub_h = bytearray(hit_clip.labels[0][1][0][0])
@@ -377,7 +444,7 @@ def mod_flp(b):
     labs = []
     for frame, code in ((0, flp.encode(f, fps_counter_script().end().build())), (1, code1)):
         h = bytearray(lab_h)
-        struct.pack_into('<H', h, 0, frame)
+        struct.pack_into('<H', h, LO, frame)
         struct.pack_into('<H', h, 8, 0xffff)
         labs.append([h, [[bytearray(sub_h), code]]])
     c.labels = labs
@@ -387,9 +454,9 @@ def mod_flp(b):
     struct.pack_into('<4i', t, 0, 49152, 0, 0, 49152)  # escala 0,75
     struct.pack_into('<hh', t, 0x10, round(730 * 16), round(52 * 16))
     f.xforms.append(t)
-    depth = max(struct.unpack_from('<H', h, 0)[0] for h, _ in f.root.anims) + 2
+    depth = max(struct.unpack_from('<H', h, LO)[0] for h, _ in f.root.anims) + 2
     head = bytearray(f.root.anims[0][0])
-    struct.pack_into('<H', head, 0, depth)
+    struct.pack_into('<H', head, LO, depth)
     f.root.anims.append([head, [bytearray(struct.pack('<HHHHH', 0, h_clip, len(f.xforms) - 1, 0,
                                                        f.add_string('VtFpsCounter')))]])
 
@@ -401,10 +468,10 @@ def mod_flp(b):
            (53, 'VtOptShow', show_script(f)), (54, 'VtOptTexts', texts_script(f))]
     for frame, name, code in new:
         h = bytearray(proto_h)
-        struct.pack_into('<H', h, 0, frame)
+        struct.pack_into('<H', h, LO, frame)
         struct.pack_into('<H', h, 8, f.add_string(name))
         sh = bytearray(proto_subs[0][0])
-        k = next(i for i, (hh, _) in enumerate(root.labels) if struct.unpack_from('<H', hh, 0)[0] > frame)
+        k = next(i for i, (hh, _) in enumerate(root.labels) if struct.unpack_from('<H', hh, LO)[0] > frame)
         root.labels.insert(k, [h, [[sh, code]]])
 
     # ---- ganchos nos scripts do jogo
@@ -435,12 +502,12 @@ def mod_flp(b):
         for ev in c.events:
             if struct.unpack_from('<I', ev[0], 8)[0] == 0x40:
                 try:
-                    find_check(flp.decode(f, ev[1])[0], '3')
+                    find_check(flp.decode(f, ev[1])[0], CFG['x_state'])
                     x_ev.append(ev)
                 except KeyError:
                     pass
     assert len(x_ev) == 1, len(x_ev)
-    patch_script(f, x_ev[0], '3', guarded('/:VtRight'))
+    patch_script(f, x_ev[0], CFG['x_state'], guarded('/:VtRight'))
     # abrir a página Options: textos dos valores atualizados
     opt = script_of(pm, f, 'Options')
     ins, _ = flp.decode(f, opt[1])
@@ -449,14 +516,14 @@ def mod_flp(b):
 
 
 # ---------------------------------------------------------------- WAD e psarc
-def wad_replace(w, name, body):
+def wad_replace(w, name, body, rtag=30):
     out, o = bytearray(), 0
     hit = 0
     while o + 32 <= len(w):
         tag, flags, size = struct.unpack_from('<HHI', w, o)
         nm = w[o + 8:o + 32].split(b'\0')[0]
-        full = 32 + (((size + 15) & ~15) if tag != 24 else 0)
-        if tag == 30 and nm == name:
+        full = 32 + (((size + 15) & ~15) if tag not in CFG['nobody'] else 0)
+        if tag == rtag and nm == name:
             hd = bytearray(w[o:o + 32])
             struct.pack_into('<I', hd, 4, len(body))
             out += hd + body + bytes(((len(body) + 15) & ~15) - len(body))
@@ -469,13 +536,13 @@ def wad_replace(w, name, body):
     return bytes(out)
 
 
-def wad_get(w, name):
+def wad_get(w, name, rtag=30):
     o = 0
     while o + 32 <= len(w):
         tag, flags, size = struct.unpack_from('<HHI', w, o)
-        if tag == 30 and w[o + 8:o + 32].split(b'\0')[0] == name:
+        if tag == rtag and w[o + 8:o + 32].split(b'\0')[0] == name:
             return w[o + 32:o + 32 + size]
-        o += 32 + (((size + 15) & ~15) if tag != 24 else 0)
+        o += 32 + (((size + 15) & ~15) if tag not in CFG['nobody'] else 0)
     raise KeyError(name)
 
 
@@ -527,14 +594,16 @@ def build_patch(psarc, files, out):
 def main():
     psarc, out = sys.argv[1], sys.argv[2]
     dump = sys.argv[sys.argv.index('--dump') + 1] if '--dump' in sys.argv else None
+    configure('gow2' if 'gow2' in os.path.basename(psarc).lower() else 'gow1')
+    rtag, rname = CFG['wad']
     files = {}
     with open(psarc, 'rb') as fh:
         ents, zs, block = P.entries(fh)
         names = P.read_file(fh, ents[0], zs, block).decode('latin1').split('\n')
         for name in ('wad/r_perma.wad_psp2', 'wad/_VitaTV/r_perma.wad_psp2'):
             w = P.read_file(fh, ents[names.index(name) + 1], zs, block)
-            new_flp = mod_flp(wad_get(w, b'FLP_HUD'))
-            files[name] = wad_replace(w, b'FLP_HUD', new_flp)
+            new_flp = mod_flp(wad_get(w, rname, rtag))
+            files[name] = wad_replace(w, rname, new_flp, rtag)
             if dump:
                 os.makedirs(dump, exist_ok=True)
                 open(os.path.join(dump, name.replace('/', '_') + '.flp'), 'wb').write(new_flp)
