@@ -103,6 +103,8 @@ bool window_closed();
 bool window_rect(int &x, int &y, int &w, int &h);
 // Mouse sobre a janela como toque: posição normalizada (0..1) na área cliente e botão esquerdo apertado.
 bool pointer(float &nx, float &ny);
+// A janela do jogo está em primeiro plano (teclado e mouse só valem com ela em foco).
+bool has_focus();
 // Aviso curto no título da janela (UTF-8), por alguns segundos, com o som de notificação do Windows.
 void notify(const std::string &text);
 bool is_target(uint32_t addr);

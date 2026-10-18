@@ -150,30 +150,58 @@ VT_HLE(sceAudioOutOutput) {
 }
 
 // =================================================================== entrada
-// Controle pelo teclado do host: setas = direcional, Z/X/A/S = cruz/círculo/quadrado/triângulo,
-// Q/W = L/R, Enter = start, Backspace = select. Controles (XInput, DualShock 4, DualSense) em
-// host_input.cpp: botões somados ao teclado, analógicos do controle.
+// Teclado e mouse no esquema do God of War (2018) para PC (padrões do jogo: Shacknews e Magic Game World),
+// com a ação de cada tecla levada ao botão que faz o mesmo nos GoW do Vita:
+//   WASD = analógico esquerdo (andar)          Shift + WASD = analógico direito (esquiva/rolamento)
+//   botão esquerdo = quadrado (ataque leve)    botão direito = triângulo (ataque pesado)
+//   botão do meio / F = círculo (agarrar)      Shift + botão do meio / V = L3+R3 (fúria: Rage of the Gods)
+//   Espaço = X (pular; esquiva no GoW 2018)    Q = L1 (defender/aparar)
+//   Ctrl esquerdo = L2 (mirar no 2018)         E = interagir (R2 no GoW1: baús, portas; R1 no GoW2)
+//   R = o outro R (R1 no GoW1, R2 no GoW2)     1 2 3 4 / setas = direcional (magias)
+//   Esc / Backspace = SELECT (pausa nos dois)  I / K / Tab / Enter = START (Power Up)
+// Só com a janela do jogo em foco (o teclado é global no Windows). Controles (XInput, DualShock 4,
+// DualSense) em host_input.cpp, somados. O último usado decide os ícones dos botões (input_kbm_active).
 // Modo PS TV por padrão (o jogo tem caminho próprio, wad/_VitaTV, com L2/R2/L3/R3 no controle);
 // VITART_HANDHELD=1 volta ao portátil, em que L2/R2 eram gestos no painel traseiro.
 void video_skip_request(); // hle_io.cpp
 void video_skip_tick();
+int game_id();             // game_options.cpp
+bool game_in_gameplay();
+uint32_t game_qte_auto(uint8_t &lx, uint8_t &ly);
 bool handheld_mode() {
     static const bool h = getenv("VITART_HANDHELD") && *getenv("VITART_HANDHELD") == '1';
     return h;
 }
-static uint32_t keyboard_buttons() {
-    uint32_t b = 0;
+struct KbmInput {
+    uint32_t buttons = 0;
+    int mx = 0, my = 0;  // direção das teclas WASD (-1, 0, 1)
+    bool roll = false;   // Shift: a direção vai para o analógico direito
+};
+static KbmInput keyboard_mouse() {
+    KbmInput k;
 #ifdef _WIN32
+    if (!gvk::has_focus()) return k;
+    auto down = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
+    const bool g2 = game_id() == 2;
+    const bool shift = down(VK_SHIFT);
     struct { int vk; uint32_t bit; } map[] = {
-        { VK_BACK, 0x1 }, { VK_RETURN, 0x8 }, { VK_UP, 0x10 }, { VK_RIGHT, 0x20 }, { VK_DOWN, 0x40 },
-        { VK_LEFT, 0x80 }, { 'Q', 0x400 }, { 'W', 0x800 }, { 'E', 0x100 }, { 'R', 0x200 }, { 'C', 0x2 },
-        { 'V', 0x4 }, { 'S', 0x1000 }, { 'X', 0x2000 }, { 'Z', 0x4000 }, { 'A', 0x8000 },
+        { VK_SPACE, 0x4000 }, { VK_LBUTTON, 0x8000 }, { VK_RBUTTON, 0x1000 }, { 'F', 0x2000 }, { 'Q', 0x400 },
+        { VK_LCONTROL, 0x100 }, { 'E', g2 ? 0x800u : 0x200u }, { 'R', g2 ? 0x200u : 0x800u }, { 'V', 0x6 },
+        { '1', 0x10 }, { '2', 0x20 }, { '3', 0x40 }, { '4', 0x80 }, { VK_UP, 0x10 }, { VK_RIGHT, 0x20 },
+        { VK_DOWN, 0x40 }, { VK_LEFT, 0x80 }, { VK_ESCAPE, 0x1 }, { VK_BACK, 0x1 }, { 'I', 0x8 }, { 'K', 0x8 },
+        { VK_TAB, 0x8 }, { VK_RETURN, 0x8 },
     };
     for (auto &m : map)
-        if (GetAsyncKeyState(m.vk) & 0x8000) b |= m.bit;
+        if (down(m.vk)) k.buttons |= m.bit;
+    if (down(VK_MBUTTON)) k.buttons |= shift ? 0x6u : 0x2000u;
+    k.mx = (down('D') ? 1 : 0) - (down('A') ? 1 : 0);
+    k.my = (down('S') ? 1 : 0) - (down('W') ? 1 : 0);
+    k.roll = shift;
 #endif
-    return b;
+    return k;
 }
+static std::atomic<bool> g_kbm_active{true}; // sem controle no começo: ícones do teclado
+bool input_kbm_active() { return g_kbm_active; }
 static uint64_t now_us_sys() {
     return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -207,7 +235,22 @@ static void ctrl_read(arc_ctx *ctx) {
     const uint32_t data = arg(ctx, 1);
     const int count = (int)arg(ctx, 2) > 0 ? (int)arg(ctx, 2) : 1;
     const hostin::State pad = hostin::poll(); // XInput, DualShock 4 e DualSense
-    uint32_t buttons = keyboard_buttons() | scripted_buttons() | pad.buttons;
+    const KbmInput kbm = keyboard_mouse();
+    uint32_t buttons = kbm.buttons | scripted_buttons() | pad.buttons;
+    uint8_t lx = pad.lx, ly = pad.ly, rx = pad.rx, ry = pad.ry;
+    if (kbm.mx || kbm.my) { // teclas: inclinação total (diagonal com o mesmo raio)
+        const int r = kbm.mx && kbm.my ? 90 : 127;
+        const uint8_t x = (uint8_t)(128 + kbm.mx * r), y = (uint8_t)(128 + kbm.my * r);
+        if (kbm.roll) rx = x, ry = y;
+        else lx = x, ly = y;
+    }
+    {   // ícones do teclado ou do controle: o último que mexeu
+        const int dl = (pad.lx - 128) * (pad.lx - 128) + (pad.ly - 128) * (pad.ly - 128);
+        const int dr = (pad.rx - 128) * (pad.rx - 128) + (pad.ry - 128) * (pad.ry - 128);
+        if (kbm.buttons || kbm.mx || kbm.my) g_kbm_active = true;
+        else if (pad.buttons || dl > 60 * 60 || dr > 60 * 60) g_kbm_active = false;
+    }
+    buttons |= game_qte_auto(lx, ly); // opção "Auto QTE" (game_options.cpp)
     {   // X apertado (borda): pede para pular a cena em vídeo, se houver uma tocando (o usuário prefere o X;
         // o START abre o menu de Power Up no GoW1).
         static bool x_was = false;
@@ -226,7 +269,7 @@ static void ctrl_read(arc_ctx *ctx) {
         std::memset(ptr<void>(d), 0, 0x20);
         wr64(d, now_us_sys());
         wr32(d + 8, buttons);
-        ptr<uint8_t>(d)[12] = pad.lx, ptr<uint8_t>(d)[13] = pad.ly, ptr<uint8_t>(d)[14] = pad.rx, ptr<uint8_t>(d)[15] = pad.ry;
+        ptr<uint8_t>(d)[12] = lx, ptr<uint8_t>(d)[13] = ly, ptr<uint8_t>(d)[14] = rx, ptr<uint8_t>(d)[15] = ry;
     }
     ret(ctx, (uint32_t)count);
 }
@@ -277,7 +320,7 @@ static void touch_fill(uint32_t port, uint32_t data) {
     std::memset(ptr<void>(data), 0, 0x90);
     wr64(data, now_us_sys());
     float nx, ny;
-    if (port == 0 && (scripted_touch(nx, ny) || gvk::pointer(nx, ny))) {
+    if (port == 0 && (scripted_touch(nx, ny) || (!game_in_gameplay() && gvk::pointer(nx, ny)))) {
         static uint8_t id = 0;
         static bool down = false;
         static uint64_t last = 0;

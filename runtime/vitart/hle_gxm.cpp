@@ -245,6 +245,9 @@ struct TexEntry {
     uint32_t rw = 0, rh = 0; // tamanho do PNG do pack de texturas (0 = textura original)
     uint64_t tp_key = 0;      // PNG do pack sendo decodificado em segundo plano
     uint64_t mat_key = 0;     // material PBR da textura (pbr.h; 0 = sem material)
+    bool kbm_alt = false;     // há versão de teclado e mouse (texpack_kbm) desta textura
+    bool kbm_mode = false;    // modo de ícones com que foi montada (refeita quando o modo muda)
+    bool kbm_used = false;    // o PNG em uso é o de teclado e mouse (outra textura na GPU)
 };
 
 // Pack de texturas (vitart-data/texpack/*/index.tsv, montado por tools/texpack_build.py a partir de um
@@ -258,7 +261,18 @@ static std::atomic<bool> g_texpack_on{true}, g_texcache_flush{false};
 void texpack_set_enabled(bool on) {
     if (g_texpack_on.exchange(on) != on) g_texcache_flush = true;
 }
+// Ícones de teclado e mouse (vitart-data/texpack_kbm/*/index.tsv, mesmo formato e mesma chave): com o
+// teclado/mouse como último controle usado (input_kbm_active, hle_sys.cpp), as texturas com os botões do
+// PlayStation trocam pelos PNGs com as teclas (tools/kbm_glyphs.py). Valem mesmo com "HD Textures" desligado.
+// No mapa de jobs/PNGs as chaves levam um sal, para não se confundirem com as do pack normal.
+bool input_kbm_active();
+static std::unordered_map<uint64_t, std::string> g_texkbm; // chave com sal -> PNG
+constexpr uint64_t kKbmSalt = 0x4B424D5F49434F4Eull;      // "KBM_ICON"
 static void texpack_load();
+static const std::string &tp_path(uint64_t key) {
+    auto it = g_texkbm.find(key);
+    return it != g_texkbm.end() ? it->second : g_texpack[key];
+}
 bool texpack_available() {
     texpack_load();
     return !g_texpack.empty();
@@ -281,6 +295,18 @@ static void texpack_load() {
             n++;
         }
         if (n) logf("vitart: pack de texturas %s: %zu texturas", dir.path().filename().string().c_str(), n);
+    }
+    for (auto &dir : std::filesystem::directory_iterator(std::filesystem::path(data_path()) / "texpack_kbm", ec)) {
+        std::ifstream f(dir.path() / "index.tsv");
+        std::string line;
+        size_t n = 0;
+        while (std::getline(f, line)) {
+            const size_t tab = line.find('\t');
+            if (tab == std::string::npos || line[0] == '#') continue;
+            g_texkbm[std::strtoull(line.substr(0, tab).c_str(), nullptr, 16) ^ kKbmSalt] = (dir.path() / line.substr(tab + 1)).string();
+            n++;
+        }
+        if (n) logf("vitart: ícones de teclado e mouse %s: %zu texturas", dir.path().filename().string().c_str(), n);
     }
 }
 static uint64_t fnv64(const uint8_t *p, size_t n, uint64_t h = 0xCBF29CE484222325ull) {
@@ -325,6 +351,19 @@ static std::unordered_map<uint64_t, std::shared_ptr<TexpackJob>> g_tp_jobs;
 static std::mutex g_tp_sem_mutex;
 static std::condition_variable g_tp_sem_cv;
 static int g_tp_running = 0;
+// Versão de teclado e mouse da textura (chave com sal), se houver; 0 = nenhuma.
+static uint64_t texkbm_key(const gxmtex::Info &info, size_t base_bytes) {
+    texpack_load();
+    if (g_texkbm.empty() || !base_bytes) return 0;
+    const uint32_t wh[2] = {info.width, info.height};
+    const uint64_t key = fnv64(ptr<uint8_t>(info.data), std::min<size_t>(4096, base_bytes),
+                               fnv64(reinterpret_cast<const uint8_t *>(wh), 8));
+    if (info.base == 0x95000000u && info.palette) {
+        const uint64_t kp = fnv64(ptr<uint8_t>(info.palette), 1024, key) ^ kKbmSalt;
+        if (g_texkbm.count(kp)) return g_texpack_rejected.count(kp) ? 0 : kp;
+    }
+    return g_texkbm.count(key ^ kKbmSalt) && !g_texpack_rejected.count(key ^ kKbmSalt) ? key ^ kKbmSalt : 0;
+}
 static uint64_t texpack_key(const gxmtex::Info &info, size_t base_bytes) {
     texpack_load();
     if (g_texpack.empty() || !base_bytes || !g_texpack_on) return 0;
@@ -339,11 +378,30 @@ static uint64_t texpack_key(const gxmtex::Info &info, size_t base_bytes) {
     }
     return g_texpack.count(key) && !g_texpack_rejected.count(key) ? key : 0;
 }
+// VITART_TEXDUMP=dir (diagnóstico): cada textura (até 2048x2048) decodificada pela primeira vez vai para
+// dir/<chave do pack>_<l>x<a>.rgba (RGBA cru), com a chave como em texpack_key (com a paleta, se P8).
+// Serve para montar entradas de pack (tools/texpack_*.py) para texturas que o pack do PS2 não cobre.
+static void texdump(const gxmtex::Info &info, size_t base_bytes, const std::vector<uint8_t> &px) {
+    static const char *dir = getenv("VITART_TEXDUMP");
+    if (!dir || !base_bytes || info.width * info.height > 2048 * 2048 || px.size() < 4ull * info.width * info.height) return;
+    const uint32_t wh[2] = {info.width, info.height};
+    uint64_t key = fnv64(ptr<uint8_t>(info.data), std::min<size_t>(4096, base_bytes), fnv64(reinterpret_cast<const uint8_t *>(wh), 8));
+    if (info.base == 0x95000000u && info.palette) key = fnv64(ptr<uint8_t>(info.palette), 1024, key);
+    static std::set<uint64_t> seen;
+    if (!seen.insert(key).second) return;
+    std::filesystem::create_directories(dir);
+    char name[64];
+    std::snprintf(name, sizeof name, "/%016llx_%ux%u.rgba", (unsigned long long)key, info.width, info.height);
+    if (FILE *f = std::fopen((std::string(dir) + name).c_str(), "wb")) {
+        std::fwrite(px.data(), 1, 4ull * info.width * info.height, f);
+        std::fclose(f);
+    }
+}
 static void texpack_start(uint64_t key) {
     if (g_tp_jobs.count(key)) return;
     auto job = std::make_shared<TexpackJob>();
     g_tp_jobs[key] = job;
-    const std::string path = g_texpack[key];
+    const std::string path = tp_path(key);
     std::thread([job, path] {
         {
             std::unique_lock<std::mutex> l(g_tp_sem_mutex);
@@ -387,8 +445,12 @@ static std::shared_ptr<std::vector<uint8_t>> texpack_take(uint64_t key, const gx
     for (int c = 0; c < 256; c++) ao += so[256 + c], ap += sp[256 + c];
     if (ap < 0.01 * ao) {
         g_texpack_rejected[key] = true;
-        if (rejected++ < 8) logf("vitart: pack de texturas: %s recusado (PNG vazio)", g_texpack[key].c_str());
+        if (rejected++ < 8) logf("vitart: pack de texturas: %s recusado (PNG vazio)", tp_path(key).c_str());
         return nullptr;
+    }
+    if (g_texkbm.count(key)) { // ícones de teclado e mouse: feitos sobre a textura do Vita, alfa já certo
+        w = job->w, h = job->h;
+        return job->px;
     }
     // Alfa na escala do Vita. O pack vem do PS2: lá 128 é opaco, e várias texturas usam o alfa para outra
     // coisa (valor uniforme, p. ex. 93, ou máscara de brilho), enquanto o shader do Vita lê o alfa como o
@@ -804,11 +866,16 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
                 uint64_t h = content_hash(reinterpret_cast<const uint8_t *>(w.data()), 16, 1469598103934665603ull);
                 if (n) h = content_hash(ptr<uint8_t>(info.data), n, h);
                 if (info.base == 0x95000000u) h = content_hash(ptr<uint8_t>(info.palette), 1024, h);
-                if (!e.px || h != e.hash) {
+                const bool kbm_now = input_kbm_active();
+                if (!e.px || h != e.hash || (e.kbm_alt && e.kbm_mode != kbm_now)) {
                     auto px = std::make_shared<std::vector<uint8_t>>();
                     const bool ok = n && gxmtex::decode(ptr<uint8_t>(0), info, *px);
-                    e.rw = e.rh = 0, e.tp_key = 0;
-                    if (ok)
+                    e.rw = e.rh = 0, e.tp_key = 0, e.kbm_used = false, e.kbm_mode = kbm_now;
+                    if (ok) texdump(info, n, *px);
+                    const uint64_t kk = ok ? texkbm_key(info, n) : 0;
+                    e.kbm_alt = kk != 0;
+                    if (kk && kbm_now) texpack_start(kk), e.tp_key = kk; // ícones de teclado e mouse
+                    else if (ok)
                         if (const uint64_t k = texpack_key(info, n)) texpack_start(k), e.tp_key = k; // HD em segundo plano
                     e.mat_key = ok ? pbr::key_for(ptr<uint8_t>(info.data), n, info.width, info.height,
                                                   info.base == 0x95000000u && info.palette ? ptr<uint8_t>(info.palette) : nullptr)
@@ -828,14 +895,15 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
             if (e.tp_key && e.px) {
                 uint32_t rw = 0, rh = 0;
                 bool finished = false;
-                if (auto hd = texpack_take(e.tp_key, info, *e.px, rw, rh, finished)) e.px = hd, e.rw = rw, e.rh = rh;
+                if (auto hd = texpack_take(e.tp_key, info, *e.px, rw, rh, finished))
+                    e.px = hd, e.rw = rw, e.rh = rh, e.kbm_used = g_texkbm.count(e.tp_key) != 0;
                 if (finished) e.tp_key = 0;
             }
             if (!e.px) continue;
             if ((int)i == pinfo_f.diffuse) diffuse_idx = (int)d.textures.size(), diffuse_key = e.mat_key;
             keep.push_back(e.px);
             t.rgba = e.px->data();
-            t.key = (e.rw ? e.hash ^ 0x9E3779B97F4A7C15ull : e.hash) | 1; // HD do pack é outra textura na GPU
+            t.key = (e.kbm_used ? e.hash ^ kKbmSalt : e.rw ? e.hash ^ 0x9E3779B97F4A7C15ull : e.hash) | 1; // HD do pack é outra textura na GPU
             if (e.rw) {
                 // HD do pack: tamanho do PNG e cadeia de mipmaps completa (sem cintilar de longe).
                 t.width = e.rw, t.height = e.rh;

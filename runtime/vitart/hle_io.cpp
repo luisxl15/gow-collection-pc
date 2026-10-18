@@ -74,7 +74,9 @@ static std::shared_ptr<PsarcPatch> psarc_patch(const std::string &hp) {
     if (auto it = cache.find(hp); it != cache.end()) return it->second;
     auto &slot = cache[hp];
     const std::string name = fs::path(hp).filename().string();
-    const std::string pp = data_path() + "/mods/" + name + ".vtpatch";
+    // VITART_MODS_DIR (testes): outra pasta de patches, sem mexer nos instalados
+    const char *md = getenv("VITART_MODS_DIR");
+    const std::string pp = (md && *md ? std::string(md) : data_path() + "/mods") + "/" + name + ".vtpatch";
     FILE *f = fopen(pp.c_str(), "rb");
     if (!f) return nullptr;
     auto pt = std::make_shared<PsarcPatch>();

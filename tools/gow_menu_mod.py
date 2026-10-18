@@ -2,8 +2,8 @@
 
     python tools/gow_menu_mod.py <gow1_psp2_SCEA.psarc | gow2_psp2_SCEA.psarc> <saída .vtpatch> [--dump <pasta>]
 
-GoW1: HD Textures, PS2 Audio, Resolution, Frame Rate, VSync, FPS Counter, Display Mode (estados 5..11, FLP_HUD,
-tag 30, canal PS2_Cheat). GoW2: Resolution, Frame Rate, VSync, FPS Counter, Display Mode (estados 7..11; o
+GoW1: HD Textures, PS2 Audio, Resolution, Frame Rate, VSync, FPS Counter, Display Mode, Auto QTE (estados 5..12,
+FLP_HUD, tag 30, canal PS2_Cheat). GoW2: Resolution, Frame Rate, VSync, FPS Counter, Display Mode, Auto QTE (7..12; o
 FLP_HUDA, tag 1, é a versão 0x1b do formato; rótulos das linhas são textos dinâmicos; canal PS2_OverUnder).
 
 Edita o FLP_HUD de wad/r_perma.wad_psp2 e wad/_VitaTV/r_perma.wad_psp2 (o menu de pausa, em inglês como o
@@ -28,9 +28,10 @@ import flp  # noqa: E402
 import psarc_gxp as P  # noqa: E402
 
 # Estado de todas as opções num número só, na variável PS2_Cheat (campo +0x2bc do objeto de opções,
-# sem tratador no jogo): 0x10000 | textura | áudio << 2 | resolução << 4 | fps << 7 | vsync << 9 | contador << 12 | modo << 14.
+# sem tratador no jogo): 0x10000 | textura | áudio << 2 | resolução << 4 | fps << 7 | vsync << 9 | QTE automático << 11
+# (um bit: 0 Off, 1 On; o menu o lê como 1/2, igual aos outros) | contador << 12 | modo << 14.
 # Ver runtime/vitart/game_options.cpp.
-FIELDS = [('_level0/:VtDsp', 16384, 3), ('_level0/:VtCnt', 4096, 3), ('_level0/:VtVsync', 512, 3), ('_level0/:VtFps', 128, 3), ('_level0/:VtRes', 16, 7),
+FIELDS = [('_level0/:VtDsp', 16384, 3), ('_level0/:VtCnt', 4096, 3), ('_level0/:VtQte', 2048, 1), ('_level0/:VtVsync', 512, 3), ('_level0/:VtFps', 128, 3), ('_level0/:VtRes', 16, 7),
           ('_level0/:VtAud', 4, 3), ('_level0/:VtTex', 1, 3)]
 RES_TEXT = {1: '1x  (960x544)', 2: '2x  (1920x1088)', 3: '3x  (2880x1632)', 4: '4x  (3840x2176)'}
 FPS_TEXT = {1: '30 FPS', 2: '60 FPS', 3: 'Max FPS'}  # Max: taxa do monitor; VSync Off: sem limite (patch_gow*_dt.py)
@@ -43,20 +44,21 @@ LINES = {
     'vsync': ('VtVsync', 'VSync', '_level0/:VtVsync', '_level0/:VtVsyncText', 'toggle', {1: 'Off', 2: 'On'}),
     'cnt': ('VtFpsCounter', 'FPS Counter', '_level0/:VtCnt', '_level0/:VtCntText', 'toggle', {1: 'Off', 2: 'On'}),
     'dsp': ('VtDisplayMode', 'Display Mode', '_level0/:VtDsp', '_level0/:VtDspText', 'toggle', {1: 'Windowed', 2: 'Borderless'}),
+    'qte': ('VtAutoQte', 'Auto QTE', '_level0/:VtQte', '_level0/:VtQteText', 'toggle', {1: 'Off', 2: 'On'}),
 }
 GAMES = {
     'gow1': dict(
         state='PS2_Cheat', wad=(30, b'FLP_HUD'), nobody=(24,),
-        new=[(5, 'tex'), (6, 'aud'), (7, 'res'), (8, 'fps'), (11, 'vsync'), (9, 'cnt'), (10, 'dsp')],
+        new=[(5, 'tex'), (6, 'aud'), (7, 'res'), (8, 'fps'), (11, 'vsync'), (9, 'cnt'), (10, 'dsp'), (12, 'qte')],
         old={1: ('MusicVolume', 'A'), 2: ('SFXVolume', 'A'), 3: ('Controller', 'B'), 4: ('Return', 'B')},
-        order=[1, 2, 5, 6, 7, 8, 11, 9, 10, 3, 4], y=(-175.0, 175.0), frames=(7, 8, 9), kx=22, x_state='3',
+        order=[1, 2, 5, 6, 7, 8, 11, 9, 10, 12, 3, 4], y=(-175.0, 175.0), frames=(7, 8, 9), kx=22, x_state='3',
         dyn_label=False),
     'gow2': dict(
         state='PS2_OverUnder', wad=(1, b'FLP_HUDA'), nobody=(0, 24),  # tag 0: parâmetro (o tamanho é o valor)
-        new=[(7, 'res'), (8, 'fps'), (9, 'vsync'), (10, 'cnt'), (11, 'dsp')],
+        new=[(7, 'res'), (8, 'fps'), (9, 'vsync'), (10, 'cnt'), (11, 'dsp'), (12, 'qte')],
         old={1: ('MessageTips', 'A'), 2: ('MusicVolume', 'A'), 3: ('SFXVolume', 'A'), 4: ('Controller', 'B'),
              5: ('FlightControls', 'A'), 6: ('Return', 'B')},
-        order=[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 6], y=(-165.0, 207.5), frames=(9, 10, 11), kx=19, x_state='4',
+        order=[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 6], y=(-165.0, 207.5), frames=(9, 10, 11), kx=19, x_state='4',
         dyn_label=True),
 }
 
@@ -192,6 +194,13 @@ def show_script(f):
             a.label('m%s%d' % (name, v))
         a.setv(name, 0)
         a.label('f' + name)
+    # QTE automático: um bit (0/1) na palavra -> 1/2 como as outras alternâncias
+    q = '_level0/:VtQte'
+    a.getv(q).push(1).eq().not_().jumpif('q0')
+    a.setv(q, 2).jump('q1')
+    a.label('q0')
+    a.setv(q, 1)
+    a.label('q1')
     a.callframe('/:VtOptTexts').end()
     return flp.encode(f, a.build())
 

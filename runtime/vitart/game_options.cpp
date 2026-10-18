@@ -17,7 +17,7 @@
 // contador de FPS << 12 (1 Off, 2 On) | modo de exibição << 14 (1 janela, 2 sem bordas) | FPS medidos << 17 (0 com o contador desligado; o clipe do
 // contador no HUD, no estilo do contador de HITS, mostra esse número).
 // Texturas e áudio: 1 Off, 2 On, 3 indisponível. Resolução: 1..4 (escala interna). FPS: 1 = 30, 2 = 60.
-// Proporção: reservada (1 = 16:9). As escolhas ficam em <dados>/vitart_options.ini.
+// Proporção: reservada (1 = 16:9). QTE automático << 11 (0 Off, 1 On: um bit, o único livre abaixo do 16). As escolhas ficam em <dados>/vitart_options.ini.
 #include "vitart.h"
 #include <cmath>
 #include <vector>
@@ -64,10 +64,11 @@ struct Options {
     uint32_t fps = 1; // 1 = 30, 2 = 60, 3 = máximo (taxa do monitor, sem acelerar o jogo)
     bool vsync = true; // desligado: sem limite de quadros e sem esperar o vblank
     uint32_t scale = 0; // 0 = automática pelo monitor
+    bool auto_qte = false; // QTE automático (game_qte_auto)
 };
 Options g_opt;
 // Pedidos vindos do menu (thread do jogo), aplicados no próximo quadro: 0 = nenhum.
-std::atomic<uint32_t> g_req_tex{0}, g_req_aud{0}, g_req_res{0}, g_req_fps{0}, g_req_cnt{0}, g_req_dsp{0}, g_req_vsync{0};
+std::atomic<uint32_t> g_req_tex{0}, g_req_aud{0}, g_req_res{0}, g_req_fps{0}, g_req_cnt{0}, g_req_dsp{0}, g_req_vsync{0}, g_req_qte{0};
 
 std::string ini_path() { return data_path() + "/vitart_options.ini"; }
 std::string g_iso; // ISO do PS2 lembrada (o iniciador a passa em VITART_PS2_AUDIO)
@@ -77,9 +78,10 @@ void save() {
     if (const char *e = getenv("VITART_PS2_AUDIO"); e && *e) iso = e;
     if (FILE *f = fopen(ini_path().c_str(), "w")) {
         fprintf(f, "# Opções do PC (mudam pelo menu de pausa do jogo: Options)\n");
-        fprintf(f, "hd_textures=%u\nps2_audio=%u\nresolution=%u\nfps=%s\nvsync=%u\nfps_counter=%u\nborderless=%u\n",
+        fprintf(f, "hd_textures=%u\nps2_audio=%u\nresolution=%u\nfps=%s\nvsync=%u\nfps_counter=%u\nborderless=%u\nauto_qte=%u\n",
                 g_opt.tex ? 1u : 0u, g_opt.audio ? 1u : 0u, g_opt.scale, g_opt.fps == 3 ? "max" : g_opt.fps == 2 ? "60" : "30",
-                g_opt.vsync ? 1u : 0u, g_opt.counter ? 1u : 0u, g_opt.borderless ? 1u : 0u);
+                g_opt.vsync ? 1u : 0u, g_opt.counter ? 1u : 0u, g_opt.borderless ? 1u : 0u,
+                g_opt.auto_qte ? 1u : 0u);
         if (!iso.empty()) fprintf(f, "ps2_iso=%s\n", iso.c_str());
         fclose(f);
     }
@@ -98,6 +100,7 @@ void load() {
             if (sscanf(line, "fps_counter=%u", &v) == 1) g_opt.counter = v != 0;
             if (sscanf(line, "vsync=%u", &v) == 1) g_opt.vsync = v != 0;
             if (sscanf(line, "borderless=%u", &v) == 1) g_opt.borderless = v != 0;
+            if (sscanf(line, "auto_qte=%u", &v) == 1) g_opt.auto_qte = v != 0;
             if (!strncmp(line, "ps2_iso=", 8)) {
                 g_iso = line + 8;
                 while (!g_iso.empty() && (unsigned char)g_iso.back() < 32) g_iso.pop_back();
@@ -120,7 +123,7 @@ uint32_t encode() {
     const uint32_t aud = g1 && ps2audio_available() ? (g_opt.audio ? 2u : 1u) : 3u;
     uint32_t fps = g_opt.counter ? gvk::measured_fps() : 0;
     fps = fps > 127 ? 127 : fps; // a palavra passa por float no menu: até 2^24
-    return 0x10000u | tex | aud << 2 | cur_scale() << 4 | g_opt.fps << 7 | (g_opt.vsync ? 2u : 1u) << 9 |
+    return 0x10000u | tex | aud << 2 | cur_scale() << 4 | g_opt.fps << 7 | (g_opt.vsync ? 2u : 1u) << 9 | (g_opt.auto_qte ? 1u : 0u) << 11 |
            (g_opt.counter ? 2u : 1u) << 12 | (g_opt.borderless ? 2u : 1u) << 14 | fps << 17;
 }
 
@@ -166,6 +169,7 @@ void on_import(arc_ctx *ctx, uint32_t stub) {
     if (!std::strcmp(key, "cnt")) g_req_cnt = v;
     if (!std::strcmp(key, "dsp")) g_req_dsp = v;
     if (!std::strcmp(key, "vsync")) g_req_vsync = v;
+    if (!std::strcmp(key, "qte")) g_req_qte = v;
 }
 const bool g_watch = (watch_import(on_import), true);
 
@@ -318,6 +322,10 @@ void game_options_tick() {
         g_opt.vsync = v == 2, changed = true;
         logf("vitart: VSync %s", g_opt.vsync ? "ligado" : "desligado");
     }
+    if (const uint32_t v = g_req_qte.exchange(0); (v == 1 || v == 2) && (v == 2) != g_opt.auto_qte) {
+        g_opt.auto_qte = v == 2, changed = true;
+        logf("vitart: QTE automático %s", g_opt.auto_qte ? "ligado" : "desligado");
+    }
     if (const uint32_t v = g_req_cnt.exchange(0); (v == 1 || v == 2) && (v == 2) != g_opt.counter) {
         g_opt.counter = v == 2, changed = true;
     }
@@ -335,6 +343,114 @@ void game_options_tick() {
     if (!obj || rd32(obj) != op->vtbl) return;
     const uint32_t want = encode();
     if (rd32(obj + op->field) != want) wr32(obj + op->field, want);
+}
+
+// Jogo carregado: 1 = GoW1, 2 = GoW2, 0 = outro (o menu da coletânea).
+int game_id() { return is_gow1() ? 1 : is_gow2() ? 2 : 0; }
+
+// Dentro de um dos jogos e fora do menu principal (flags achadas comparando a memória global).
+bool game_in_gameplay() {
+    const int g = game_id();
+    return g && rd32(g == 1 ? 0x812bc0c0u : 0x812e40e0u) != 1;
+}
+
+// QTE automático: o botão que o HUD está pedindo vira entrada, somada à do jogador.
+//   GoW1: sub_8101406c(hud, índice) mostra o ícone e guarda o índice em hud+0x1570 (-1 = nenhum); hud é o
+//     objeto em 0x812a681c (o mesmo das opções). Índices = tabela de nomes em 0x812a6858: 0 X, 1 triângulo,
+//     2 círculo, 3 quadrado, 4..7 meia-volta do analógico (Up180CW, Up180CCW, Down180CW, Down180CCW), 8 360CW,
+//     9 360CCW, 10 X repetido, 11 R2 repetido (portas), 12 sacudir o analógico, 13 vaivém, 14 R2 parado.
+//     Estado do jogo em 0x812c2e04 (máquina de estados de sub_8105fc..810614xx): 0xb = jogo correndo, 0xc = pausa
+//     (achado comparando a memória pausada e não pausada); fora do 0xb nada é apertado.
+//   GoW2: sub_81070b60(slot, valor) grava o ícone em 0x812ec588 + 4*slot; o valor é o hash do nome do
+//     clipe (h = h*127 + maiúscula, sub_811346de): "PB_XBtn", "PB_360CW", "PB_CircleBtnSmash"...
+// Botões no SceCtrlData do modo PS TV (L2/R2 = 0x100/0x200, L1/R1 = 0x400/0x800).
+namespace {
+enum QteKind { QNone, QPress, QHold, QCw, QCcw, QWiggleX, QWiggleY };
+struct Qte {
+    QteKind kind;
+    uint32_t buttons;
+};
+uint32_t gow_hash(const char *s) {
+    uint32_t h = 0;
+    for (; *s; s++) h = h * 127 + (uint32_t)(int8_t)(*s >= 'a' && *s <= 'z' ? *s - 32 : *s);
+    return h;
+}
+Qte qte_gow1(uint32_t idx) {
+    static const Qte t[15] = {{QPress, 0x4000}, {QPress, 0x1000}, {QPress, 0x2000}, {QPress, 0x8000}, {QCw, 0},
+                              {QCcw, 0},        {QCw, 0},         {QCcw, 0},        {QCw, 0},         {QCcw, 0},
+                              {QPress, 0x4000}, {QPress, 0x200},  {QWiggleX, 0},    {QWiggleY, 0},    {QNone, 0}};
+    return idx < 15 ? t[idx] : Qte{QNone, 0};
+}
+Qte qte_gow2(uint32_t hash, bool &known) {
+    struct Name {
+        const char *name;
+        Qte q;
+    };
+    static const Name names[] = {
+        {"PB_XBtn", {QPress, 0x4000}},        {"PB_TriangleBtn", {QPress, 0x1000}}, {"PB_CircleBtn", {QPress, 0x2000}},
+        {"PB_SquareBtn", {QPress, 0x8000}},   {"PB_Up180CW", {QCw, 0}},              {"PB_Up180CCW", {QCcw, 0}},
+        {"PB_Down180CW", {QCw, 0}},           {"PB_Down180CCW", {QCcw, 0}},          {"PB_360CW", {QCw, 0}},
+        {"PB_360CCW", {QCcw, 0}},             {"PB_Stick360CW", {QCw, 0}},           {"PB_Stick360CCW", {QCcw, 0}},
+        {"PB_Stick360CWF", {QCw, 0}},         {"PB_Stick360CCWF", {QCcw, 0}},        {"PB_StickShake", {QWiggleX, 0}},
+        {"PB_StickBack", {QWiggleY, 0}},      {"PB_CircleBtnSmash", {QPress, 0x2000}}, {"PB_CircleBtnHold", {QHold, 0x2000}},
+        {"PB_R1BtnHold", {QHold, 0x800}},     {"PB_R1BtnStatic", {QNone, 0}},        {"PB_CircleBtnStatic", {QNone, 0}},
+        {"PB_CSBtnFail", {QNone, 0}},
+    };
+    static std::vector<std::pair<uint32_t, Qte>> table;
+    if (table.empty())
+        for (const Name &n : names) table.push_back({gow_hash(n.name), n.q});
+    known = false;
+    for (auto &[h, q] : table)
+        if (h == hash) return known = true, q;
+    return {QNone, 0};
+}
+} // namespace
+
+uint32_t game_qte_auto(uint8_t &lx, uint8_t &ly) {
+    const int g = game_id();
+    if (!g || (!g_opt.auto_qte && !getenv("VITART_AUTO_QTE"))) return 0;
+    Qte q{QNone, 0};
+    static const bool log = getenv("VITART_QTELOG") != nullptr;
+    static uint32_t last_seen = 0xffffffffu;
+    uint32_t seen = 0xffffffffu;
+    if (g == 1) {
+        const uint32_t hud = rd32(0x812a681c);
+        if (!hud || rd32(hud) != kOptGow1.vtbl) return 0;
+        const uint32_t idx = rd32(hud + 0x1570);
+        const bool menu = rd32(0x812c2e04) != 0xb; // estado do jogo: 0xb = correndo (0xc pausa, outros = menus e cenas)
+        seen = menu ? 0xfffffffeu : idx;
+        if (!menu) q = qte_gow1(idx);
+    } else {
+        for (uint32_t s = 0; s < 8 && q.kind == QNone; s++) {
+            const uint32_t v = rd32(0x812ec588 + 4 * s);
+            if (!v) continue;
+            bool known;
+            q = qte_gow2(v, known);
+            if (q.kind != QNone || !known) seen = v;
+            if (log && !known) {
+                static uint32_t unknown_logged = 0;
+                if (v != unknown_logged) unknown_logged = v, logf("vitart: QTE: ícone desconhecido no slot %u: hash 0x%08x", s, v);
+            }
+        }
+    }
+    if (log && seen != last_seen) logf("vitart: QTE: %s 0x%08x -> tipo %d botões 0x%x", g == 1 ? "índice" : "hash", seen, (int)q.kind, q.buttons);
+    last_seen = seen;
+    if (q.kind == QNone) return 0;
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    switch (q.kind) {
+    case QPress: return std::fmod(t, 0.07) < 0.035 ? q.buttons : 0; // ~14 toques por segundo (serve para os repetidos)
+    case QHold: return q.buttons;
+    case QCw:
+    case QCcw: { // 2,5 voltas por segundo; horário na tela = cima, direita, baixo, esquerda
+        const double a = t * 2.5 * 6.283185307 * (q.kind == QCw ? 1 : -1);
+        lx = (uint8_t)std::lround(128 + 127 * std::sin(a));
+        ly = (uint8_t)std::lround(128 - 127 * std::cos(a));
+        return 0;
+    }
+    case QWiggleX: lx = std::fmod(t, 0.12) < 0.06 ? 0 : 255; return 0;
+    case QWiggleY: ly = std::fmod(t, 0.12) < 0.06 ? 0 : 255; return 0;
+    default: return 0;
+    }
 }
 
 } // namespace vt

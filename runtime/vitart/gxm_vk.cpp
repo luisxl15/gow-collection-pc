@@ -1068,6 +1068,8 @@ void notify(const std::string &text) {
     g_notice_shown = false;
 }
 
+bool has_focus() { return g_hwnd && GetForegroundWindow() == g_hwnd; }
+
 bool pointer(float &nx, float &ny) {
     if (!g_hwnd || GetForegroundWindow() != g_hwnd || !(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) return false;
     POINT p;
