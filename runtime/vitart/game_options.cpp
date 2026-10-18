@@ -146,7 +146,7 @@ void on_import(arc_ctx *ctx, uint32_t stub) {
     if (std::strncmp(c, "FSCommand:VT_", 13) != 0) return;
     char key[8] = {};
     unsigned v = 0;
-    if (std::sscanf(c + 13, "%3[a-z]_%u", key, &v) != 2 || !v) return;
+    if (std::sscanf(c + 13, "%7[a-z]_%u", key, &v) != 2 || !v) return; // até 7 letras ("vsync")
     if (!std::strcmp(key, "tex")) g_req_tex = v;
     if (!std::strcmp(key, "aud")) g_req_aud = v;
     if (!std::strcmp(key, "res")) g_req_res = v;
