@@ -22,6 +22,15 @@ patches = [
     ('L_8110a2b6:; /* movt r0, #0x42c8 */\n    r0 = (r0 & 0xffffu) | 0x42c80000u;\n',
      'L_8110a2b6:; /* movt r0, #0x42c8 */\n    { uint32_t vt_floor = ARC_LW(0x812b75d0u); ' + MARK + '\n'
      '      r0 = vt_floor ? vt_floor : ((r0 & 0xffffu) | 0x42c80000u); }\n'),
+    # Qual caminho o jogo tomou neste quadro, em 0x812b75d8: 0 = tempo real (jogatina), 1 = passo fixo de
+    # 1/60 (menus, vídeos, telas de carga). No passo fixo o jogo anima por quadro: o runtime limita a 60
+    # quadros/s nesse modo mesmo com o VSync desligado (hle_sys.cpp), senão o menu principal acelerava.
+    ('L_8110a282:; /* vmov s1, r5 */\n    ARC_SSB(ctx, 1, r5);\n',
+     'L_8110a282:; /* vmov s1, r5 */\n    ARC_SSB(ctx, 1, r5);\n'
+     '    ARC_SW(0x812b75d8u, 0u); ' + MARK + '\n'),
+    ('L_8110a302:; /* vmov.f32 s0, s1 */\n    ARC_SSB(ctx, 0, ARC_GSB(ctx, 1));\n',
+     'L_8110a302:; /* vmov.f32 s0, s1 */\n    ARC_SSB(ctx, 0, ARC_GSB(ctx, 1));\n'
+     '    ARC_SW(0x812b75d8u, 1u); ' + MARK + '\n'),
 ]
 
 

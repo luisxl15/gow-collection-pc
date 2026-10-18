@@ -229,7 +229,9 @@ bool video_hd_frame(int64_t bink_frame, const uint8_t *&rgba, uint32_t &w, uint3
         const double since = std::chrono::duration<double>(now - g_num_at).count();
         t = (bink_frame + std::min(since * g_game_fps, 1.0)) / g_game_fps;
     } else {
-        t = 0; // HBINK ainda não achado (menos de 1 s): fica no primeiro quadro
+        // o Bink ainda não começou: o jogo abre o vídeo e carrega a fase antes de tocá-lo (até ~13 s na
+        // abertura); mostrar o quadro 0 do remaster nesse tempo parecia o vídeo travado. Fica a imagem do jogo.
+        return false;
     }
     static int64_t logged_at = -1;
     if (bink_frame >= 0 && (logged_at < 0 || bink_frame - logged_at >= 300 || bink_frame < logged_at)) {

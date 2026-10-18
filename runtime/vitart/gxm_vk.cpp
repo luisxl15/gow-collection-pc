@@ -791,6 +791,7 @@ bool vertex_format_ok(uint32_t fmt, uint32_t comps) {
 }
 
 static bool g_resized = false, g_fullscreen = false;
+static std::atomic<bool> g_vsync{true};
 static WINDOWPLACEMENT g_place{sizeof(WINDOWPLACEMENT)};
 // F11 ou Alt+Enter: tela cheia sem bordas no monitor da janela (e volta ao lugar anterior).
 static void toggle_fullscreen(HWND h) {
@@ -814,6 +815,13 @@ static void toggle_fullscreen(HWND h) {
 // da janela (-1 = nenhum pedido).
 static std::atomic<int> g_want_borderless{-1};
 void set_borderless(bool on) { g_want_borderless = on ? 1 : 0; }
+// Desenhos que gravaram profundidade no último quadro apresentado: o menu principal é 2D (quase nenhum),
+// a jogatina e as cenas em tempo real têm centenas. O ritmo sem VSync usa isso (hle_sys.cpp).
+static std::atomic<uint32_t> g_dw_frame{0}, g_dw_last{0};
+uint32_t last_frame_depth_writes() { return g_dw_last; }
+void set_vsync(bool on) {
+    if (g_vsync.exchange(on) != on) g_resized = true; // a swapchain é refeita no próximo present
+}
 bool is_borderless() { return g_fullscreen; }
 
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -871,8 +879,10 @@ static bool create_swapchain() {
         vkGetPhysicalDeviceSurfacePresentModesKHR(g_phys, g_surface, &nm, nullptr);
         std::vector<VkPresentModeKHR> modes(nm);
         vkGetPhysicalDeviceSurfacePresentModesKHR(g_phys, g_surface, &nm, modes.data());
+        // VSync desligado (menu de pausa): imediato, sem esperar o vblank (pode rasgar a imagem); sem ele no
+        // driver, mailbox.
         std::vector<VkPresentModeKHR> pref = {VK_PRESENT_MODE_MAILBOX_KHR};
-        if (getenv("VITART_NOVSYNC")) pref.push_back(VK_PRESENT_MODE_IMMEDIATE_KHR);
+        if (getenv("VITART_NOVSYNC") || !g_vsync) pref.insert(pref.begin(), VK_PRESENT_MODE_IMMEDIATE_KHR);
         for (VkPresentModeKHR m : pref)
             if (std::find(modes.begin(), modes.end(), m) != modes.end()) {
                 ci.presentMode = m;
@@ -1176,6 +1186,7 @@ bool present(uint32_t addr) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (!g_dev) return false;
     post_at_present(addr);
+    g_dw_last = g_dw_frame.exchange(0);
     // O quadro vai para a fila sem esperar; o blit vem depois na mesma fila, que garante a ordem.
     if (!frame_flush(false)) return false;
     if (!g_swap && !g_hwnd && !create_window()) return false;
@@ -1869,6 +1880,9 @@ struct TgtCount {
 std::unordered_map<uint32_t, TgtCount> g_tgt_count;
 
 void post_before_draw(const Draw &d, Target &t) {
+    // pós desligado (o padrão): nada é contado nem copiado, o renderizador fica como o original
+    static const bool env_on = getenv("VITART_POST") && *getenv("VITART_POST") == '1';
+    if (!vt::pbr::config().post && !env_on) return;
     // o jogo limpa a profundidade com um desenho de tela cheia (teste ALWAYS gravando): guarda antes
     if (d.target_addr == g_main_addr && d.depth_write && d.depth_func == 7) post_save_depth(d.target_addr, t.depth);
     TgtCount &tc = g_tgt_count[d.target_addr];
@@ -1968,6 +1982,7 @@ bool draw(const Draw &d) {
     if (!get_target(d.target_addr, d.target_w, d.target_h, tgt)) return false;
     if (d.depth_addr) g_depth_owner[d.depth_addr] = d.target_addr;
     post_before_draw(d, *tgt);
+    if (d.depth_write) g_dw_frame++;
 
     // Texturas: imagens enviadas (cache por conteúdo) ou cópia de um alvo deste quadro.
     VkDescriptorImageInfo img_info[kTexBindings];

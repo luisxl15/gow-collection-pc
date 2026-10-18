@@ -34,7 +34,7 @@ void write_default_ini() {
     if (FILE *f = fopen(ini_path().c_str(), "w")) {
         fprintf(f,
                 "# PBR do vitart (docs/pbr.md). O arquivo é relido com o jogo rodando: salve e veja na hora.\n"
-                "enabled=1\n"
+                "enabled=0\n"
                 "# 1 = também nas texturas sem material (material neutro, rugosidade default_roughness)\n"
                 "all_surfaces=0\n"
                 "default_roughness=0.8\n"

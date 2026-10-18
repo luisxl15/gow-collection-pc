@@ -121,6 +121,10 @@ void set_fps_counter(bool on);
 uint32_t measured_fps();
 // Janela sem bordas ocupando o monitor (o mesmo modo do F11 / Alt+Enter).
 void set_borderless(bool on);
+// VSync do menu de pausa: desligado, a apresentação não espera o vblank (modo imediato).
+void set_vsync(bool on);
+// Desenhos que gravaram profundidade no último quadro apresentado (0 em telas 2D, como o menu principal).
+uint32_t last_frame_depth_writes();
 // Teste: desliga o pós-processamento (iluminação de tela) enquanto ligado.
 void set_post_bypass(bool on);
 // Contadores do pós-processamento desde a última chamada: aplicados, sem matriz, sem ponto do HUD,

@@ -24,10 +24,10 @@ import flp  # noqa: E402
 import psarc_gxp as P  # noqa: E402
 
 # Estado de todas as opções num número só, na variável PS2_Cheat (campo +0x2bc do objeto de opções,
-# sem tratador no jogo): 0x10000 | textura | áudio << 2 | resolução << 4 | fps << 7 | proporção << 9.
+# sem tratador no jogo): 0x10000 | textura | áudio << 2 | resolução << 4 | fps << 7 | vsync << 9 | contador << 12 | modo << 14.
 # Ver runtime/vitart/game_options.cpp.
 STATE = 'PS2_Cheat'
-FIELDS = [('_level0/:VtDsp', 16384, 3), ('_level0/:VtCnt', 4096, 3), ('_level0/:VtAsp', 512, 7), ('_level0/:VtFps', 128, 3), ('_level0/:VtRes', 16, 7),
+FIELDS = [('_level0/:VtDsp', 16384, 3), ('_level0/:VtCnt', 4096, 3), ('_level0/:VtVsync', 512, 3), ('_level0/:VtFps', 128, 3), ('_level0/:VtRes', 16, 7),
           ('_level0/:VtAud', 4, 3), ('_level0/:VtTex', 1, 3)]
 ROWS = [  # (estado da página, nome do clipe, rótulo, variável decodificada, peso, variável do texto)
     (5, 'VtTextures', 'HD Textures', '_level0/:VtTex', 1, '_level0/:VtTexText'),
@@ -36,17 +36,18 @@ ROWS = [  # (estado da página, nome do clipe, rótulo, variável decodificada, 
     (8, 'VtFrameRate', 'Frame Rate', '_level0/:VtFps', 128, '_level0/:VtFpsText'),
     (9, 'VtFpsCounter', 'FPS Counter', '_level0/:VtCnt', 4096, '_level0/:VtCntText'),
     (10, 'VtDisplayMode', 'Display Mode', '_level0/:VtDsp', 16384, '_level0/:VtDspText'),
+    (11, 'VtVsync', 'VSync', '_level0/:VtVsync', 512, '_level0/:VtVsyncText'),
 ]
 RES_TEXT = {1: '1x  (960x544)', 2: '2x  (1920x1088)', 3: '3x  (2880x1632)', 4: '4x  (3840x2176)'}
-FPS_TEXT = {1: '30 FPS', 2: '60 FPS', 3: 'Max FPS'}  # Max: taxa do monitor, sem acelerar (patch_gow1_dt.py)
+FPS_TEXT = {1: '30 FPS', 2: '60 FPS', 3: 'Max FPS'}  # Max: taxa do monitor; VSync Off: sem limite (patch_gow1_dt.py)
 # estado -> (caminho do clipe da linha, grupo: A = ajustável com esquerda/direita, B = seleciona com X)
 PATH = {1: ('PauseMenu/MusicVolume', 'A'), 2: ('PauseMenu/SFXVolume', 'A'), 5: ('PauseMenu/VtTextures', 'A'),
         6: ('PauseMenu/VtAudio', 'A'), 7: ('PauseMenu/VtResolution', 'A'), 8: ('PauseMenu/VtFrameRate', 'A'),
-        9: ('PauseMenu/VtFpsCounter', 'A'), 10: ('PauseMenu/VtDisplayMode', 'A'),
+        9: ('PauseMenu/VtFpsCounter', 'A'), 10: ('PauseMenu/VtDisplayMode', 'A'), 11: ('PauseMenu/VtVsync', 'A'),
         3: ('PauseMenu/Controller', 'B'), 4: ('PauseMenu/Return', 'B')}
-ORDER = [1, 2, 5, 6, 7, 8, 9, 10, 3, 4]
+ORDER = [1, 2, 5, 6, 7, 8, 11, 9, 10, 3, 4]
 Y = {s: -175.0 + 350.0 / (len(ORDER) - 1) * i for i, s in enumerate(ORDER)}
-FIRST_NEW, LAST_NEW = 5, 10
+FIRST_NEW, LAST_NEW = 5, 11
 VALUE_RISE = 25.0  # unidades da linha
 ST = 'PauseOptions_State'
 
@@ -172,7 +173,7 @@ def texts_script(f):
         a.setv(txt, 'Off')
         a.label('y' + txt)
     for (_, _, _, var, _, txt), table in ((ROWS[2], RES_TEXT), (ROWS[3], FPS_TEXT), (ROWS[4], {1: 'Off', 2: 'On'}),
-                                     (ROWS[5], {1: 'Windowed', 2: 'Borderless'})):
+                                     (ROWS[5], {1: 'Windowed', 2: 'Borderless'}), (ROWS[6], {1: 'Off', 2: 'On'})):
         for v, t in table.items():
             a.getv(var).push(v).eq().not_().jumpif('t%s%d' % (txt, v))
             a.setv(txt, t)
@@ -181,7 +182,7 @@ def texts_script(f):
     return flp.encode(f, a.build())
 
 
-KEY = {5: 'tex', 6: 'aud', 7: 'res', 8: 'fps', 9: 'cnt', 10: 'dsp'}
+KEY = {5: 'tex', 6: 'aud', 7: 'res', 8: 'fps', 9: 'cnt', 10: 'dsp', 11: 'vsync'}
 
 
 def change_script(f, step):

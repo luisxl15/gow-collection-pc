@@ -42,6 +42,7 @@ void ps2audio_set_enabled(bool on);
 bool ps2audio_available();
 void display_set_fps60(bool on);
 void display_set_fps_target(uint32_t fps);
+void display_set_fixed_step_addr(uint32_t a);
 
 namespace {
 
@@ -54,11 +55,12 @@ constexpr uint32_t kFsPrefix = 0x811fbdf4;    // "FSCommand:"
 struct Options {
     bool tex = true, audio = true, counter = false, borderless = false;
     uint32_t fps = 1; // 1 = 30, 2 = 60, 3 = máximo (taxa do monitor, sem acelerar o jogo)
+    bool vsync = true; // desligado: sem limite de quadros e sem esperar o vblank
     uint32_t scale = 0; // 0 = automática pelo monitor
 };
 Options g_opt;
 // Pedidos vindos do menu (thread do jogo), aplicados no próximo quadro: 0 = nenhum.
-std::atomic<uint32_t> g_req_tex{0}, g_req_aud{0}, g_req_res{0}, g_req_fps{0}, g_req_cnt{0}, g_req_dsp{0};
+std::atomic<uint32_t> g_req_tex{0}, g_req_aud{0}, g_req_res{0}, g_req_fps{0}, g_req_cnt{0}, g_req_dsp{0}, g_req_vsync{0};
 
 std::string ini_path() { return data_path() + "/vitart_options.ini"; }
 std::string g_iso; // ISO do PS2 lembrada (o iniciador a passa em VITART_PS2_AUDIO)
@@ -68,9 +70,9 @@ void save() {
     if (const char *e = getenv("VITART_PS2_AUDIO"); e && *e) iso = e;
     if (FILE *f = fopen(ini_path().c_str(), "w")) {
         fprintf(f, "# Opções do PC (mudam pelo menu de pausa do jogo: Options)\n");
-        fprintf(f, "hd_textures=%u\nps2_audio=%u\nresolution=%u\nfps=%s\nfps_counter=%u\nborderless=%u\n",
+        fprintf(f, "hd_textures=%u\nps2_audio=%u\nresolution=%u\nfps=%s\nvsync=%u\nfps_counter=%u\nborderless=%u\n",
                 g_opt.tex ? 1u : 0u, g_opt.audio ? 1u : 0u, g_opt.scale, g_opt.fps == 3 ? "max" : g_opt.fps == 2 ? "60" : "30",
-                g_opt.counter ? 1u : 0u, g_opt.borderless ? 1u : 0u);
+                g_opt.vsync ? 1u : 0u, g_opt.counter ? 1u : 0u, g_opt.borderless ? 1u : 0u);
         if (!iso.empty()) fprintf(f, "ps2_iso=%s\n", iso.c_str());
         fclose(f);
     }
@@ -87,6 +89,7 @@ void load() {
             if (sscanf(line, "fps=%u", &v) == 1) g_opt.fps = v == 60 ? 2 : v > 60 ? 3 : 1;
             if (!strncmp(line, "fps=max", 7)) g_opt.fps = 3;
             if (sscanf(line, "fps_counter=%u", &v) == 1) g_opt.counter = v != 0;
+            if (sscanf(line, "vsync=%u", &v) == 1) g_opt.vsync = v != 0;
             if (sscanf(line, "borderless=%u", &v) == 1) g_opt.borderless = v != 0;
             if (!strncmp(line, "ps2_iso=", 8)) {
                 g_iso = line + 8;
@@ -108,7 +111,7 @@ uint32_t encode() {
     const uint32_t aud = ps2audio_available() ? (g_opt.audio ? 2u : 1u) : 3u;
     uint32_t fps = g_opt.counter ? gvk::measured_fps() : 0;
     fps = fps > 127 ? 127 : fps; // a palavra passa por float no menu: até 2^24
-    return 0x10000u | tex | aud << 2 | cur_scale() << 4 | g_opt.fps << 7 | 1u << 9 |
+    return 0x10000u | tex | aud << 2 | cur_scale() << 4 | g_opt.fps << 7 | (g_opt.vsync ? 2u : 1u) << 9 |
            (g_opt.counter ? 2u : 1u) << 12 | (g_opt.borderless ? 2u : 1u) << 14 | fps << 17;
 }
 
@@ -137,6 +140,7 @@ void on_import(arc_ctx *ctx, uint32_t stub) {
     if (!std::strcmp(key, "fps")) g_req_fps = v;
     if (!std::strcmp(key, "cnt")) g_req_cnt = v;
     if (!std::strcmp(key, "dsp")) g_req_dsp = v;
+    if (!std::strcmp(key, "vsync")) g_req_vsync = v;
 }
 const bool g_watch = (watch_import(on_import), true);
 
@@ -181,8 +185,47 @@ void game_options_tick() {
         std::memcpy(&fb, &floor, 4);
         if (rd32(0x812b75d0) != fb) wr32(0x812b75d0, fb);
     }
-    // VITART_TIMEDUMP=1 (depuração): a estrutura de tempo do jogo a cada 2 s
+    // VITART_MEMSNAP="q1,q2,...": grava a memória global do jogo (0x81000000..0x81800000, só o mapeado) nos
+    // quadros pedidos, em memsnap_<quadro>.bin (diagnóstico)
+    if (const char *ms = getenv("VITART_MEMSNAP")) {
+        static uint32_t q = 0;
+        q++;
+        for (const char *e = ms; e && *e;) {
+            if ((uint32_t)std::atoi(e) == q) {
+                char path[64];
+                std::snprintf(path, sizeof path, "memsnap_%05u.bin", q);
+                if (FILE *f = fopen(path, "wb")) {
+                    std::vector<uint8_t> buf(0x800000, 0);
+                    for (uint32_t a = 0x81000000; a < 0x81800000;) {
+                        MEMORY_BASIC_INFORMATION mi{};
+                        if (!VirtualQuery(mem_base() + a, &mi, sizeof mi)) break;
+                        const uint32_t end = (uint32_t)std::min<uint64_t>(0x81800000ull, (uint64_t)((uint8_t *)mi.BaseAddress - mem_base()) + mi.RegionSize);
+                        if (mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+                            std::memcpy(&buf[a - 0x81000000], mem_base() + a, end - a);
+                        a = end;
+                    }
+                    fwrite(buf.data(), 1, buf.size(), f);
+                    fclose(f);
+                }
+            }
+            e = std::strchr(e, ',');
+            if (e) e++;
+        }
+    }
+    // VITART_TIMEDUMP=1 (depuração): a estrutura de tempo do jogo a cada 2 s e a soma do dt contra o relógio
     if (getenv("VITART_TIMEDUMP")) {
+        static double game_t = 0;
+        static uint32_t nframes = 0;
+        static auto t0 = std::chrono::steady_clock::now();
+        float dtv;
+        const uint32_t raw = rd32(0x812b75e0);
+        std::memcpy(&dtv, &raw, 4);
+        if (std::isfinite(dtv) && dtv > 0 && dtv < 1) game_t += dtv, nframes++;
+        const double real = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        if (real >= 10) {
+            logf("vitart: tempo do jogo %.2f s em %.2f s reais (%u quadros, razão %.3f)", game_t, real, nframes, game_t / real);
+            game_t = 0, nframes = 0, t0 = std::chrono::steady_clock::now();
+        }
         static uint32_t n = 0;
         if (n++ % 120 == 0) {
             char b[512];
@@ -193,7 +236,7 @@ void game_options_tick() {
                 std::memcpy(&f, &v, 4);
                 k += std::snprintf(b + k, sizeof b - k, " %x:%08x(%g)", a & 0xff, v, f);
             }
-            logf("vitart: tempo:%s", b);
+            logf("vitart: tempo: f4=%u a7cc=%u d8=%u a83c=%u a7d4=%u quadro %u", rd32(0x812b75f4), rd32(0x8163a7cc), rd32(0x812b75d8), rd32(0x8163a83c), rd32(0x8163a7d4), n), logf("vitart: profundidade no quadro: %u desenhos", gvk::last_frame_depth_writes());
         }
     }
     // 60 FPS: o jogo espera 2 vblanks por quadro e calcula dt = max(e8, clamp(tempo real em quadros, 1, 4)) / 60
@@ -208,13 +251,19 @@ void game_options_tick() {
             DEVMODEW dm{};
             dm.dmSize = sizeof dm;
             refresh = EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) ? dm.dmDisplayFrequency : 60;
-            if (refresh <= 61) refresh = 120;
+            if (refresh <= 61) refresh = 60; // VSync ligado: no máximo a taxa do monitor
             if (refresh > 240) refresh = 240;
         }
-        const uint32_t target = g_opt.fps == 3 ? refresh : 0;
+        // VSync desligado: sem limite (o jogo roda o mais rápido que der) e piso do dt em 1/3000 s;
+        // ligado: 30, 60 ou a taxa do monitor
+        const uint32_t target = !g_opt.vsync ? UINT32_MAX : g_opt.fps == 3 ? refresh : 0;
+        gvk::set_vsync(g_opt.vsync);
+        // 0x812bc0c0 = 1 no menu principal (0 na cena de abertura, nos vídeos e na jogatina; achado comparando
+        // a memória global nas fases): o menu anima por quadro, então nele o ritmo é o do jogo mesmo sem VSync
+        display_set_fixed_step_addr(0x812bc0c0);
         if (!getenv("VITART_FPS")) {
             display_set_fps_target(target);
-            const float floor = target > 60 ? 25.f : 0.f; // centésimos de quadro de 60 Hz
+            const float floor = target == UINT32_MAX ? 2.f : target > 60 ? 25.f : 0.f; // centésimos de quadro de 60 Hz
             uint32_t fb;
             std::memcpy(&fb, &floor, 4);
             if (rd32(0x812b75d0) != fb) wr32(0x812b75d0, fb);
@@ -253,6 +302,10 @@ void game_options_tick() {
     if (const uint32_t v = g_req_fps.exchange(0); v >= 1 && v <= 3 && v != g_opt.fps) {
         g_opt.fps = v, changed = true;
         logf("vitart: FPS %s", v == 3 ? "máximo" : v == 2 ? "60" : "30");
+    }
+    if (const uint32_t v = g_req_vsync.exchange(0); (v == 1 || v == 2) && (v == 2) != g_opt.vsync) {
+        g_opt.vsync = v == 2, changed = true;
+        logf("vitart: VSync %s", g_opt.vsync ? "ligado" : "desligado");
     }
     if (const uint32_t v = g_req_cnt.exchange(0); (v == 1 || v == 2) && (v == 2) != g_opt.counter) {
         g_opt.counter = v == 2, changed = true;

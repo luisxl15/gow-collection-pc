@@ -364,6 +364,8 @@ static std::atomic<bool> g_fps60{false};
 void display_set_fps60(bool on) { g_fps60 = on; }
 // FPS acima de 60 (game_options.cpp): o quadro sai a cada 1/fps s em vez de por vblanks.
 static std::atomic<uint32_t> g_fps_target{0};
+static std::atomic<uint32_t> g_fixed_step_addr{0}; // palavra = 1 no menu principal (GoW1: 0x812bc0c0)
+void display_set_fixed_step_addr(uint32_t a) { g_fixed_step_addr = a; }
 void display_set_fps_target(uint32_t fps) { g_fps_target = fps; }
 // Ritmo por prazo no laço principal do jogo (que chama esta função uma vez por quadro): o próximo quadro
 // sai 1/30 s (ou 1/60 s) depois do anterior. Esperar o próximo vblank da grade transformava um quadro de
@@ -374,7 +376,10 @@ static void wait_frame(uint32_t vblanks) {
     if (novsync) return;
     using clk = std::chrono::steady_clock;
     static clk::time_point last{};
-    const uint32_t fps = g_fps_target;
+    uint32_t fps = g_fps_target;
+    // menu principal (anima por quadro, não pelo tempo): ritmo do jogo original
+    if (fps > 60 && g_fixed_step_addr && rd32(g_fixed_step_addr) == 1) fps = 0, vblanks = 1;
+    if (fps == UINT32_MAX) return; // VSync desligado: sem limite de quadros
     const auto interval = fps > 60 ? std::chrono::duration_cast<clk::duration>(std::chrono::duration<double>(1.0 / fps))
                                    : std::chrono::duration_cast<clk::duration>(VBLANK * (vblanks ? vblanks : 1));
     const auto now = clk::now();

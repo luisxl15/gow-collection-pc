@@ -14,7 +14,7 @@
 namespace vt::pbr {
 
 struct Config {
-    bool enabled = true;          // liga a variante PBR
+    bool enabled = false;         // liga a variante PBR (desligado: o jogo fica com a imagem original)
     bool all_surfaces = false;    // também nas texturas sem material (material neutro)
     bool normal_opengl = false;   // normal maps com G = +V para cima (padrão OpenGL): inverte o verde
     float normal_strength = 1.0f; // força do normal map

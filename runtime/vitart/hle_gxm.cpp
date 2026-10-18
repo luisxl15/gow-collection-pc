@@ -846,7 +846,7 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
         }
         d.textures.push_back(t);
     }
-    if (c.vuniform)
+    if (c.vuniform && pbr::config().post)
         d.view_inv_ok = pbr::inv_projection(pbr_prog(vp->program).vi, ptr<float>(c.vuniform), vsize / 4, d.view_inv);
     // PBR: troca o fragmento pela variante PBR quando a textura difusa tem material, o vértice tem
     // projeção em perspectiva e a superfície é opaca.

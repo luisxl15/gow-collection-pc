@@ -155,7 +155,12 @@ int64_t video_bink_frame() {
     }
     if (now_ms() - g_video_read_ms > 500 || g_hbink_busy.exchange(true)) return -1;
     std::thread([gen, w, h, frames] {
+        const auto t0 = std::chrono::steady_clock::now();
         const uint32_t a = hbink_find(w, h, frames);
+        static int logged = 0;
+        if (logged++ < 40)
+            logf("vitart: busca do HBINK: %s em %.0f ms", a ? "achado" : "não achado",
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
         if (a) g_hbink_async = a, g_hbink_async_gen = gen;
         std::this_thread::sleep_for(std::chrono::milliseconds(a ? 0 : 200));
         g_hbink_busy = false;
