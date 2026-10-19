@@ -71,4 +71,4 @@ O runtime lê o ícone que o HUD está mostrando e aperta o botão (ou gira o an
 Toques a cerca de 14 por segundo (serve para os QTEs de repetir), "Hold" segurado, voltas a 2,5 por segundo.
 Diagnóstico: `VITART_QTELOG=1` registra cada ícone; `VITART_AUTO_QTE=1` liga sem o menu.
 
-A opção fica no bit 11 da palavra de estado do menu (`auto_qte=` no `vitart_options.ini`).
+A opção fica no bit 10 da palavra de estado do menu (`auto_qte=` no `vitart_options.ini`).
