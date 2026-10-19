@@ -108,6 +108,12 @@ uint32_t find_flp(const FlpTable &t) {
     return 0;
 }
 
+// "wad/_VitaTV/r_shella.wad_psp2" -> "r_shella.wad_psp2"
+std::string base_name(const std::string &n) {
+    const size_t k = n.find_last_of('/');
+    return k == std::string::npos ? n : n.substr(k + 1);
+}
+
 // O FLP continua no lugar: a primeira chave tem a original ou a de teclado.
 bool still_there(const FlpTable &t, uint32_t at) {
     const uint8_t *p = ptr<uint8_t>(at + t.swaps[0].off);
@@ -137,9 +143,14 @@ void worker() {
         for (size_t i = 0; i < tables.size(); i++) {
             if (where[i] && !still_there(tables[i], where[i])) where[i] = 0, applied[i] = -1;
             if (!where[i]) {
-                // procura a cada 4 s até achar um (o FLP do HUD é carregado no começo e fica; só um dos WADs, o
-                // portátil ou o de PS TV, é usado): depois de achado, nada de varrer a memória de novo
-                if (scans % 4 || std::any_of(where.begin(), where.end(), [](uint32_t w) { return w != 0; })) continue;
+                // procura a cada 2 s até achar (o FLP do HUD é carregado no começo e fica; só um dos WADs, o
+                // portátil ou o de PS TV, é usado): achada uma versão, a outra não é procurada. HUD e menu principal são
+                // FLPs diferentes e podem estar carregados juntos
+                if (scans % 8) continue; // a cada 2 s
+                bool twin = false;      // a outra versão (portátil / PS TV) do mesmo arquivo já está carregada
+                for (size_t j = 0; j < tables.size(); j++)
+                    twin |= j != i && where[j] && base_name(tables[j].name) == base_name(tables[i].name);
+                if (twin) continue;
                 const auto t0 = std::chrono::steady_clock::now();
                 where[i] = find_flp(tables[i]);
                 if (where[i])

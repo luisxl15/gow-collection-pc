@@ -159,6 +159,7 @@ VT_HLE(sceAudioOutOutput) {
 //   Ctrl esquerdo = L2 (mirar no 2018)         E = interagir (R2 no GoW1: baús, portas; R1 no GoW2)
 //   R = o outro R (R1 no GoW1, R2 no GoW2)     1 2 3 4 / setas = direcional (magias)
 //   Esc / Backspace = SELECT (pausa nos dois)  I / K / Tab / Enter = START (Power Up)
+//   C = L1+R1 no GoW2 (Amuleto das Moiras: congela o tempo)
 // Só com a janela do jogo em foco (o teclado é global no Windows). Controles (XInput, DualShock 4,
 // DualSense) em host_input.cpp, somados. O último usado decide os ícones dos botões (input_kbm_active).
 // Modo PS TV por padrão (o jogo tem caminho próprio, wad/_VitaTV, com L2/R2/L3/R3 no controle);
@@ -189,7 +190,7 @@ static KbmInput keyboard_mouse() {
         { VK_LCONTROL, 0x100 }, { 'E', g2 ? 0x800u : 0x200u }, { 'R', g2 ? 0x200u : 0x800u }, { 'V', 0x6 },
         { '1', 0x10 }, { '2', 0x20 }, { '3', 0x40 }, { '4', 0x80 }, { VK_UP, 0x10 }, { VK_RIGHT, 0x20 },
         { VK_DOWN, 0x40 }, { VK_LEFT, 0x80 }, { VK_ESCAPE, 0x1 }, { VK_BACK, 0x1 }, { 'I', 0x8 }, { 'K', 0x8 },
-        { VK_TAB, 0x8 }, { VK_RETURN, 0x8 },
+        { VK_TAB, 0x8 }, { VK_RETURN, 0x8 }, { 'C', g2 ? 0xC00u : 0u },
     };
     for (auto &m : map)
         if (down(m.vk)) k.buttons |= m.bit;

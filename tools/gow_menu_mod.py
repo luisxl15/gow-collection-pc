@@ -51,13 +51,13 @@ LINES = {
 }
 GAMES = {
     'gow1': dict(
-        state='PS2_Cheat', wad=(30, b'FLP_HUD'), nobody=(24,),
+        state='PS2_Cheat', wad=(30, b'FLP_HUD'), shell=(30, b'FLP_Shell'), nobody=(24,),
         new=[(5, 'tex'), (6, 'aud'), (7, 'res'), (8, 'fps'), (11, 'vsync'), (9, 'cnt'), (10, 'dsp'), (12, 'qte')],
         old={1: ('MusicVolume', 'A'), 2: ('SFXVolume', 'A'), 3: ('Controller', 'B'), 4: ('Return', 'B')},
         order=[1, 2, 5, 6, 7, 8, 11, 9, 10, 12, 3, 4], y=(-175.0, 175.0), frames=(7, 8, 9), kx=22, x_state='3',
         dyn_label=False),
     'gow2': dict(
-        state='PS2_OverUnder', wad=(1, b'FLP_HUDA'), nobody=(0, 24),  # tag 0: parâmetro (o tamanho é o valor)
+        state='PS2_OverUnder', wad=(1, b'FLP_HUDA'), shell=(1, b'FLP_ShellA'), nobody=(0, 24),  # tag 0: parâmetro (o tamanho é o valor)
         new=[(7, 'res'), (8, 'fps'), (9, 'vsync'), (10, 'cnt'), (11, 'dsp'), (12, 'qte')],
         old={1: ('MessageTips', 'A'), 2: ('MusicVolume', 'A'), 3: ('SFXVolume', 'A'), 4: ('Controller', 'B'),
              5: ('FlightControls', 'A'), 6: ('Return', 'B')},
@@ -635,6 +635,19 @@ def main():
             if dump:
                 os.makedirs(dump, exist_ok=True)
                 open(os.path.join(dump, name.replace('/', '_') + '.flp'), 'wb').write(new_flp)
+        # menu principal (Shell): só os ícones de teclado
+        stag, sname = CFG['shell']
+        for name in ('wad/r_shella.wad_psp2', 'wad/_VitaTV/r_shella.wad_psp2'):
+            w = P.read_file(fh, ents[names.index(name) + 1], zs, block)
+            f = flp.FLP(wad_get(w, sname, stag))
+            swaps = kbm_flp.add_kbm_icons(f, GAME, LO)
+            new_flp = f.write()
+            nw = wad_replace(w, sname, new_flp, stag)
+            if (len(nw) + block - 1) // block > (len(w) + block - 1) // block:
+                print('%s: sem espaço para os ícones de teclado' % name)
+                continue
+            files[name] = nw
+            kbm.append((name, new_flp, kbm_flp.locate(new_flp, swaps)))
     build_patch(psarc, files, out)
     write_kbm(kbm, out[:-len('.vtpatch')] + '.kbm.tsv' if out.endswith('.vtpatch') else out + '.kbm.tsv')
 

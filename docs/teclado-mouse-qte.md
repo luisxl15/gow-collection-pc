@@ -23,6 +23,10 @@ Vita (modo PS TV):
 | 1 2 3 4, setas | direcional | escolher magia, menus |
 | Esc, Backspace | SELECT | pausa (nos dois jogos) |
 | I, K, Tab, Enter | START | Power Up |
+| C (GoW2) | L1 + R1 | Amuleto das Moiras (congela o tempo) |
+
+No GoW2 o Espaço segurado no ar plana com as asas de Ícaro, Q defende/reflete com o Golden Fleece e, no
+Pégaso, Q/E são os avanços para os lados.
 
 O teclado só vale com a janela do jogo em foco. O mouse como toque na tela continua no menu da coletânea e
 no menu principal; dentro do jogo o botão esquerdo é só o ataque.

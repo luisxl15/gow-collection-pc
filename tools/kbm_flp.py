@@ -123,13 +123,15 @@ def add_kbm_icons(f, game, lo):
     h_hidden = mesh_for('E')
     t_zero = _new_xf(f, 0, 0, 0, 0)
     swaps = []
-    sym_label = {}  # malha do símbolo -> rótulo
+    pair_label = {}  # (alça do 1º elemento, alça do 2º) de um ícone da biblioteca -> rótulo
     done_clips = {f.handlers[h][1] for h in clips.values()}
     for name, h in sorted(clips.items()):
         c = f.c7[f.handlers[h][1]]
         if c.frames != 1 or c.labels or not c.anims:
             continue  # só os de um quadro, sem scripts (os animados ficam como estão)
         text = labels[name]
+        if len(c.anims) >= 2:  # fundo + símbolo deste ícone: as cópias soltas usam o mesmo par (ver abaixo)
+            pair_label.setdefault(tuple(struct.unpack_from('<H', c.anims[i][1][0], 2)[0] for i in (0, 1)), text)
         if PROBE and name in PROBE:  # medição das células do atlas da fonte (glifos acentuados)
             text = PROBE[name]
         bg = _first_mesh(f, h)
@@ -180,37 +182,109 @@ def add_kbm_icons(f, game, lo):
             hh, tt = targets[n] if n < len(targets) else (h_hidden, t_zero)
             struct.pack_into('<HH', kb, 2, hh, tt)
             swaps.append((name, bytes(k0), bytes(kb)))
-        if len(c.anims) >= 2:  # símbolo deste ícone (2º elemento) -> rótulo, para achar as cópias soltas abaixo
-            hs = struct.unpack_from('<H', c.anims[1][1][0], 2)[0]
-            if hs < len(f.handlers) and f.handlers[hs][0] == 1:
-                sym_label.setdefault(hs, text)
-    # cópias soltas dos ícones (GoW1: as dicas "X = Select" da pausa são clipes com o disco, o símbolo e o texto,
-    # sem usar o clipe da biblioteca): o disco vira o ícone desenhado e o símbolo some
+    # cópias soltas dos ícones: clipes que repetem o par (fundo, símbolo) de um ícone da biblioteca sem usar o clipe
+    # dela -- as dicas "X = Select" da pausa do GoW1, as abas "L1 Power Up R1"... Toda chave do fundo (em qualquer
+    # quadro, para seguir as animações) vira o ícone desenhado na posição e escala dela; toda chave do símbolo some.
     for ci, c in enumerate(f.c7):
-        if ci in done_clips or c.frames != 1 or c.labels:
+        if ci in done_clips:
             continue
-        k0s = [next((kk for kk in keys if struct.unpack_from('<H', kk, 0)[0] == 0), None) for _, keys in c.anims]
-        hds = [struct.unpack_from('<H', kk, 2)[0] if kk is not None else None for kk in k0s]
-        for n in range(len(hds) - 1):
-            if hds[n] != disc[0] or hds[n + 1] not in sym_label:
-                continue
-            g = kbm_atlas.ICON_GLYPH.get(sym_label[hds[n + 1]])
+        first = [struct.unpack_from('<H', keys[0], 2)[0] if keys else None for _, keys in c.anims]
+        for n in range(len(first) - 1):
+            text = pair_label.get((first[n], first[n + 1]))
+            g = kbm_atlas.ICON_GLYPH.get(text) if text else None
             if g is None:
                 continue
-            a_, d_, cx, cy = _xf(f, struct.unpack_from('<H', k0s[n], 4)[0])
-            k = (a_ + d_) / 2
             u0, u1, v0, v1 = kbm_atlas.CELLS[g]
-            m = ICON_H * k / ((v1 - v0) * 2.16)
-            wq, hq = (u1 - u0) * 2.16 * m, (v1 - v0) * 2.16 * m
             ch = next(chr(cc) for cc, gg in enumerate(font.cmap) if gg == g)
-            for kk, (hh, tt) in ((k0s[n], (mesh_for(ch), _new_xf(f, m, m, cx - wq / 2, cy + hq / 2))),
-                                 (k0s[n + 1], (h_hidden, t_zero))):
-                t_own = struct.unpack_from('<H', kk, 4)[0]
-                f.xforms.append(bytearray(f.xforms[t_own if t_own < len(f.xforms) else 0]))
-                struct.pack_into('<H', kk, 4, len(f.xforms) - 1)
-                kb = bytearray(kk)
-                struct.pack_into('<HH', kb, 2, hh, tt)
-                swaps.append(('clipe %d' % ci, bytes(kk), bytes(kb)))
+            for idx, hsrc in ((n, first[n]), (n + 1, first[n + 1])):
+                for kk in c.anims[idx][1]:
+                    if struct.unpack_from('<H', kk, 2)[0] != hsrc:
+                        continue  # chave de remoção ou de outro elemento
+                    t_own = struct.unpack_from('<H', kk, 4)[0]
+                    if idx == n:  # fundo -> ícone, centrado no fundo e na escala dele
+                        a_, d_, cx, cy = _xf(f, t_own)
+                        k = (a_ + d_) / 2
+                        m = ICON_H * k / ((v1 - v0) * 2.16)
+                        wq, hq = (u1 - u0) * 2.16 * m, (v1 - v0) * 2.16 * m
+                        target = (mesh_for(ch), _new_xf(f, m, m, cx - wq / 2, cy + hq / 2))
+                    else:
+                        target = (h_hidden, t_zero)
+                    f.xforms.append(bytearray(f.xforms[t_own if t_own < len(f.xforms) else 0]))
+                    struct.pack_into('<H', kk, 4, len(f.xforms) - 1)
+                    kb = bytearray(kk)
+                    struct.pack_into('<HH', kb, 2, *target)
+                    swaps.append(('clipe %d %s' % (ci, text), bytes(kk), bytes(kb)))
+    # botões de ombro escritos como texto, fora da biblioteca (abas "L1 Power Up R1"):
+    #  - GoW2: textos dinâmicos /:StaticTextL1, R1, L2, R2 -> ícone no centro da caixa do texto
+    #  - GoW1: clipes "L1"/"R1" com o escudo (malha, o "1" vem na textura) e a letra (rótulo) -> ícone no lugar do
+    #    escudo, a letra some
+    def icon_target(text, cx, cy, h):
+        g = kbm_atlas.ICON_GLYPH.get(text)
+        if g is None:
+            return None
+        u0, u1, v0, v1 = kbm_atlas.CELLS[g]
+        m = h / ((v1 - v0) * 2.16)
+        wq, hq = (u1 - u0) * 2.16 * m, (v1 - v0) * 2.16 * m
+        ch = next(chr(cc) for cc, gg in enumerate(font.cmap) if gg == g)
+        return mesh_for(ch), _new_xf(f, m, m, cx - wq / 2, cy + hq / 2)
+
+    def swap_key(kk, target, why):
+        t_own = struct.unpack_from('<H', kk, 4)[0]
+        f.xforms.append(bytearray(f.xforms[t_own if t_own < len(f.xforms) else 0]))
+        struct.pack_into('<H', kk, 4, len(f.xforms) - 1)
+        kb = bytearray(kk)
+        struct.pack_into('<HH', kb, 2, *target)
+        swaps.append((why, bytes(kk), bytes(kb)))
+
+    shoulder = {'/:StaticText' + b: labels.get(b + 'Button') for b in ('L1', 'R1', 'L2', 'R2')}
+    dyn_label = {}
+    for hi, (t, i) in enumerate(f.handlers):
+        if t == 5:
+            v = f.s(struct.unpack_from('<H', f.dyns[i], 0)[0])
+            if shoulder.get(v):
+                dyn_label[hi] = (shoulder[v], f.dyns[i])
+    for ci, c in enumerate(f.c7):
+        if ci in done_clips:
+            continue
+        for _, keys in c.anims:
+            for kk in keys:
+                hd = struct.unpack_from('<H', kk, 2)[0]
+                if hd not in dyn_label:
+                    continue
+                text, d = dyn_label[hd]
+                bx, by, bw, bh = struct.unpack_from('<hhHH', d, 0x16)
+                a_, d_, tx, ty = _xf(f, struct.unpack_from('<H', kk, 4)[0])
+                tgt = icon_target(text, tx + a_ * (bx + bw / 2) / 16, ty + d_ * (by + bh / 2) / 16,
+                                  struct.unpack_from('<H', d, 6)[0] / 16 * 1.25 * (a_ + d_) / 2)
+                if tgt:
+                    swap_key(kk, tgt, 'texto %s' % text)
+    for c in [f.root] + f.c7:
+        for _, keys in c.anims:
+            k0 = keys[0]
+            nm = struct.unpack_from('<H', k0, 8)[0]
+            if nm == 0xffff or f.s(nm) not in ('L1', 'R1'):
+                continue
+            hc = struct.unpack_from('<H', k0, 2)[0]
+            if hc >= len(f.handlers) or f.handlers[hc][0] != 7 or f.handlers[hc][1] in done_clips:
+                continue
+            cc = f.c7[f.handlers[hc][1]]
+            kinds = [f.handlers[struct.unpack_from('<H', kk[0], 2)[0]][0] for _, kk in cc.anims]
+            if kinds != [1, 4]:
+                continue
+            text = labels.get(f.s(nm) + 'Button')
+            done_clips.add(f.handlers[hc][1])
+            k_mesh, k_letter = cc.anims[0][1][0], cc.anims[1][1][0]
+            # centro de "L1": a letra (linha de base em 0,85 da escala) e o "1" logo à direita
+            st = f.statics[f.handlers[struct.unpack_from('<H', k_letter, 2)[0]][1]]
+            sc = st.cmds[0].get('scale', 400)
+            a_, d_, lx, ly = _xf(f, struct.unpack_from('<H', k_letter, 4)[0])
+            hx, hy = struct.unpack_from('<hh', st.h, 0x14 if f.g2 else 0x10)  # posição própria do rótulo (1/16)
+            lx, ly = lx + hx / 16, ly + hy / 16
+            adv = sum(w for c2 in st.cmds for _, w in c2['glyphs']) / 16
+            tgt = icon_target(text, lx + adv, ly + sc * 0.5 / 16, sc * 0.9 / 16 * 2.2)
+            if tgt:
+                swap_key(k_mesh, tgt, 'escudo %s' % text)
+                swap_key(k_letter, (h_hidden, t_zero), 'escudo %s' % text)
     return swaps
 
 
