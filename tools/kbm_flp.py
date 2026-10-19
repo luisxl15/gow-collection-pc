@@ -274,14 +274,10 @@ def add_kbm_icons(f, game, lo):
             text = labels.get(f.s(nm) + 'Button')
             done_clips.add(f.handlers[hc][1])
             k_mesh, k_letter = cc.anims[0][1][0], cc.anims[1][1][0]
-            # centro de "L1": a letra (linha de base em 0,85 da escala) e o "1" logo à direita
-            st = f.statics[f.handlers[struct.unpack_from('<H', k_letter, 2)[0]][1]]
-            sc = st.cmds[0].get('scale', 400)
-            a_, d_, lx, ly = _xf(f, struct.unpack_from('<H', k_letter, 4)[0])
-            hx, hy = struct.unpack_from('<hh', st.h, 0x14 if f.g2 else 0x10)  # posição própria do rótulo (1/16)
-            lx, ly = lx + hx / 16, ly + hy / 16
-            adv = sum(w for c2 in st.cmds for _, w in c2['glyphs']) / 16
-            tgt = icon_target(text, lx + adv, ly + sc * 0.5 / 16, sc * 0.9 / 16 * 2.2)
+            # centro da bola do escudo: (+2, -1) a partir da origem da malha (medido na captura: as duas abas a 205
+            # unidades uma da outra e 367 px na tela); altura do ícone ~ a da bola
+            a_, d_, mx, my = _xf(f, struct.unpack_from('<H', k_mesh, 4)[0])
+            tgt = icon_target(text, mx + 2 * a_, my - 1 * d_, 56 * (a_ + d_) / 2)
             if tgt:
                 swap_key(k_mesh, tgt, 'escudo %s' % text)
                 swap_key(k_letter, (h_hidden, t_zero), 'escudo %s' % text)
