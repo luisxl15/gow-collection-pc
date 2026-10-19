@@ -248,6 +248,7 @@ struct TexEntry {
     bool kbm_alt = false;     // há versão de teclado e mouse (texpack_kbm) desta textura
     bool kbm_mode = false;    // modo de ícones com que foi montada (refeita quando o modo muda)
     bool kbm_used = false;    // o PNG em uso é o de teclado e mouse (outra textura na GPU)
+    uint64_t qhash = 0;       // hash rápido (amostras) da última verificação completa
 };
 
 // Pack de texturas (vitart-data/texpack/*/index.tsv, montado por tools/texpack_build.py a partir de um
@@ -296,7 +297,10 @@ static void texpack_load() {
         }
         if (n) logf("vitart: pack de texturas %s: %zu texturas", dir.path().filename().string().c_str(), n);
     }
-    for (auto &dir : std::filesystem::directory_iterator(std::filesystem::path(data_path()) / "texpack_kbm", ec)) {
+    // VITART_TEXKBM_DIR (testes): outra pasta de ícones de teclado, sem mexer na instalada
+    const char *kd = getenv("VITART_TEXKBM_DIR");
+    const std::filesystem::path kroot = kd && *kd ? std::filesystem::path(kd) : std::filesystem::path(data_path()) / "texpack_kbm";
+    for (auto &dir : std::filesystem::directory_iterator(kroot, ec)) {
         std::ifstream f(dir.path() / "index.tsv");
         std::string line;
         size_t n = 0;
@@ -515,6 +519,19 @@ static uint64_t content_hash(const uint8_t *p, size_t n, uint64_t h) {
         h ^= h >> 29;
     }
     for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
+    return h;
+}
+// Hash rápido do conteúdo: descritor, paleta, primeiros e últimos 2 KB e 64 trechos de 64 bytes espalhados.
+// Conferir todos os bytes de todas as texturas a cada quadro custava ~2 ms no GoW2 (centenas de texturas por
+// quadro); o completo agora roda a cada 16 quadros por textura, escalonado (ver o uso abaixo).
+static uint64_t quick_hash(const uint32_t *desc, const uint8_t *p, size_t n, const uint8_t *pal) {
+    uint64_t h = content_hash(reinterpret_cast<const uint8_t *>(desc), 16, 1469598103934665603ull);
+    if (pal) h = content_hash(pal, 1024, h);
+    if (n <= 8192) return content_hash(p, n, h);
+    h = content_hash(p, 2048, h);
+    h = content_hash(p + n - 2048, 2048, h);
+    const size_t step = (n - 4096) / 64;
+    for (size_t i = 0; i < 64; i++) h = content_hash(p + 2048 + i * step, 64, h);
     return h;
 }
 static uint64_t g_vk_draws = 0, g_vk_skipped = 0, g_pbr_draws = 0;
@@ -865,9 +882,17 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
             if (e.checked != frame) {
                 e.checked = frame;
                 const size_t n = gxmtex::data_size(info);
-                uint64_t h = content_hash(reinterpret_cast<const uint8_t *>(w.data()), 16, 1469598103934665603ull);
-                if (n) h = content_hash(ptr<uint8_t>(info.data), n, h);
-                if (info.base == 0x95000000u) h = content_hash(ptr<uint8_t>(info.palette), 1024, h);
+                const uint8_t *pal = info.base == 0x95000000u ? ptr<uint8_t>(info.palette) : nullptr;
+                // amostras a cada quadro; todos os bytes a cada 16 quadros (fase pelo endereço: não caem juntas)
+                const uint64_t q = n ? quick_hash(w.data(), ptr<uint8_t>(info.data), n, pal) : 0;
+                const bool full = !e.px || q != e.qhash || ((frame + (info.data >> 8)) & 15) == 0;
+                uint64_t h = e.hash;
+                if (full) {
+                    h = content_hash(reinterpret_cast<const uint8_t *>(w.data()), 16, 1469598103934665603ull);
+                    if (n) h = content_hash(ptr<uint8_t>(info.data), n, h);
+                    if (pal) h = content_hash(pal, 1024, h);
+                }
+                e.qhash = q;
                 const bool kbm_now = input_kbm_active();
                 if (!e.px || h != e.hash || (e.kbm_alt && e.kbm_mode != kbm_now)) {
                     auto px = std::make_shared<std::vector<uint8_t>>();

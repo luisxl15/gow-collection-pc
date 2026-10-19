@@ -25,13 +25,16 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import flp  # noqa: E402
+import kbm_flp  # noqa: E402
 import psarc_gxp as P  # noqa: E402
 
 # Estado de todas as opções num número só, na variável PS2_Cheat (campo +0x2bc do objeto de opções,
-# sem tratador no jogo): 0x10000 | textura | áudio << 2 | resolução << 4 | fps << 7 | vsync << 9 | QTE automático << 11
-# (um bit: 0 Off, 1 On; o menu o lê como 1/2, igual aos outros) | contador << 12 | modo << 14.
+# sem tratador no jogo): 0x10000 | textura | áudio << 2 | resolução << 4 | fps << 7 | vsync << 9 | QTE automático << 10 |
+# contador << 11 | modo << 12 | teclado em uso << 13 | FPS medidos << 17. As alternâncias têm um bit (0/1) e o menu as
+# lê como 1/2; o bit 13 é lido pelos ícones dos botões (kbm_flp.py).
 # Ver runtime/vitart/game_options.cpp.
-FIELDS = [('_level0/:VtDsp', 16384, 3), ('_level0/:VtCnt', 4096, 3), ('_level0/:VtQte', 2048, 1), ('_level0/:VtVsync', 512, 3), ('_level0/:VtFps', 128, 3), ('_level0/:VtRes', 16, 7),
+FIELDS = [('_level0/:VtKbm', 8192, 1), ('_level0/:VtDsp', 4096, 1), ('_level0/:VtCnt', 2048, 1), ('_level0/:VtQte', 1024, 1),
+          ('_level0/:VtVsync', 512, 1), ('_level0/:VtFps', 128, 3), ('_level0/:VtRes', 16, 7),
           ('_level0/:VtAud', 4, 3), ('_level0/:VtTex', 1, 3)]
 RES_TEXT = {1: '1x  (960x544)', 2: '2x  (1920x1088)', 3: '3x  (2880x1632)', 4: '4x  (3840x2176)'}
 FPS_TEXT = {1: '30 FPS', 2: '60 FPS', 3: 'Max FPS'}  # Max: taxa do monitor; VSync Off: sem limite (patch_gow*_dt.py)
@@ -86,6 +89,7 @@ def configure(game):
 
 
 configure('gow1')
+LAST_KBM = []  # trocas dos ícones de teclado do último FLP escrito (mod_flp)
 VALUE_RISE = 25.0  # unidades da linha
 ST = 'PauseOptions_State'
 
@@ -194,13 +198,13 @@ def show_script(f):
             a.label('m%s%d' % (name, v))
         a.setv(name, 0)
         a.label('f' + name)
-    # QTE automático: um bit (0/1) na palavra -> 1/2 como as outras alternâncias
-    q = '_level0/:VtQte'
-    a.getv(q).push(1).eq().not_().jumpif('q0')
-    a.setv(q, 2).jump('q1')
-    a.label('q0')
-    a.setv(q, 1)
-    a.label('q1')
+    # alternâncias: um bit (0/1) na palavra -> 1/2 como o menu usa
+    for q in ('_level0/:VtQte', '_level0/:VtVsync', '_level0/:VtCnt', '_level0/:VtDsp'):
+        a.getv(q).push(1).eq().not_().jumpif('q0' + q)
+        a.setv(q, 2).jump('q1' + q)
+        a.label('q0' + q)
+        a.setv(q, 1)
+        a.label('q1' + q)
     a.callframe('/:VtOptTexts').end()
     return flp.encode(f, a.build())
 
@@ -343,7 +347,7 @@ def handler(f, typ, idx):
     return len(f.handlers) - 1
 
 
-def mod_flp(b):
+def mod_flp(b, icons=True):
     f = flp.FLP(b)
     pm = f.c7[obj(f, named(f.root, f, 'PauseMenu'), 7)]
     sfx = f.c7[obj(f, named(pm, f, 'SFXVolume'), 7)]  # linha SFX Volume
@@ -502,6 +506,9 @@ def mod_flp(b):
             return a.build(base=at, extern={'orig': at + n, 'fim': end + n})
         return mk
 
+    # ---- ícones dos botões com as teclas quando o teclado/mouse está em uso
+    swaps = kbm_flp.add_kbm_icons(f, GAME, LO) if icons else []
+
     patch_script(f, script_of(root, f, 'PressUp'), '1', call_then_end('/:VtNavUp'))
     patch_script(f, script_of(root, f, 'PressDown'), '1', call_then_end('/:VtNavDown'))
     patch_script(f, script_of(root, f, 'PressLeft'), '1', guarded('/:VtLeft'))
@@ -521,7 +528,10 @@ def mod_flp(b):
     opt = script_of(pm, f, 'Options')
     ins, _ = flp.decode(f, opt[1])
     opt[1] = flp.encode(f, flp.insert(ins, 0, flp.Asm().callframe('/:VtOptShow').build(base=0)))
-    return f.write()
+    out = f.write()
+    global LAST_KBM
+    LAST_KBM = kbm_flp.locate(out, swaps)  # [(nome, posição no FLP, chave original, chave de teclado)]
+    return out
 
 
 # ---------------------------------------------------------------- WAD e psarc
@@ -606,6 +616,7 @@ def main():
     configure('gow2' if 'gow2' in os.path.basename(psarc).lower() else 'gow1')
     rtag, rname = CFG['wad']
     files = {}
+    kbm = []  # trocas dos ícones por arquivo (runtime/vitart/kbm_icons.cpp)
     with open(psarc, 'rb') as fh:
         ents, zs, block = P.entries(fh)
         names = P.read_file(fh, ents[0], zs, block).decode('latin1').split('\n')
@@ -613,10 +624,33 @@ def main():
             w = P.read_file(fh, ents[names.index(name) + 1], zs, block)
             new_flp = mod_flp(wad_get(w, rname, rtag))
             files[name] = wad_replace(w, rname, new_flp, rtag)
+            if (len(files[name]) + block - 1) // block > (len(w) + block - 1) // block:
+                # o patch não pode crescer em blocos do psarc: sem os ícones de teclado (o WAD portátil do GoW2
+                # passa por ~3 KB; o modo PS TV, o padrão do vitart, usa o _VitaTV)
+                print('%s: sem espaço para os ícones de teclado' % name)
+                new_flp = mod_flp(wad_get(w, rname, rtag), icons=False)
+                files[name] = wad_replace(w, rname, new_flp, rtag)
+            if LAST_KBM:
+                kbm.append((name, new_flp, LAST_KBM))
             if dump:
                 os.makedirs(dump, exist_ok=True)
                 open(os.path.join(dump, name.replace('/', '_') + '.flp'), 'wb').write(new_flp)
     build_patch(psarc, files, out)
+    write_kbm(kbm, out[:-len('.vtpatch')] + '.kbm.tsv' if out.endswith('.vtpatch') else out + '.kbm.tsv')
+
+
+def write_kbm(kbm, path):
+    """Tabela dos ícones de teclado para o vitart: por FLP, uma assinatura (32 bytes antes da 1ª chave + ela) e
+    as trocas 'posição chave_original chave_de_teclado nome' (posições relativas ao início do FLP)."""
+    with open(path, 'w', encoding='utf-8') as fo:
+        fo.write('# ícones de teclado e mouse do HUD (tools/kbm_flp.py, lido por runtime/vitart/kbm_icons.cpp)\n')
+        for name, data, swaps in kbm:
+            first = min(o for _, o, _, _ in swaps)
+            a = max(0, first - 32)
+            fo.write('flp %s %d %s\n' % (name, a, data[a:first + 10].hex()))
+            for nm, o, ps, kb in swaps:
+                fo.write('%d %s %s %s\n' % (o, ps.hex(), kb.hex(), nm))
+    print('%s: %d trocas de ícones' % (path, sum(len(x[2]) for x in kbm)))
 
 
 if __name__ == '__main__':

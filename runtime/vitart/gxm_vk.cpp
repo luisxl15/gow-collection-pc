@@ -792,6 +792,7 @@ bool vertex_format_ok(uint32_t fmt, uint32_t comps) {
 
 static bool g_resized = false, g_fullscreen = false;
 static std::atomic<bool> g_vsync{true};
+static std::atomic<bool> g_fifo{false}; // VSync de verdade: a apresentação espera o vblank do monitor
 static WINDOWPLACEMENT g_place{sizeof(WINDOWPLACEMENT)};
 // F11 ou Alt+Enter: tela cheia sem bordas no monitor da janela (e volta ao lugar anterior).
 static void toggle_fullscreen(HWND h) {
@@ -819,8 +820,9 @@ void set_borderless(bool on) { g_want_borderless = on ? 1 : 0; }
 // a jogatina e as cenas em tempo real têm centenas. O ritmo sem VSync usa isso (hle_sys.cpp).
 static std::atomic<uint32_t> g_dw_frame{0}, g_dw_last{0};
 uint32_t last_frame_depth_writes() { return g_dw_last; }
-void set_vsync(bool on) {
-    if (g_vsync.exchange(on) != on) g_resized = true; // a swapchain é refeita no próximo present
+void set_vsync(bool on, bool fifo) {
+    const bool a = g_vsync.exchange(on) != on, b = g_fifo.exchange(fifo) != fifo;
+    if (a || b) g_resized = true; // a swapchain é refeita no próximo present
 }
 bool is_borderless() { return g_fullscreen; }
 
@@ -881,7 +883,10 @@ static bool create_swapchain() {
         vkGetPhysicalDeviceSurfacePresentModesKHR(g_phys, g_surface, &nm, modes.data());
         // VSync desligado (menu de pausa): imediato, sem esperar o vblank (pode rasgar a imagem); sem ele no
         // driver, mailbox.
+        // VSync com FPS máximo: FIFO, o monitor dita o ritmo (com o mailbox e o relógio do vitart a 1/taxa os dois
+        // relógios se desencontravam e um quadro repetia de tempos em tempos -- engasgo visível sem travada no log).
         std::vector<VkPresentModeKHR> pref = {VK_PRESENT_MODE_MAILBOX_KHR};
+        if (g_fifo && g_vsync && !getenv("VITART_NOVSYNC")) pref.clear(); // FIFO, o padrão acima
         if (getenv("VITART_NOVSYNC") || !g_vsync) pref.insert(pref.begin(), VK_PRESENT_MODE_IMMEDIATE_KHR);
         for (VkPresentModeKHR m : pref)
             if (std::find(modes.begin(), modes.end(), m) != modes.end()) {

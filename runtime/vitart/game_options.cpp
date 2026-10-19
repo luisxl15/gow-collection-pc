@@ -13,11 +13,11 @@
 //     graváveis têm tratadores no jogo -- SoundMode reconfigura o som e esgotou a memória de vídeo,
 //     WideScreen mexe na proporção -- e a PS2_Cheat é só de leitura.)
 //
-// Palavra de estado: 0x10000 | textura | áudio << 2 | resolução << 4 | fps << 7 | proporção << 9 |
-// contador de FPS << 12 (1 Off, 2 On) | modo de exibição << 14 (1 janela, 2 sem bordas) | FPS medidos << 17 (0 com o contador desligado; o clipe do
-// contador no HUD, no estilo do contador de HITS, mostra esse número).
-// Texturas e áudio: 1 Off, 2 On, 3 indisponível. Resolução: 1..4 (escala interna). FPS: 1 = 30, 2 = 60.
-// Proporção: reservada (1 = 16:9). QTE automático << 11 (0 Off, 1 On: um bit, o único livre abaixo do 16). As escolhas ficam em <dados>/vitart_options.ini.
+// Palavra de estado: 0x10000 | textura | áudio << 2 | resolução << 4 | fps << 7 | vsync << 9 | QTE automático << 10 |
+// contador de FPS << 11 | modo de exibição << 12 (sem bordas) | teclado/mouse em uso << 13 (os ícones dos botões trocam
+// pelas teclas, tools/kbm_flp.py) | FPS medidos << 17 (0 com o contador desligado; o clipe do contador no HUD mostra esse
+// número). As alternâncias têm um bit (0 Off, 1 On). Texturas e áudio: 1 Off, 2 On, 3 indisponível. Resolução: 1..4
+// (escala interna). FPS: 1 = 30, 2 = 60, 3 = máximo. As escolhas ficam em <dados>/vitart_options.ini.
 #include "vitart.h"
 #include <cmath>
 #include <vector>
@@ -43,6 +43,8 @@ bool ps2audio_available();
 void display_set_fps60(bool on);
 void display_set_fps_target(uint32_t fps);
 void display_set_fixed_step_addr(uint32_t a);
+bool input_kbm_active(); // hle_sys.cpp: o último controle usado foi o teclado/mouse
+void kbm_icons_start();
 
 namespace {
 
@@ -123,8 +125,9 @@ uint32_t encode() {
     const uint32_t aud = g1 && ps2audio_available() ? (g_opt.audio ? 2u : 1u) : 3u;
     uint32_t fps = g_opt.counter ? gvk::measured_fps() : 0;
     fps = fps > 127 ? 127 : fps; // a palavra passa por float no menu: até 2^24
-    return 0x10000u | tex | aud << 2 | cur_scale() << 4 | g_opt.fps << 7 | (g_opt.vsync ? 2u : 1u) << 9 | (g_opt.auto_qte ? 1u : 0u) << 11 |
-           (g_opt.counter ? 2u : 1u) << 12 | (g_opt.borderless ? 2u : 1u) << 14 | fps << 17;
+    return 0x10000u | tex | aud << 2 | cur_scale() << 4 | g_opt.fps << 7 | (g_opt.vsync ? 1u : 0u) << 9 |
+           (g_opt.auto_qte ? 1u : 0u) << 10 | (g_opt.counter ? 1u : 0u) << 11 | (g_opt.borderless ? 1u : 0u) << 12 |
+           (input_kbm_active() ? 1u : 0u) << 13 | fps << 17;
 }
 
 bool is_gow1();
@@ -190,6 +193,7 @@ void game_options_tick() {
     if (!inited) {
         inited = true;
         game_options_init();
+        kbm_icons_start(); // ícones de teclado no HUD (kbm_icons.cpp)
     }
     // F11 / Alt+Enter também mudam o modo de exibição: a escolha acompanha (vale em todos os módulos)
     static bool applied_borderless = g_opt.borderless;
@@ -270,14 +274,17 @@ void game_options_tick() {
         }
         // VSync desligado: sem limite (o jogo roda o mais rápido que der) e piso do dt em 1/3000 s;
         // ligado: 30, 60 ou a taxa do monitor
-        uint32_t target = !g_opt.vsync ? UINT32_MAX : g_opt.fps == 3 ? refresh : 0;
+        // VSync com FPS máximo: a apresentação em FIFO espera o vblank do monitor e dá o ritmo sozinha (um limite por
+        // software na mesma taxa brigava com o do monitor); 30/60 continuam pelo relógio do vitart (60 não divide 74 Hz)
+        const bool fifo = g_opt.vsync && g_opt.fps == 3 && !getenv("VITART_NOFIFO");
+        uint32_t target = !g_opt.vsync || fifo ? UINT32_MAX : g_opt.fps == 3 ? refresh : 0;
         if (const char *e = getenv("VITART_FPS")) target = (uint32_t)std::atoi(e); // teste
-        gvk::set_vsync(g_opt.vsync);
+        gvk::set_vsync(g_opt.vsync, fifo);
         // o menu principal anima por quadro, não pelo tempo: nele o ritmo é o do jogo mesmo sem VSync
         // (GoW1: 0x812bc0c0 = 1 só no menu principal, achado comparando a memória global nas fases)
         display_set_fixed_step_addr(tp->menu);
         display_set_fps_target(target);
-        const float floor = target == UINT32_MAX ? 2.f : target > 60 ? 25.f : 0.f; // centésimos de quadro de 60 Hz
+        const float floor = fifo ? 25.f : target == UINT32_MAX ? 2.f : target > 60 ? 25.f : 0.f; // centésimos de quadro de 60 Hz
         uint32_t fb;
         std::memcpy(&fb, &floor, 4);
         if (rd32(tp->floor) != fb) wr32(tp->floor, fb);
