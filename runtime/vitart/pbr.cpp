@@ -17,6 +17,10 @@
 #include <thread>
 #include <unordered_map>
 
+namespace vt {
+int game_id(); // game_options.cpp
+}
+
 namespace vt::pbr {
 void drop_all();
 
@@ -186,10 +190,14 @@ std::unordered_map<uint64_t, Files> g_index;
 void index_load() {
     static bool done = false;
     if (done) return;
+    const int game = vt::game_id(); // só os materiais do jogo em execução (como o pack de texturas)
+    if (!game) return;
     done = true;
+    const std::string want = game == 1 ? "gow1" : "gow2";
     std::error_code ec;
     const std::filesystem::path root = std::filesystem::path(data_path()) / "pbr";
     for (auto &dir : std::filesystem::directory_iterator(root, ec)) {
+        if (dir.path().filename().string() != want) continue;
         std::ifstream f(dir.path() / "index.tsv");
         std::string line;
         size_t n = 0;

@@ -278,14 +278,20 @@ bool texpack_available() {
     texpack_load();
     return !g_texpack.empty();
 }
+int game_id(); // game_options.cpp: 1 = GoW1, 2 = GoW2, 0 = menu da coletânea
 static void texpack_load() {
     static bool done = false;
     if (done) return;
+    // Só os packs do jogo em execução (texpack/gow1 no GoW1...): carregar todos fazia o pack do GoW1 trocar
+    // texturas do GoW2 que têm o mesmo tamanho e o mesmo começo (as faixas estranhas no menu principal do GoW2).
+    const int game = game_id();
+    if (!game) return; // menu da coletânea: nada ainda (o jogo, quando abrir, carrega o dele)
     done = true;
-    if (getenv("VITART_NO_TEXPACK")) return;
+    const std::string want = game == 1 ? "gow1" : "gow2";
     std::error_code ec;
     const std::filesystem::path root = std::filesystem::path(data_path()) / "texpack";
     for (auto &dir : std::filesystem::directory_iterator(root, ec)) {
+        if (getenv("VITART_NO_TEXPACK") || dir.path().filename().string() != want) continue;
         std::ifstream f(dir.path() / "index.tsv");
         std::string line;
         size_t n = 0;
@@ -301,6 +307,7 @@ static void texpack_load() {
     const char *kd = getenv("VITART_TEXKBM_DIR");
     const std::filesystem::path kroot = kd && *kd ? std::filesystem::path(kd) : std::filesystem::path(data_path()) / "texpack_kbm";
     for (auto &dir : std::filesystem::directory_iterator(kroot, ec)) {
+        if (dir.path().filename().string() != want) continue;
         std::ifstream f(dir.path() / "index.tsv");
         std::string line;
         size_t n = 0;
