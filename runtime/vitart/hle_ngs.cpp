@@ -25,6 +25,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -291,8 +293,17 @@ struct Pcm { uint32_t rate = 0, ch = 0; size_t frames = 0; std::vector<int16_t> 
 static std::vector<File> g_files;
 static std::vector<Key> g_keys;
 static FILE *g_iso = nullptr;
+// PCM decodificado por arquivo, até 256 MB (os mais antigos saem). Carregar um arquivo (ler vários MB da ISO
+// ou do ps2audio.bin e decodificar o ADPCM inteiro) levava dezenas a centenas de ms e era feito no
+// processamento de voz, com a trava do NGS presa: a thread do jogo que mexia no som esperava -> travadas. Com
+// só 8 arquivos no cache, músicas e falas eram relidas do disco toda hora. Agora o carregamento é numa thread
+// à parte; enquanto ele não termina, o superquadro fica com o áudio do Vita (já decodificado).
+static std::mutex g_cache_m, g_load_m;
 static std::map<uint32_t, std::shared_ptr<Pcm>> g_cache;
+static std::set<uint32_t> g_loading;
 static std::deque<uint32_t> g_lru;
+static size_t g_cache_bytes = 0;
+constexpr size_t kCacheBudget = 256u << 20;
 
 static std::atomic<bool> g_user{true}; // opção "PS2 Audio" do menu de pausa (troca no meio da música)
 static bool available() {
@@ -377,9 +388,8 @@ static void adpcm(const uint8_t *d, size_t n, std::vector<int16_t> &out) {
     }
 }
 
-static std::shared_ptr<Pcm> pcm_of(uint32_t fi) {
-    auto it = g_cache.find(fi);
-    if (it != g_cache.end()) return it->second;
+static std::shared_ptr<Pcm> load_pcm(uint32_t fi) {
+    std::lock_guard<std::mutex> one(g_load_m); // um carregamento por vez (g_iso é um FILE só)
     const File &f = g_files[fi];
     std::vector<uint8_t> d(f.size);
     _fseeki64(g_iso, (long long)f.lba * 2048, SEEK_SET);
@@ -412,10 +422,30 @@ static std::shared_ptr<Pcm> pcm_of(uint32_t fi) {
     pcm->s.resize(pcm->frames * pcm->ch);
     for (size_t i = 0; i < pcm->frames; i++)
         for (uint32_t c = 0; c < pcm->ch; c++) pcm->s[i * pcm->ch + c] = chans[c][i];
-    g_cache[fi] = pcm;
-    g_lru.push_back(fi);
-    while (g_lru.size() > 8) g_cache.erase(g_lru.front()), g_lru.pop_front();
     return pcm;
+}
+
+// PCM do arquivo se já estiver carregado; senão pede o carregamento em segundo plano e devolve nulo.
+static std::shared_ptr<Pcm> pcm_of(uint32_t fi) {
+    std::lock_guard<std::mutex> l(g_cache_m);
+    auto it = g_cache.find(fi);
+    if (it != g_cache.end()) return it->second;
+    if (g_loading.insert(fi).second)
+        std::thread([fi] {
+            auto pcm = load_pcm(fi);
+            std::lock_guard<std::mutex> l(g_cache_m);
+            g_loading.erase(fi);
+            if (!pcm) pcm = std::make_shared<Pcm>(); // ilegível: fica vazio no cache (não tenta de novo)
+            g_cache[fi] = pcm;
+            g_lru.push_back(fi);
+            g_cache_bytes += pcm->s.size() * sizeof(int16_t);
+            while (g_cache_bytes > kCacheBudget && g_lru.size() > 1) {
+                auto old = g_cache.find(g_lru.front());
+                if (old != g_cache.end()) g_cache_bytes -= old->second->s.size() * sizeof(int16_t), g_cache.erase(old);
+                g_lru.pop_front();
+            }
+        }).detach();
+    return nullptr;
 }
 
 // Troca o PCM de um superquadro (sf: amostras intercaladas com `ch` canais) pelo do PS2. Devolve false

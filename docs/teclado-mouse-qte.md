@@ -31,13 +31,26 @@ Código: `runtime/vitart/hle_sys.cpp` (`keyboard_mouse`). Controles continuam so
 
 ## Ícones dos botões
 
-O último controle usado (teclas/mouse ou controle) decide os ícones. As texturas com os botões do
-PlayStation têm versões com as teclas em `vitart-data/texpack_kbm/<jogo>/index.tsv` (mesma chave do pack
-de texturas: FNV-1a de largura, altura e primeiros 4 KB, mais a paleta se P8). O runtime refaz só as
-texturas que têm versão de teclado quando o modo muda (`hle_gxm.cpp`, `TexEntry::kbm_alt`).
+O último controle usado (teclas/mouse ou controle) decide os ícones. Os ícones dos botões do HUD não são
+texturas: cada um é um clipe do FLP com um disco (malha com textura) e o símbolo em vetor, desenhado
+sempre no quadro 0 e sem scripts (um script que trocava de quadro não teve efeito no texto do tutorial).
 
-Para achar as texturas: `VITART_TEXDUMP=<pasta>` grava cada textura (até 512x512) como
-`<chave>_<l>x<a>.rgba`. Os PNGs são desenhados por `tools/kbm_glyphs.py` com `tools/kbm_icons.py`.
+- **Desenhos** (`tools/kbm_icons.py`): teclas com o rótulo e mouse com o botão aceso.
+- **Atlas** (`tools/kbm_atlas.py`): os desenhos vão para as células das letras acentuadas que o jogo em
+  inglês não usa (glifos 87..106), no atlas da fonte do HUD (o mesmo nos dois jogos, chave
+  `dd387c3eceaf6c63`), 4x maior: `vitart-data/texpack_kbm/<jogo>/`. As células foram medidas no jogo com um
+  atlas "codificado" (vermelho = x, verde = y). Esse atlas só entra com teclado/mouse em uso
+  (`hle_gxm.cpp`, `TexEntry::kbm_alt`).
+- **HUD** (`tools/kbm_flp.py`, chamado pelo `gow_menu_mod.py`): para cada ícone (a biblioteca da raiz,
+  GoW1 49..93 / GoW2 42..58, e as cópias soltas como as dicas da pausa do GoW1) o elemento do quadro 0
+  ganha uma chave de teclado que aponta para a letra-ícone; rótulos sem desenho ("1-4") ficam com as
+  letras da fonte sobre um disco escuro. Elementos que sobram ficam com escala zero (o motor ignora o alfa
+  da cor do material). As chaves vão para `mods/<psarc>.kbm.tsv`.
+- **Runtime** (`kbm_icons.cpp`): acha o FLP carregado procurando as chaves (o jogo ajusta ponteiros do FLP
+  ao carregar, mas as chaves ficam como no arquivo) e escreve as do controle em uso.
+
+O WAD portátil do GoW2 não tem espaço para os ícones (o patch não pode crescer em blocos do psarc); o
+modo PS TV, o padrão do vitart, tem.
 
 ## QTE automático (opção "Auto QTE" na página Options)
 
