@@ -119,9 +119,9 @@ uint32_t cur_scale() {
 }
 
 uint32_t encode() {
-    // pack de texturas e áudio do PS2 só existem para o GoW1: no GoW2 o menu mostra "Unavailable"
+    // áudio do PS2 só existe para o GoW1 (no GoW2 o menu mostra "Unavailable"); o pack de texturas, para os dois
     const bool g1 = opt_profile() == &kOptGow1;
-    const uint32_t tex = g1 && texpack_available() ? (g_opt.tex ? 2u : 1u) : 3u;
+    const uint32_t tex = texpack_available() ? (g_opt.tex ? 2u : 1u) : 3u; // pack do jogo em execução (texpack/<jogo>)
     const uint32_t aud = g1 && ps2audio_available() ? (g_opt.audio ? 2u : 1u) : 3u;
     uint32_t fps = g_opt.counter ? gvk::measured_fps() : 0;
     fps = fps > 127 ? 127 : fps; // a palavra passa por float no menu: até 2^24
@@ -312,7 +312,7 @@ void game_options_tick() {
     }
     // pedidos do menu
     bool changed = false;
-    if (const uint32_t v = g_req_tex.exchange(0); v && op == &kOptGow1 && texpack_available() && (v == 2) != g_opt.tex)
+    if (const uint32_t v = g_req_tex.exchange(0); v && texpack_available() && (v == 2) != g_opt.tex)
         g_opt.tex = v == 2, texpack_set_enabled(g_opt.tex), changed = true;
     if (const uint32_t v = g_req_aud.exchange(0); v && op == &kOptGow1 && ps2audio_available() && (v == 2) != g_opt.audio)
         g_opt.audio = v == 2, ps2audio_set_enabled(g_opt.audio), changed = true;

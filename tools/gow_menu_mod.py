@@ -3,7 +3,7 @@
     python tools/gow_menu_mod.py <gow1_psp2_SCEA.psarc | gow2_psp2_SCEA.psarc> <saída .vtpatch> [--dump <pasta>]
 
 GoW1: HD Textures, PS2 Audio, Resolution, Frame Rate, VSync, FPS Counter, Display Mode, Auto QTE (estados 5..12,
-FLP_HUD, tag 30, canal PS2_Cheat). GoW2: Resolution, Frame Rate, VSync, FPS Counter, Display Mode, Auto QTE (7..12; o
+FLP_HUD, tag 30, canal PS2_Cheat). GoW2: HD Textures, Resolution, Frame Rate, VSync, FPS Counter, Display Mode, Auto QTE (7..13; o
 FLP_HUDA, tag 1, é a versão 0x1b do formato; rótulos das linhas são textos dinâmicos; canal PS2_OverUnder).
 
 Edita o FLP_HUD de wad/r_perma.wad_psp2 e wad/_VitaTV/r_perma.wad_psp2 (o menu de pausa, em inglês como o
@@ -58,10 +58,10 @@ GAMES = {
         dyn_label=False),
     'gow2': dict(
         state='PS2_OverUnder', wad=(1, b'FLP_HUDA'), shell=(1, b'FLP_ShellA'), nobody=(0, 24),  # tag 0: parâmetro (o tamanho é o valor)
-        new=[(7, 'res'), (8, 'fps'), (9, 'vsync'), (10, 'cnt'), (11, 'dsp'), (12, 'qte')],
+        new=[(7, 'res'), (8, 'fps'), (9, 'vsync'), (10, 'cnt'), (11, 'dsp'), (12, 'qte'), (13, 'tex')],
         old={1: ('MessageTips', 'A'), 2: ('MusicVolume', 'A'), 3: ('SFXVolume', 'A'), 4: ('Controller', 'B'),
              5: ('FlightControls', 'A'), 6: ('Return', 'B')},
-        order=[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 6], y=(-165.0, 207.5), frames=(9, 10, 11), kx=19, x_state='4',
+        order=[1, 2, 3, 4, 5, 13, 7, 8, 9, 10, 11, 12, 6], y=(-165.0, 207.5), frames=(9, 10, 11), kx=19, x_state='4',
         dyn_label=True),
 }
 

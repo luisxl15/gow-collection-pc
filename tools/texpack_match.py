@@ -1,6 +1,9 @@
 """Pack de texturas do PCSX2 -> vitart, cobrindo também as texturas que mudaram de nome no Vita.
 
-    python tools/texpack_match.py <iso do PS2> <psarc do Vita> <pack.zip> <saída> [--rel relatório.tsv]
+    python tools/texpack_match.py <iso do PS2 | -> <psarc do Vita> <pack.zip | pasta> <saída> [--rel relatório.tsv]
+
+Sem a ISO ("-") só o casamento por conteúdo (passo 2). O pack pode ser o .zip ou a pasta "replacements" já
+extraída. Funciona com o GoW1 e o GoW2 (registros dos WADs do Vita: tag 30 no GoW1, tag 1 no GoW2).
 
 1. Casamento por nome (tools/texpack_build.py): TXR do Vita -> TXR do PS2 -> nome PCSX2 (TEX0-CLUT).
 2. Casamento por conteúdo para o que sobrou: cada textura do Vita (GXT decodificado) é comparada com os
@@ -92,7 +95,8 @@ def _detail_and_rgb(rgba):
     """32x32: os três canais (pré-multiplicados pelo alfa) e a energia de detalhe (imagem - borrada)."""
     im = Image.fromarray(rgba, 'RGBA').resize((32, 32), Image.BOX)
     a = np.asarray(im, dtype=np.float32)
-    rgb = a[..., :3] * (a[..., 3:] / 255.0)
+    # alfa relativo ao maior da imagem: no PS2 128 é opaco (os PNGs dos packs vêm assim) e no Vita 255
+    rgb = a[..., :3] * (a[..., 3:] / max(float(a[..., 3].max()), 1.0))
     lum = rgb @ np.array([0.299, 0.587, 0.114], np.float32)
     blur = np.asarray(Image.fromarray(lum.astype(np.uint8)).resize((8, 8), Image.BOX).resize((32, 32), Image.BILINEAR),
                       dtype=np.float32)
@@ -105,8 +109,11 @@ def verify(vita_rgba, png):
     na assinatura pequena)."""
     va, dv = _detail_and_rgb(vita_rgba)
     pa, dp = _detail_and_rgb(np.asarray(png.convert('RGBA')))
-    if dv < 7.0 or dp < 7.0 or not (0.7 <= dp / dv <= 1.43):  # medido em pares conferidos a olho
+    # medido em pares conferidos a olho: com pouco detalhe (paredes e chão lisos do GoW2, 3,5..7) aceita só se
+    # as cores correlacionam ainda mais (abaixo)
+    if dv < 3.5 or dp < 3.5 or not (0.7 <= dp / dv <= 1.43):
         return 0.0
+    low = dv < 7.0 or dp < 7.0
     # saturação parecida: a versão petrificada (cinza) de um inimigo tem o mesmo desenho da colorida
     def sat(rgb):
         mx, mn = rgb.max(-1), rgb.min(-1)
@@ -120,7 +127,9 @@ def verify(vita_rgba, png):
         if nx < 1e-3 or ny < 1e-3:
             continue
         cs.append(float(x @ y))
-    return min(cs) if cs else 0.0
+    if not cs:
+        return 0.0
+    return min(cs) if not low or min(cs) >= 0.92 else 0.0
 
 
 MIN_CORR, MIN_GAP = float(os.environ.get('TEXPACK_MIN_CORR', '0.85')), float(os.environ.get('TEXPACK_MIN_GAP', '0.03'))
@@ -132,8 +141,44 @@ def pkey(info):
     return '-'.join(parts[:2])
 
 
+class DirPack:
+    """Uma pasta de PNGs com a interface do zipfile que o resto usa (infolist, open)."""
+
+    class Info:
+        def __init__(self, path, rel):
+            self.path, self.filename = path, rel
+
+    def __init__(self, root):
+        self.items = []
+        for dp, _, fs in os.walk(root):
+            for fn in sorted(fs):
+                full = os.path.join(dp, fn)
+                self.items.append(DirPack.Info(full, os.path.relpath(full, root)))
+
+    def infolist(self):
+        return self.items
+
+    def open(self, info):
+        return open(info.path, 'rb')
+
+
+def wad_records(d, game):
+    """Registros (tag, nome, corpo) de um .wad_psp2: tags sem corpo 24 (GoW1) / 0 e 24 (GoW2)."""
+    nobody = (0, 24) if game == 'gow2' else (24,)
+    o, out = 0, []
+    while o + 32 <= len(d):
+        tag, flags, size = struct.unpack_from('<HHI', d, o)
+        name = d[o + 8:o + 32].split(b'\0')[0].decode('latin1')
+        body = b'' if tag in nobody else d[o + 32:o + 32 + size]
+        out.append((tag, name, body))
+        o = (o + 32 + (0 if tag in nobody else size) + 15) & ~15
+    return out
+
+
 def main():
     iso, psarc, packzip, outdir = sys.argv[1:5]
+    game = 'gow2' if 'gow2' in os.path.basename(psarc).lower() else 'gow1'
+    rtag = 1 if game == 'gow2' else 30
     rel = sys.argv[sys.argv.index('--rel') + 1] if '--rel' in sys.argv else None
     # --cand arquivo: para cada textura sem par, o melhor candidato e a nota (para escolher limiares);
     # --dump pasta: grava essas texturas do Vita em PNG para conferir
@@ -142,7 +187,7 @@ def main():
     if dump_dir:
         os.makedirs(dump_dir, exist_ok=True)
     os.makedirs(outdir, exist_ok=True)
-    z = zipfile.ZipFile(packzip)
+    z = DirPack(packzip) if os.path.isdir(packzip) else zipfile.ZipFile(packzip)
 
     # ---- pack: chave PCSX2 -> membro; assinaturas por proporção
     pack, members = {}, []
@@ -155,13 +200,15 @@ def main():
         members.append(info)
     print(f'pack: {len(members)} PNGs; assinaturas...', flush=True)
     sigs = {}  # proporção -> lista de (membro, vetor, cor, largura)
+    sig_of = {}  # id do membro -> (vetor, cor): para ver se dois candidatos empatados são a mesma imagem
     for i, info in enumerate(members):
         with z.open(info) as fh:
             im = Image.open(io.BytesIO(fh.read())).convert('RGBA')
         w, h = im.size
         v, col, nrm = signature(np.asarray(im))
         sigs.setdefault(round(w / h, 3), []).append((info, v, col, nrm, w))
-    names = B.ps2_names(iso)
+        sig_of[id(info)] = (v, col)
+    names = B.ps2_names(iso) if iso != '-' else {}
     print(f'PS2: {len(names)} TXR', flush=True)
 
     # ---- Vita
@@ -174,7 +221,8 @@ def main():
     for k, fn in enumerate(files):
         if not fn.lower().endswith('.wad_psp2') or '_vitatv/' in fn.lower():
             continue  # o _VitaTV tem as mesmas texturas
-        recs = [(name, body) for tag, name, body in T.walk(P.read_file(f, ents[k + 1], zs, block)) if tag == 30 and len(body) >= 4]
+        recs = [(name, body) for tag, name, body in wad_records(P.read_file(f, ents[k + 1], zs, block), game)
+                if tag == rtag and len(body) >= 4]
         gxts = {}
         for name, body in recs:
             if (struct.unpack_from('<I', body, 0)[0] == 0x00070007 and len(body) >= 14 + 32 and body[4:8] == b'TXTR'
@@ -239,13 +287,22 @@ def main():
                         best = (c, info)
                     elif c > second[0] and not same:
                         second = (c, info)
-                ok = best[1] is not None and best[0] >= MIN_CORR and best[0] - second[0] >= MIN_GAP
+                # empate entre duas cópias da mesma imagem (o pack repete PNGs em pastas diferentes, com outro nome):
+                # se os dois candidatos são praticamente iguais entre si, o empate não conta
+                tie_ok = False
+                if best[1] is not None and second[1] is not None and best[0] - second[0] < MIN_GAP:
+                    (bl, ba, _), bc = sig_of[id(best[1])]
+                    (sl, sa, _), sc = sig_of[id(second[1])]
+                    tie_ok = float(bl @ sl) >= 0.98 and np.abs(bc - sc).mean() <= 8
+                ok = best[1] is not None and best[0] >= MIN_CORR and (best[0] - second[0] >= MIN_GAP or tie_ok)
                 if ok:
                     with z.open(best[1]) as fh:
                         vc = verify(rgba, Image.open(io.BytesIO(fh.read())))
                     ok = vc >= MIN_VERIFY
                 if ok:
                     index[vk], how[vk] = best[1], ('conteudo', min(best[0], vc), fn, gname)
+                    if dump_dir and os.environ.get('TEXPACK_DUMP_ALL'):  # revisão a olho dos aceitos
+                        Image.fromarray(rgba, 'RGBA').save(os.path.join(dump_dir, '%016x.png' % vk))
                     stats['conteudo'] += 1
                 else:
                     stats['sem'] += 1
@@ -256,7 +313,7 @@ def main():
         print(f'{fn}: {stats}', flush=True)
 
     # trocas recusadas na revisão a olho (texpack_gow1_recusadas.tsv): ficam com a textura do Vita
-    rej_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'texpack_gow1_recusadas.tsv')
+    rej_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'texpack_%s_recusadas.tsv' % game)
     if os.path.exists(rej_path):
         rej = {int(l.split(chr(9))[0], 16) for l in open(rej_path, encoding='utf-8') if l.strip() and not l.startswith('#')}
         for vk in [vk for vk in index if vk in rej]:
