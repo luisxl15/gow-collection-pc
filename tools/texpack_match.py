@@ -134,6 +134,7 @@ def verify(vita_rgba, png):
 
 MIN_CORR, MIN_GAP = float(os.environ.get('TEXPACK_MIN_CORR', '0.85')), float(os.environ.get('TEXPACK_MIN_GAP', '0.03'))
 MIN_VERIFY = float(os.environ.get('TEXPACK_MIN_VERIFY', '0.80'))
+NAME_MIN_CORR = float(os.environ.get('TEXPACK_NAME_MIN_CORR', '0.6'))  # par por nome: semelhança mínima
 
 
 def pkey(info):
@@ -249,9 +250,31 @@ def main():
                 stats['vita'] += 1
                 pk = names.get(txr, {}).get(ti) if txr else None
                 member = pack.get(pk) if pk else None
+                if member and os.environ.get('TEXPACK_NAME_CHECK', '1') != '0':
+                    # o nome do TXR coincide entre PS2 e Vita, mas o Vita reorganizou muitas texturas (no GoW2 ~1/3
+                    # dos pares por nome eram imagens diferentes): o par por nome também tem de se parecer
+                    try:
+                        rgba_n = D.decode(GxtMem(gxt), t)
+                        with z.open(member) as fh:
+                            png_n = Image.open(io.BytesIO(fh.read()))
+                            png_n.load()
+                        hn, wn = rgba_n.shape[:2]
+                        same_aspect = abs(png_n.width / png_n.height - wn / hn) < 0.02
+                        (vl, va, na), coln, _ = signature(rgba_n)
+                        (pl, pa, pna), colp, _ = signature(np.asarray(png_n.convert('RGBA')))
+                        good = same_aspect and float(vl @ pl) >= NAME_MIN_CORR and np.abs(coln - colp).mean() <= 40
+                    except Exception:
+                        good = False
+                    if not good:
+                        member = None  # segue para o casamento por conteúdo
                 if member:
                     index[vk], how[vk] = member, ('nome', 1.0, fn, gname)
                     stats['nome'] += 1
+                    if dump_dir and os.environ.get('TEXPACK_DUMP_ALL'):  # revisão a olho
+                        try:
+                            Image.fromarray(D.decode(GxtMem(gxt), t), 'RGBA').save(os.path.join(dump_dir, '%016x.png' % vk))
+                        except Exception:
+                            pass
                     continue
                 try:
                     rgba = D.decode(GxtMem(gxt), t)
