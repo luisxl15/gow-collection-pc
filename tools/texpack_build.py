@@ -62,7 +62,7 @@ def vita_key(gxt, ti):
 def ps2_names(iso_path):
     """TXR -> {índice da imagem: chave TEX0-CLUT} (paleta 0)."""
     iso = open(iso_path, 'rb')
-    toc = ps2_audio.toc(iso)
+    toc = T.toc_any(iso)
     out = {}
     for wad in sorted(n for n in toc if n.endswith('.WAD')):
         size, lba = toc[wad]
