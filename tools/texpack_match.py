@@ -73,6 +73,14 @@ def vita_key(gxt, ti, poff):
     return k
 
 
+def full_key(gxt, ti, poff):
+    """Hash do nível base inteiro (e da paleta): distingue texturas cuja chave do vitart (4096 bytes) colide."""
+    off, size, pal, flags, ty, fmt, w, h = struct.unpack_from('<6I2H', gxt, 32 + 32 * ti)
+    n = min(B.base_size(w, h, ty >> 29, fmt & 0xFF000000) or size, size)
+    k = B.fnv(gxt[off:off + n], B.fnv(struct.pack('<II', w, h)))
+    return B.fnv(gxt[poff:poff + 1024], k) if poff is not None else k
+
+
 def _unit(x):
     x = x - x.mean()
     n = float(np.linalg.norm(x))
@@ -178,17 +186,44 @@ def wad_records(d, game):
 
 def names_tsv(path):
     """A tabela de nomes da ISO já extraída (wad, TXR, GFX, PAL, imagem, paleta, nome PCSX2), para casar por nome
-    sem a ISO: o mesmo {TXR: {imagem: chave}} do ps2_names (paleta 0; vale o 1º WAD, na ordem alfabética)."""
-    out, owner = {}, {}
+    sem a ISO: {TXR: {imagem: [(WAD, chave), ...]}} com a paleta 0 de TODOS os WADs -- no GoW2 o mesmo nome de TXR
+    aparece em vários WADs com imagens diferentes, e o PNG do pack pode ser o de qualquer um deles."""
+    out = {}
     for ln in open(path, encoding='utf-8'):
         c = ln.rstrip('\n').split('\t')
         if len(c) < 7 or c[5] not in ('0', 'None'):
             continue
-        if owner.setdefault(c[1], c[0]) != c[0]:
-            continue
         parts = c[6].split('-')
-        out.setdefault(c[1], {})[int(c[4])] = '-'.join(parts[:2]) if len(parts) >= 3 else parts[0]
+        k = '-'.join(parts[:2]) if len(parts) >= 3 else parts[0]
+        lst = out.setdefault(c[1], {}).setdefault(int(c[4]), [])
+        if all(k != kk for _, kk in lst):
+            lst.append((c[0].upper(), k))
     return out
+
+
+def name_candidates(names, txr, ti, vita_wad):
+    """[(chave PCSX2, confiável)] para o TXR/imagem do Vita: primeiro as do WAD de mesmo nome no PS2, depois as
+    outras. Confiável = do mesmo WAD, ou o nome do TXR existe em no máximo 2 WADs (nomes genéricos como TXR_file1
+    se repetem em dezenas de WADs com imagens diferentes)."""
+    lst = names.get(txr, {}).get(ti, [])
+    w = os.path.basename(vita_wad).upper().replace('.WAD_PSP2', '.WAD')
+    nw = len({wd for g in names.get(txr, {}).values() for wd, _ in g})
+    return [(k, True) for wd, k in lst if wd == w] + [(k, nw <= 2) for wd, k in lst if wd != w]
+
+
+def name_relaxed(rgba, png):
+    """Par por nome confiável que falhou a semelhança de desenho: as repinturas do pack (pedra, chão, madeira) muitas
+    vezes trocam o desenho do material inteiro. Aceita se a proporção, a presença de alfa e o matiz (cor relativa ao
+    brilho: a repintura costuma ser mais escura) batem e a textura do Vita não é minúscula. Medido em 72 recusas
+    rotuladas a olho no GoW2: ~40 de 45 certas recuperadas, 1 errada aceita."""
+    h, w = rgba.shape[:2]
+    if max(w, h) < 64 or min(w, h) < 32 or abs(png.width / png.height - w / h) >= 0.02:
+        return False
+    (_, _, na), cv, _ = signature(rgba)
+    (_, _, pna), cp, _ = signature(np.asarray(png.convert('RGBA')))
+    if (na > 40) != (pna > 40) or np.abs(cv - cp).mean() > 70:
+        return False
+    return float(np.abs(cv / max(cv.mean(), 1.0) - cp / max(cp.mean(), 1.0)).mean()) <= 0.3
 
 
 def main():
@@ -224,7 +259,10 @@ def main():
         v, col, nrm = signature(np.asarray(im))
         sigs.setdefault(round(w / h, 3), []).append((info, v, col, nrm, w))
         sig_of[id(info)] = (v, col)
-    names = B.ps2_names(iso) if iso.lower().endswith('.iso') else names_tsv(iso) if iso != '-' else {}
+    if iso.lower().endswith('.iso'):
+        names = {t: {g: [(None, k)] for g, k in keys.items()} for t, keys in B.ps2_names(iso).items()}
+    else:
+        names = names_tsv(iso) if iso != '-' else {}
     print(f'PS2: {len(names)} TXR', flush=True)
 
     # ---- Vita
@@ -232,8 +270,10 @@ def main():
     ents, zs, block = P.entries(f)
     files = P.read_file(f, ents[0], zs, block).decode('latin1').split('\n')
     index, how = {}, {}
-    seen = set()
-    stats = dict(vita=0, nome=0, conteudo=0, sem=0, plano=0)
+    seen, ambig = {}, set()  # chave do vitart -> hash completo; chaves com mais de uma textura
+    stats = dict(vita=0, nome=0, conteudo=0, sem=0, plano=0, nome_recusado=0, nome_solto=0, sem_txr_ps2=0, sem_png=0)
+    # --diag arquivo: pares por nome recusados pela semelhança (textura do Vita, WAD, TXR, PNG do pack)
+    diag_out = open(sys.argv[sys.argv.index('--diag') + 1], 'w', encoding='utf-8') if '--diag' in sys.argv else None
     for k, fn in enumerate(files):
         if not fn.lower().endswith('.wad_psp2') or '_vitatv/' in fn.lower():
             continue  # o _VitaTV tem as mesmas texturas
@@ -259,18 +299,32 @@ def main():
             txr = txr_of.get(gname)
             for ti, t, poff in gxt_textures(gxt):
                 vk = vita_key(gxt, ti, poff)
-                if vk is None or vk in seen:
+                if vk is None:
                     continue
-                seen.add(vk)
+                # a chave só olha os primeiros 4096 bytes: texturas diferentes com o mesmo começo (topo transparente,
+                # por exemplo) colidem e a troca de uma trocaria a outra no jogo -- essas chaves ficam fora do pack
+                full = full_key(gxt, ti, poff)
+                if vk in seen:
+                    if seen[vk] != full:
+                        ambig.add(vk)
+                    continue
+                seen[vk] = full
                 stats['vita'] += 1
-                pk = names.get(txr, {}).get(ti) if txr else None
-                member = pack.get(pk) if pk else None
-                if member and os.environ.get('TEXPACK_NAME_CHECK', '1') != '0':
+                members_n = [(pack[k], ok) for k, ok in (name_candidates(names, txr, ti, fn) if txr else []) if k in pack]
+                member = relaxed = None
+                if not txr or txr not in names:
+                    stats['sem_txr_ps2'] += 1
+                elif not members_n:
+                    stats['sem_png'] += 1  # o PS2 tem a textura, o pack não
+                for cand, trusted in members_n:
+                    if os.environ.get('TEXPACK_NAME_CHECK', '1') == '0':
+                        member = cand
+                        break
                     # o nome do TXR coincide entre PS2 e Vita, mas o Vita reorganizou muitas texturas (no GoW2 ~1/3
                     # dos pares por nome eram imagens diferentes): o par por nome também tem de se parecer
                     try:
                         rgba_n = D.decode(GxtMem(gxt), t)
-                        with z.open(member) as fh:
+                        with z.open(cand) as fh:
                             png_n = Image.open(io.BytesIO(fh.read()))
                             png_n.load()
                         hn, wn = rgba_n.shape[:2]
@@ -280,8 +334,18 @@ def main():
                         good = same_aspect and float(vl @ pl) >= NAME_MIN_CORR and np.abs(coln - colp).mean() <= 40
                     except Exception:
                         good = False
-                    if not good:
-                        member = None  # segue para o casamento por conteúdo
+                    if good:
+                        member = cand
+                        break
+                    if trusted and relaxed is None and os.environ.get('TEXPACK_NAME_RELAXED', '1') != '0':
+                        try:
+                            relaxed = cand if name_relaxed(rgba_n, png_n) else None
+                        except Exception:
+                            pass
+                if members_n and not member and not relaxed:
+                    stats['nome_recusado'] += 1  # segue para o casamento por conteúdo
+                    if diag_out:
+                        diag_out.write('%016x\t%s\t%s\t%s\n' % (vk, fn, txr, members_n[0][0].filename))
                 if member:
                     index[vk], how[vk] = member, ('nome', 1.0, fn, gname)
                     stats['nome'] += 1
@@ -301,6 +365,12 @@ def main():
                 h, w = rgba.shape[:2]
                 v, col, nrm = signature(rgba)
                 if nrm < 40:  # quase lisa: assinatura não distingue nada
+                    if relaxed is not None:
+                        index[vk], how[vk] = relaxed, ('nome_solto', 0.5, fn, gname)
+                        stats['nome_solto'] += 1
+                        if dump_dir and os.environ.get('TEXPACK_DUMP_ALL'):
+                            Image.fromarray(rgba, 'RGBA').save(os.path.join(dump_dir, '%016x.png' % vk))
+                        continue
                     stats['plano'] += 1
                     continue
                 cands = sigs.get(round(w / h, 3), [])
@@ -342,6 +412,11 @@ def main():
                     if dump_dir and os.environ.get('TEXPACK_DUMP_ALL'):  # revisão a olho dos aceitos
                         Image.fromarray(rgba, 'RGBA').save(os.path.join(dump_dir, '%016x.png' % vk))
                     stats['conteudo'] += 1
+                elif relaxed is not None:
+                    index[vk], how[vk] = relaxed, ('nome_solto', 0.5, fn, gname)
+                    stats['nome_solto'] += 1
+                    if dump_dir and os.environ.get('TEXPACK_DUMP_ALL'):
+                        Image.fromarray(rgba, 'RGBA').save(os.path.join(dump_dir, '%016x.png' % vk))
                 else:
                     stats['sem'] += 1
                     if cand_out and best[1] is not None:
@@ -358,6 +433,11 @@ def main():
             del index[vk]
             how.pop(vk, None)
         print(f'recusadas na revisão: {len(rej)}', flush=True)
+    gone = [vk for vk in index if vk in ambig]
+    for vk in gone:
+        del index[vk]
+        how.pop(vk, None)
+    print(f'chaves do vitart com mais de uma textura: {len(ambig)} ({len(gone)} tiradas do pack)', flush=True)
     used = {}
     for vk, member in index.items():
         used[member.filename.replace('\\', '/').rsplit('/', 1)[-1]] = member
@@ -374,7 +454,7 @@ def main():
             for vk, (kind, score, fn, gname) in sorted(how.items()):
                 o.write('%016x\t%s\t%.3f\t%s\t%s\t%s\n' % (vk, kind, score, fn, gname, index[vk].filename))
     print(f'Vita: {stats["vita"]} texturas; por nome {stats["nome"]}, por conteúdo {stats["conteudo"]}, '
-          f'lisas {stats["plano"]}, sem par {stats["sem"]}; PNGs do pack usados: {len(used)} de {len(members)}')
+          f'por nome (regra solta) {stats["nome_solto"]}, lisas {stats["plano"]}, sem par {stats["sem"]}; PNGs do pack usados: {len(used)} de {len(members)}')
 
 
 if __name__ == '__main__':
