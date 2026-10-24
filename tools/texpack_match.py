@@ -1,6 +1,6 @@
 """Pack de texturas do PCSX2 -> vitart, cobrindo também as texturas que mudaram de nome no Vita.
 
-    python tools/texpack_match.py <iso do PS2 | -> <psarc do Vita> <pack.zip | pasta> <saída> [--rel relatório.tsv]
+    python tools/texpack_match.py <iso do PS2 | nomes.tsv | -> <psarc do Vita> <pack.zip | pasta> <saída> [--rel relatório.tsv]
 
 Sem a ISO ("-") só o casamento por conteúdo (passo 2). O pack pode ser o .zip ou a pasta "replacements" já
 extraída. Funciona com o GoW1 e o GoW2 (registros dos WADs do Vita: tag 30 no GoW1, tag 1 no GoW2).
@@ -176,6 +176,21 @@ def wad_records(d, game):
     return out
 
 
+def names_tsv(path):
+    """A tabela de nomes da ISO já extraída (wad, TXR, GFX, PAL, imagem, paleta, nome PCSX2), para casar por nome
+    sem a ISO: o mesmo {TXR: {imagem: chave}} do ps2_names (paleta 0; vale o 1º WAD, na ordem alfabética)."""
+    out, owner = {}, {}
+    for ln in open(path, encoding='utf-8'):
+        c = ln.rstrip('\n').split('\t')
+        if len(c) < 7 or c[5] not in ('0', 'None'):
+            continue
+        if owner.setdefault(c[1], c[0]) != c[0]:
+            continue
+        parts = c[6].split('-')
+        out.setdefault(c[1], {})[int(c[4])] = '-'.join(parts[:2]) if len(parts) >= 3 else parts[0]
+    return out
+
+
 def main():
     iso, psarc, packzip, outdir = sys.argv[1:5]
     game = 'gow2' if 'gow2' in os.path.basename(psarc).lower() else 'gow1'
@@ -209,7 +224,7 @@ def main():
         v, col, nrm = signature(np.asarray(im))
         sigs.setdefault(round(w / h, 3), []).append((info, v, col, nrm, w))
         sig_of[id(info)] = (v, col)
-    names = B.ps2_names(iso) if iso != '-' else {}
+    names = B.ps2_names(iso) if iso.lower().endswith('.iso') else names_tsv(iso) if iso != '-' else {}
     print(f'PS2: {len(names)} TXR', flush=True)
 
     # ---- Vita
