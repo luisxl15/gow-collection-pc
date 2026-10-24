@@ -19,6 +19,7 @@ Saída: <saída>/index.tsv e os PNGs usados; --rel grava como cada textura foi c
 import io
 import os
 import struct
+import subprocess
 import sys
 import zipfile
 
@@ -438,12 +439,38 @@ def main():
         del index[vk]
         how.pop(vk, None)
     print(f'chaves do vitart com mais de uma textura: {len(ambig)} ({len(gone)} tiradas do pack)', flush=True)
+    # extras à mão (texpack_<jogo>_extras.tsv): texturas fora dos WADs (HUD do Flash, chave tirada do VITART_TEXDUMP)
+    # ou montadas por um script; valem por cima do casamento
+    extras = {}
+    ext_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'texpack_%s_extras.tsv' % game)
+    if os.path.exists(ext_path):
+        by_name = {m.filename.replace('\\', '/').rsplit('/', 1)[-1]: m for m in members}
+        for ln in open(ext_path, encoding='utf-8'):
+            c = ln.rstrip('\n').split('\t')
+            if len(c) < 2 or ln.startswith('#'):
+                continue
+            vk = int(c[0], 16)
+            if c[1].startswith('script:'):
+                tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), c[1][7:])
+                fname = os.path.splitext(c[1][7:])[0] + '.png'
+                subprocess.run([sys.executable, tool, packzip, os.path.join(outdir, fname)], check=True)
+            elif c[1] in by_name:
+                fname = c[1]
+                index[vk] = by_name[fname]
+            else:
+                print(f'extra sem PNG no pack: {c[1]}', flush=True)
+                continue
+            extras[vk] = fname
+            how.pop(vk, None)
+        print(f'extras à mão: {len(extras)}', flush=True)
     used = {}
     for vk, member in index.items():
         used[member.filename.replace('\\', '/').rsplit('/', 1)[-1]] = member
+    rows = {vk: m.filename.replace('\\', '/').rsplit('/', 1)[-1] for vk, m in index.items()}
+    rows.update(extras)
     with open(os.path.join(outdir, 'index.tsv'), 'w', encoding='utf-8') as o:
-        for vk, member in sorted(index.items()):
-            o.write('%016x\t%s\n' % (vk, member.filename.replace('\\', '/').rsplit('/', 1)[-1]))
+        for vk, fname in sorted(rows.items()):
+            o.write('%016x\t%s\n' % (vk, fname))
     for fname, member in used.items():
         dst = os.path.join(outdir, fname)
         if not os.path.exists(dst):
