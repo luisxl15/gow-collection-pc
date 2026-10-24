@@ -450,10 +450,11 @@ def main():
             if len(c) < 2 or ln.startswith('#'):
                 continue
             vk = int(c[0], 16)
-            if c[1].startswith('script:'):
-                tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), c[1][7:])
-                fname = os.path.splitext(c[1][7:])[0] + '.png'
-                subprocess.run([sys.executable, tool, packzip, os.path.join(outdir, fname)], check=True)
+            if c[1].startswith('script:'):  # script:<ferramenta> [argumento]
+                spec = c[1][7:].split()
+                tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), spec[0])
+                fname = '_'.join([os.path.splitext(spec[0])[0]] + spec[1:]) + '.png'
+                subprocess.run([sys.executable, tool, packzip, os.path.join(outdir, fname)] + spec[1:], check=True)
             elif c[1] in by_name:
                 fname = c[1]
                 index[vk] = by_name[fname]
