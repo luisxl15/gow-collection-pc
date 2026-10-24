@@ -201,8 +201,15 @@ static KbmInput keyboard_mouse() {
 #endif
     return k;
 }
-static std::atomic<bool> g_kbm_active{true}; // sem controle no começo: ícones do teclado
-bool input_kbm_active() { return g_kbm_active; }
+// Ícones dos botões pelo último controle usado: 1 = teclado/mouse (começo, sem controle), 0 = controle da Sony
+// (PlayStation), 2 = controle XInput (Xbox). Um DualShock lido pelo HID e também emulado como XInput (DS4Windows)
+// fica com os do PlayStation.
+static std::atomic<int> g_icon_mode{1};
+int input_icon_mode() { // VITART_ICON_MODE=0/1/2 (testes): fixa o modo
+    static const int forced = getenv("VITART_ICON_MODE") ? atoi(getenv("VITART_ICON_MODE")) : -1;
+    return forced >= 0 ? forced : g_icon_mode.load();
+}
+bool input_kbm_active() { return input_icon_mode() == 1; }
 static uint64_t now_us_sys() {
     return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -246,10 +253,9 @@ static void ctrl_read(arc_ctx *ctx) {
         else lx = x, ly = y;
     }
     {   // ícones do teclado ou do controle: o último que mexeu
-        const int dl = (pad.lx - 128) * (pad.lx - 128) + (pad.ly - 128) * (pad.ly - 128);
-        const int dr = (pad.rx - 128) * (pad.rx - 128) + (pad.ry - 128) * (pad.ry - 128);
-        if (kbm.buttons || kbm.mx || kbm.my) g_kbm_active = true;
-        else if (pad.buttons || dl > 60 * 60 || dr > 60 * 60) g_kbm_active = false;
+        if (kbm.buttons || kbm.mx || kbm.my) g_icon_mode = 1;
+        else if (pad.active & 2) g_icon_mode = 0;
+        else if (pad.active & 1) g_icon_mode = 2;
     }
     buttons |= game_qte_auto(lx, ly); // opção "Auto QTE" (game_options.cpp)
     {   // X apertado (borda): pede para pular a cena em vídeo, se houver uma tocando (o usuário prefere o X;
@@ -410,6 +416,10 @@ void display_set_fps60(bool on) { g_fps60 = on; }
 static std::atomic<uint32_t> g_fps_target{0};
 static std::atomic<uint32_t> g_fixed_step_addr{0}; // palavra = 1 no menu principal (GoW1: 0x812bc0c0)
 void display_set_fixed_step_addr(uint32_t a) { g_fixed_step_addr = a; }
+// Menus (pausa, Power Up, telas de carregamento e cenas: tudo fora da gameplay, game_options.cpp) animam por quadro
+// e aceleravam acima de 60 FPS: neles o ritmo fica em 60.
+static std::atomic<bool> g_in_menu{false};
+void display_set_in_menu(bool on) { g_in_menu = on; }
 void display_set_fps_target(uint32_t fps) { g_fps_target = fps; }
 // Ritmo por prazo no laço principal do jogo (que chama esta função uma vez por quadro): o próximo quadro
 // sai 1/30 s (ou 1/60 s) depois do anterior. Esperar o próximo vblank da grade transformava um quadro de
@@ -422,7 +432,7 @@ static void wait_frame(uint32_t vblanks) {
     static clk::time_point last{};
     uint32_t fps = g_fps_target;
     // menu principal (anima por quadro, não pelo tempo): ritmo do jogo original
-    if (fps > 60 && g_fixed_step_addr && rd32(g_fixed_step_addr) == 1) fps = 0, vblanks = 1;
+    if (fps > 60 && ((g_fixed_step_addr && rd32(g_fixed_step_addr) == 1) || g_in_menu)) fps = 0, vblanks = 1;
     if (fps == UINT32_MAX) return; // VSync desligado: sem limite de quadros
     const auto interval = fps > 60 ? std::chrono::duration_cast<clk::duration>(std::chrono::duration<double>(1.0 / fps))
                                    : std::chrono::duration_cast<clk::duration>(VBLANK * (vblanks ? vblanks : 1));
@@ -840,6 +850,24 @@ VT_HLE(sceNpTrophyUnlockTrophy) {
     }
     trophy_save(ts);
     ret(ctx, SCE_OK);
+}
+
+// Cheat "Unlock All Trophies" (menu de pausa, game_options.cpp): desbloqueia todos os troféus dos conjuntos abertos.
+// O aviso aparece só para a platina (se ainda não tinha), não um por troféu. Devolve quantos foram desbloqueados agora.
+int trophy_unlock_all() {
+    const std::lock_guard<std::mutex> lock(g_trophy_mutex);
+    int n = 0;
+    for (auto &[ctx, ts] : g_trophy_sets) {
+        int plat = -1;
+        for (const Trophy &t : ts.list) {
+            if (t.type == 'P') plat = t.id;
+            else n += ts.unlocked.insert(t.id).second;
+        }
+        if (plat >= 0 && ts.unlocked.insert(plat).second) n++, trophy_announce(ts, plat);
+        trophy_save(ts);
+    }
+    logf("vitart: cheat: %d troféus desbloqueados", n);
+    return n;
 }
 
 // =================================================================== diálogos comuns

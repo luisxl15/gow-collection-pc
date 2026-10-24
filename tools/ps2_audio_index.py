@@ -1,6 +1,7 @@
 """Monta o índice que troca o áudio em streaming do Vita pelo do PS2 (ver docs/audio-ps2.md).
 
     python tools/ps2_audio_index.py <gow1_psp2_SCEA.psarc> <iso do PS2> <saída ps2audio.idx>
+    (GoW2: gow2_psp2_SCEA.psarc, a ISO do GoW2 e a saída ps2audio_gow2.idx)
 
 Para cada .at9 de wad/_sound/dvd_streams/PSP2 (inclusive as subpastas de idioma), cada superquadro
 (nBlockAlign bytes a partir do bloco "data") vira uma chave crc32<<32|adler32 -> (arquivo, índice).
@@ -18,6 +19,7 @@ import zlib
 sys.path.insert(0, os.path.dirname(__file__))
 import ps2_audio  # noqa: E402
 import psarc_gxp as P  # noqa: E402
+import texpack_ps2  # noqa: E402
 
 
 def riff(d):
@@ -37,10 +39,13 @@ def riff(d):
     return info
 
 
+MAX_DUR_DIFF = float(os.environ.get('PS2_AUDIO_MAX_DUR_DIFF', '0.03'))
+
+
 def main():
     psarc, iso_path, out = sys.argv[1:4]
     iso = open(iso_path, 'rb')
-    ps2 = ps2_audio.toc(iso)
+    ps2 = texpack_ps2.toc_any(iso)  # GoW1 ou GoW2
     f = open(psarc, 'rb')
     ents, zs, block = P.entries(f)
     names = P.read_file(f, ents[0], zs, block).decode('latin1').split('\n')
@@ -56,8 +61,21 @@ def main():
         if not pair or 'data' not in info or not info.get('align'):
             miss.append(name)
             continue
-        fi = len(files)
         size, lba = pair
+        # duração do PS2 (cabeçalho) x do Vita: as dublagens do Vita (French/...) apontam para o nome em inglês
+        # e têm outra duração; esses ficam com o áudio do Vita (a troca esticaria a fala). GoW2: 406 de 408 em
+        # inglês batem a menos de 2%.
+        iso.seek(lba * 2048)
+        h = iso.read(0x30)
+        if h[:4] == b'VAGp':
+            psz, rate = struct.unpack_from('>II', h, 12)
+        else:
+            psz, _, _, rate = struct.unpack_from('<IIII', h, 4)
+        ratio = (psz // 16 * 28 / rate) / (info['samples'] / 48000) if rate and info.get('samples') else 0
+        if abs(ratio - 1) > MAX_DUR_DIFF:
+            miss.append('%s (duração %.2fx)' % (name, ratio))
+            continue
+        fi = len(files)
         files.append((lba, size, info['samples'], info['sps'], info['ch'], 0))
         off, sz = info['data']
         a = info['align']

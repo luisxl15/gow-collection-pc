@@ -14,14 +14,15 @@
 //     WideScreen mexe na proporção -- e a PS2_Cheat é só de leitura.)
 //
 // Palavra de estado: 0x10000 | textura | áudio << 2 | resolução << 4 | fps << 7 | vsync << 9 | QTE automático << 10 |
-// contador de FPS << 11 | modo de exibição << 12 (sem bordas) | teclado/mouse em uso << 13 (os ícones dos botões trocam
-// pelas teclas, tools/kbm_flp.py) | FPS medidos << 17 (0 com o contador desligado; o clipe do contador no HUD mostra esse
-// número). As alternâncias têm um bit (0 Off, 1 On). Texturas e áudio: 1 Off, 2 On, 3 indisponível. Resolução: 1..4
+// contador de FPS << 11 | modo de exibição << 12 (sem bordas) | cheats: vida infinita << 13, magia infinita << 14, fúria
+// infinita << 15 | FPS medidos << 17 (0 com o contador desligado; o clipe do contador no HUD mostra esse número). As alternâncias têm um bit (0 Off, 1 On). Texturas e áudio: 1 Off, 2 On, 3 indisponível. Resolução: 1..4
 // (escala interna). FPS: 1 = 30, 2 = 60, 3 = máximo. As escolhas ficam em <dados>/vitart_options.ini.
 #include "vitart.h"
 #include <cmath>
 #include <vector>
 #include <chrono>
+#include <filesystem>
+#include <tuple>
 #include "gxm_vk.h"
 
 #include <cstdio>
@@ -35,6 +36,8 @@
 #include <windows.h>
 
 namespace vt {
+int game_id(); // abaixo: 1 = GoW1, 2 = GoW2
+int trophy_unlock_all(); // hle_sys.cpp: cheat "Unlock All Trophies"
 
 void texpack_set_enabled(bool on);
 bool texpack_available();
@@ -43,6 +46,7 @@ bool ps2audio_available();
 void display_set_fps60(bool on);
 void display_set_fps_target(uint32_t fps);
 void display_set_fixed_step_addr(uint32_t a);
+void display_set_in_menu(bool on); // hle_sys.cpp: fora da gameplay o ritmo fica em 60 FPS
 bool input_kbm_active(); // hle_sys.cpp: o último controle usado foi o teclado/mouse
 void kbm_icons_start();
 
@@ -67,10 +71,12 @@ struct Options {
     bool vsync = true; // desligado: sem limite de quadros e sem esperar o vblank
     uint32_t scale = 0; // 0 = automática pelo monitor
     bool auto_qte = false; // QTE automático (game_qte_auto)
+    bool inf_health = false, inf_magic = false, inf_rage = false; // cheats (cheats_tick)
 };
 Options g_opt;
 // Pedidos vindos do menu (thread do jogo), aplicados no próximo quadro: 0 = nenhum.
-std::atomic<uint32_t> g_req_tex{0}, g_req_aud{0}, g_req_res{0}, g_req_fps{0}, g_req_cnt{0}, g_req_dsp{0}, g_req_vsync{0}, g_req_qte{0};
+std::atomic<uint32_t> g_req_tex{0}, g_req_aud{0}, g_req_res{0}, g_req_fps{0}, g_req_cnt{0}, g_req_dsp{0}, g_req_vsync{0}, g_req_qte{0},
+    g_req_hp{0}, g_req_mp{0}, g_req_rage{0}, g_req_trophy{0};
 
 std::string ini_path() { return data_path() + "/vitart_options.ini"; }
 std::string g_iso; // ISO do PS2 lembrada (o iniciador a passa em VITART_PS2_AUDIO)
@@ -84,6 +90,8 @@ void save() {
                 g_opt.tex ? 1u : 0u, g_opt.audio ? 1u : 0u, g_opt.scale, g_opt.fps == 3 ? "max" : g_opt.fps == 2 ? "60" : "30",
                 g_opt.vsync ? 1u : 0u, g_opt.counter ? 1u : 0u, g_opt.borderless ? 1u : 0u,
                 g_opt.auto_qte ? 1u : 0u);
+        fprintf(f, "cheat_infinite_health=%u\ncheat_infinite_magic=%u\ncheat_infinite_rage=%u\n", g_opt.inf_health ? 1u : 0u,
+                g_opt.inf_magic ? 1u : 0u, g_opt.inf_rage ? 1u : 0u);
         if (!iso.empty()) fprintf(f, "ps2_iso=%s\n", iso.c_str());
         fclose(f);
     }
@@ -103,6 +111,9 @@ void load() {
             if (sscanf(line, "vsync=%u", &v) == 1) g_opt.vsync = v != 0;
             if (sscanf(line, "borderless=%u", &v) == 1) g_opt.borderless = v != 0;
             if (sscanf(line, "auto_qte=%u", &v) == 1) g_opt.auto_qte = v != 0;
+            if (sscanf(line, "cheat_infinite_health=%u", &v) == 1) g_opt.inf_health = v != 0;
+            if (sscanf(line, "cheat_infinite_magic=%u", &v) == 1) g_opt.inf_magic = v != 0;
+            if (sscanf(line, "cheat_infinite_rage=%u", &v) == 1) g_opt.inf_rage = v != 0;
             if (!strncmp(line, "ps2_iso=", 8)) {
                 g_iso = line + 8;
                 while (!g_iso.empty() && (unsigned char)g_iso.back() < 32) g_iso.pop_back();
@@ -122,12 +133,12 @@ uint32_t encode() {
     // áudio do PS2 só existe para o GoW1 (no GoW2 o menu mostra "Unavailable"); o pack de texturas, para os dois
     const bool g1 = opt_profile() == &kOptGow1;
     const uint32_t tex = texpack_available() ? (g_opt.tex ? 2u : 1u) : 3u; // pack do jogo em execução (texpack/<jogo>)
-    const uint32_t aud = g1 && ps2audio_available() ? (g_opt.audio ? 2u : 1u) : 3u;
+    const uint32_t aud = ps2audio_available() ? (g_opt.audio ? 2u : 1u) : 3u;
     uint32_t fps = g_opt.counter ? gvk::measured_fps() : 0;
     fps = fps > 127 ? 127 : fps; // a palavra passa por float no menu: até 2^24
     return 0x10000u | tex | aud << 2 | cur_scale() << 4 | g_opt.fps << 7 | (g_opt.vsync ? 1u : 0u) << 9 |
            (g_opt.auto_qte ? 1u : 0u) << 10 | (g_opt.counter ? 1u : 0u) << 11 | (g_opt.borderless ? 1u : 0u) << 12 |
-           (input_kbm_active() ? 1u : 0u) << 13 | fps << 17;
+           (g_opt.inf_health ? 1u : 0u) << 13 | (g_opt.inf_magic ? 1u : 0u) << 14 | (g_opt.inf_rage ? 1u : 0u) << 15 | fps << 17;
 }
 
 bool is_gow1();
@@ -173,6 +184,51 @@ void on_import(arc_ctx *ctx, uint32_t stub) {
     if (!std::strcmp(key, "dsp")) g_req_dsp = v;
     if (!std::strcmp(key, "vsync")) g_req_vsync = v;
     if (!std::strcmp(key, "qte")) g_req_qte = v;
+    if (!std::strcmp(key, "hp")) g_req_hp = v;
+    if (!std::strcmp(key, "mp")) g_req_mp = v;
+    if (!std::strcmp(key, "rage")) g_req_rage = v;
+    if (!std::strcmp(key, "trophy")) g_req_trophy = v;
+}
+
+// Cheats (menu de pausa: Infinite Health / Magic / Rage), aplicados a cada quadro dentro do jogo.
+//   GoW2: as opções do modo de desafio (FreeCombat_InfiniteHealth/Magic/GodMode, +0x2a4.. do objeto de opções) são
+//     copiadas para as globais 0x812eb058/5c/60 quando um desafio começa (sub_8106d2c0) e zeradas na saída
+//     (0x8106f744); a função de dano (sub_81037338) não tira vida do Kratos com a primeira ligada, e as de magia e
+//     fúria (0x8104fa12.., 0x81051882..) não gastam o medidor. Fora dos desafios ninguém as liga: o cheat as mantém.
+//   GoW1: não tem essas globais; a tabela de ajustes do jogador (0x812c27f4, carregada de "/Player" em sub_8103fb6e)
+//     tem 6 fantasias de 0x20 bytes em +0x204 (+4 "AI Damage Mult" = dano dos inimigos, +8 "Infinite Magic") e 6
+//     níveis de arma de 0x48 bytes em +0x54 (+0x3c "God Mode Meter Drain" = quanto a fúria esvazia por segundo).
+//     Cheat ligado: dano dos inimigos 0, magia infinita 1, dreno 0; desligado: os valores originais de volta.
+void cheats_tick(int game) {
+    static bool was[3] = {};
+    const bool on[3] = {g_opt.inf_health, g_opt.inf_magic, g_opt.inf_rage};
+    if (game == 2) {
+        for (int i = 0; i < 3; i++) {
+            const uint32_t a = 0x812eb058u + 4 * i;
+            if (on[i]) wr32(a, 1);
+            else if (was[i]) wr32(a, 0); // só desliga o que o cheat ligou
+            was[i] = on[i];
+        }
+        return;
+    }
+    if (game != 1) return;
+    constexpr uint32_t kPlayer = 0x812c27f4u;
+    static uint32_t orig_dmg[6], orig_mag[6], orig_drain[6];
+    for (int k = 0; k < 6; k++) {
+        const uint32_t cos = kPlayer + 0x204 + 0x20 * k, lvl = kPlayer + 0x54 + 0x48 * k;
+        const uint32_t vals[3] = {cos + 4, cos + 8, lvl + 0x3c};
+        uint32_t *orig[3] = {orig_dmg, orig_mag, orig_drain};
+        const uint32_t cheat[3] = {0u, 1u, 0u};  // 0.0f, verdadeiro, 0.0f
+        for (int i = 0; i < 3; i++) {
+            if (on[i]) {
+                if (!was[i]) orig[i][k] = rd32(vals[i]); // a tabela pode ser recarregada (fase nova): reescreve
+                if (rd32(vals[i]) != cheat[i]) wr32(vals[i], cheat[i]);
+            } else if (was[i]) {
+                wr32(vals[i], orig[i][k]);
+            }
+        }
+    }
+    for (int i = 0; i < 3; i++) was[i] = on[i];
 }
 const bool g_watch = (watch_import(on_import), true);
 
@@ -194,6 +250,30 @@ void game_options_tick() {
         inited = true;
         game_options_init();
         kbm_icons_start(); // ícones de teclado no HUD (kbm_icons.cpp)
+    }
+    // VITART_MEMSNAP=<pasta>:<s1>,<s2>,... (diagnóstico, para achar a vida e a magia): nos segundos pedidos despeja
+    // a memória do guest em <pasta>/t<s> e anota os medidores do HUD (HealthMeter_Value/MagicMeter_Value, +0x14/+0x18
+    // do objeto do HUD) em <pasta>/hud.txt.
+    if (static const char *snap = getenv("VITART_MEMSNAP"); snap && game_id()) {
+        static const auto t0 = std::chrono::steady_clock::now();
+        static std::vector<int> when = [] {
+            std::vector<int> v;
+            const char *c = strrchr(getenv("VITART_MEMSNAP"), ':');
+            for (c = c ? c + 1 : ""; *c; c = strchr(c, ',') ? strchr(c, ',') + 1 : "") v.push_back(atoi(c));
+            return v;
+        }();
+        const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        if (!when.empty() && s >= when.front()) {
+            const std::string dir = std::string(snap, strrchr(snap, ':') ? strrchr(snap, ':') - snap : strlen(snap));
+            const std::string sub = dir + "/t" + std::to_string(when.front());
+            std::filesystem::create_directories(sub);
+            const uint32_t hud = rd32(game_id() == 1 ? 0x812a681cu : 0x812cb1b8u);
+            float hp = 0, mp = 0;
+            if (hud) std::memcpy(&hp, ptr<uint8_t>(hud + 0x14), 4), std::memcpy(&mp, ptr<uint8_t>(hud + 0x18), 4);
+            if (FILE *f = fopen((dir + "/hud.txt").c_str(), "a")) fprintf(f, "t%d hud=%08x hp=%g mp=%g\n", when.front(), hud, hp, mp), fclose(f);
+            dump_regions(sub, 0x80000000u, 0xC0000000u);
+            when.erase(when.begin());
+        }
     }
     // F11 / Alt+Enter também mudam o modo de exibição: a escolha acompanha (vale em todos os módulos)
     static bool applied_borderless = g_opt.borderless;
@@ -283,6 +363,9 @@ void game_options_tick() {
         // o menu principal anima por quadro, não pelo tempo: nele o ritmo é o do jogo mesmo sem VSync
         // (GoW1: 0x812bc0c0 = 1 só no menu principal, achado comparando a memória global nas fases)
         display_set_fixed_step_addr(tp->menu);
+        // estado do jogo (o mesmo do QTE automático): GoW1 0x812c2e04 = 0xb jogando; GoW2 0x812ec498 = 0xc jogando.
+        // Qualquer outro (pausa, Power Up, carregamento, cenas) anima por quadro: 60 FPS no máximo.
+        display_set_in_menu(rd32(game_id() == 1 ? 0x812c2e04u : 0x812ec498u) != (game_id() == 1 ? 0xbu : 0xcu));
         display_set_fps_target(target);
         const float floor = fifo ? 25.f : target == UINT32_MAX ? 2.f : target > 60 ? 25.f : 0.f; // centésimos de quadro de 60 Hz
         uint32_t fb;
@@ -314,7 +397,7 @@ void game_options_tick() {
     bool changed = false;
     if (const uint32_t v = g_req_tex.exchange(0); v && texpack_available() && (v == 2) != g_opt.tex)
         g_opt.tex = v == 2, texpack_set_enabled(g_opt.tex), changed = true;
-    if (const uint32_t v = g_req_aud.exchange(0); v && op == &kOptGow1 && ps2audio_available() && (v == 2) != g_opt.audio)
+    if (const uint32_t v = g_req_aud.exchange(0); v && ps2audio_available() && (v == 2) != g_opt.audio)
         g_opt.audio = v == 2, ps2audio_set_enabled(g_opt.audio), changed = true;
     if (const uint32_t v = g_req_res.exchange(0); v >= 1 && v <= 4 && v != cur_scale()) {
         g_opt.scale = v, changed = true;
@@ -336,6 +419,15 @@ void game_options_tick() {
     if (const uint32_t v = g_req_cnt.exchange(0); (v == 1 || v == 2) && (v == 2) != g_opt.counter) {
         g_opt.counter = v == 2, changed = true;
     }
+    for (auto [req, opt, what] : {std::tuple{&g_req_hp, &g_opt.inf_health, "vida infinita"},
+                                  std::tuple{&g_req_mp, &g_opt.inf_magic, "magia infinita"},
+                                  std::tuple{&g_req_rage, &g_opt.inf_rage, "fúria infinita"}})
+        if (const uint32_t v = req->exchange(0); (v == 1 || v == 2) && (v == 2) != *opt) {
+            *opt = v == 2, changed = true;
+            logf("vitart: cheat %s %s", what, *opt ? "ligado" : "desligado");
+        }
+    if (g_req_trophy.exchange(0) == 2) trophy_unlock_all();
+    cheats_tick(game_id());
     if (changed) save();
     // estado para o menu mostrar
     const uint32_t obj = rd32(op->optr);

@@ -30,10 +30,10 @@ import psarc_gxp as P  # noqa: E402
 
 # Estado de todas as opções num número só, na variável PS2_Cheat (campo +0x2bc do objeto de opções,
 # sem tratador no jogo): 0x10000 | textura | áudio << 2 | resolução << 4 | fps << 7 | vsync << 9 | QTE automático << 10 |
-# contador << 11 | modo << 12 | teclado em uso << 13 | FPS medidos << 17. As alternâncias têm um bit (0/1) e o menu as
-# lê como 1/2; o bit 13 é lido pelos ícones dos botões (kbm_flp.py).
+# contador << 11 | modo << 12 | cheats: vida << 13, magia << 14, fúria << 15 | FPS medidos << 17. As alternâncias têm um
+# bit (0/1) e o menu as lê como 1/2.
 # Ver runtime/vitart/game_options.cpp.
-FIELDS = [('_level0/:VtKbm', 8192, 1), ('_level0/:VtDsp', 4096, 1), ('_level0/:VtCnt', 2048, 1), ('_level0/:VtQte', 1024, 1),
+FIELDS = [('_level0/:VtRage', 32768, 1), ('_level0/:VtMp', 16384, 1), ('_level0/:VtHp', 8192, 1), ('_level0/:VtDsp', 4096, 1), ('_level0/:VtCnt', 2048, 1), ('_level0/:VtQte', 1024, 1),
           ('_level0/:VtVsync', 512, 1), ('_level0/:VtFps', 128, 3), ('_level0/:VtRes', 16, 7),
           ('_level0/:VtAud', 4, 3), ('_level0/:VtTex', 1, 3)]
 RES_TEXT = {1: '1x  (960x544)', 2: '2x  (1920x1088)', 3: '3x  (2880x1632)', 4: '4x  (3840x2176)'}
@@ -48,20 +48,28 @@ LINES = {
     'cnt': ('VtFpsCounter', 'FPS Counter', '_level0/:VtCnt', '_level0/:VtCntText', 'toggle', {1: 'Off', 2: 'On'}),
     'dsp': ('VtDisplayMode', 'Display Mode', '_level0/:VtDsp', '_level0/:VtDspText', 'toggle', {1: 'Windowed', 2: 'Borderless'}),
     'qte': ('VtAutoQte', 'Auto QTE', '_level0/:VtQte', '_level0/:VtQteText', 'toggle', {1: 'Off', 2: 'On'}),
+    # cheats (runtime/vitart/game_options.cpp, cheats_tick) e o desbloqueio de todos os troféus (ação: X uma vez)
+    'hp': ('VtInfHealth', 'Infinite Health', '_level0/:VtHp', '_level0/:VtHpText', 'toggle', {1: 'Off', 2: 'On'}),
+    'mp': ('VtInfMagic', 'Infinite Magic', '_level0/:VtMp', '_level0/:VtMpText', 'toggle', {1: 'Off', 2: 'On'}),
+    'rage': ('VtInfRage', 'Infinite Rage', '_level0/:VtRage', '_level0/:VtRageText', 'toggle', {1: 'Off', 2: 'On'}),
+    'trophy': ('VtTrophies', 'Unlock Trophies', '_level0/:VtTrophy', '_level0/:VtTrophyText', 'action',
+               {1: 'Press X', 2: 'Done'}),
 }
 GAMES = {
     'gow1': dict(
         state='PS2_Cheat', wad=(30, b'FLP_HUD'), shell=(30, b'FLP_Shell'), nobody=(24,),
-        new=[(5, 'tex'), (6, 'aud'), (7, 'res'), (8, 'fps'), (11, 'vsync'), (9, 'cnt'), (10, 'dsp'), (12, 'qte')],
+        new=[(5, 'tex'), (6, 'aud'), (7, 'res'), (8, 'fps'), (11, 'vsync'), (9, 'cnt'), (10, 'dsp'), (12, 'qte'),
+             (13, 'hp'), (14, 'mp'), (15, 'rage'), (16, 'trophy')],
         old={1: ('MusicVolume', 'A'), 2: ('SFXVolume', 'A'), 3: ('Controller', 'B'), 4: ('Return', 'B')},
-        order=[1, 2, 5, 6, 7, 8, 11, 9, 10, 12, 3, 4], y=(-175.0, 175.0), frames=(7, 8, 9), kx=22, x_state='3',
+        order=[1, 2, 5, 6, 7, 8, 11, 9, 10, 12, 13, 14, 15, 16, 3, 4], y=(-200.0, 215.0), row_k=0.82, frames=(7, 8, 9), kx=22, x_state='3',
         dyn_label=False),
     'gow2': dict(
         state='PS2_OverUnder', wad=(1, b'FLP_HUDA'), shell=(1, b'FLP_ShellA'), nobody=(0, 24),  # tag 0: parâmetro (o tamanho é o valor)
-        new=[(7, 'res'), (8, 'fps'), (9, 'vsync'), (10, 'cnt'), (11, 'dsp'), (12, 'qte'), (13, 'tex')],
+        new=[(7, 'res'), (8, 'fps'), (9, 'vsync'), (10, 'cnt'), (11, 'dsp'), (12, 'qte'), (13, 'tex'), (14, 'aud'),
+             (15, 'hp'), (16, 'mp'), (17, 'rage'), (18, 'trophy')],
         old={1: ('MessageTips', 'A'), 2: ('MusicVolume', 'A'), 3: ('SFXVolume', 'A'), 4: ('Controller', 'B'),
              5: ('FlightControls', 'A'), 6: ('Return', 'B')},
-        order=[1, 2, 3, 4, 5, 13, 7, 8, 9, 10, 11, 12, 6], y=(-165.0, 207.5), frames=(9, 10, 11), kx=19, x_state='4',
+        order=[1, 2, 3, 4, 5, 13, 14, 7, 8, 9, 10, 11, 12, 15, 16, 17, 18, 6], y=(-205.0, 228.0), row_k=0.82, frames=(9, 10, 11), kx=19, x_state='4',
         dyn_label=True),
 }
 
@@ -76,7 +84,7 @@ def configure(game):
     ROWS = []
     for st, key in sorted(CFG['new']):
         clip, text, var, txt, _, _ = LINES[key]
-        ROWS.append((st, clip, text, var, weights[var], txt))
+        ROWS.append((st, clip, text, var, weights.get(var, 0), txt))  # a ação (troféus) não está na palavra
     KEY = {st: key for st, key in CFG['new']}
     PATH = {st: ('PauseMenu/' + name, grp) for st, (name, grp) in CFG['old'].items()}
     for st, key in CFG['new']:
@@ -199,12 +207,15 @@ def show_script(f):
         a.setv(name, 0)
         a.label('f' + name)
     # alternâncias: um bit (0/1) na palavra -> 1/2 como o menu usa
-    for q in ('_level0/:VtQte', '_level0/:VtVsync', '_level0/:VtCnt', '_level0/:VtDsp'):
+    for q in ('_level0/:VtQte', '_level0/:VtVsync', '_level0/:VtCnt', '_level0/:VtDsp', '_level0/:VtHp', '_level0/:VtMp',
+              '_level0/:VtRage'):
         a.getv(q).push(1).eq().not_().jumpif('q0' + q)
         a.setv(q, 2).jump('q1' + q)
         a.label('q0' + q)
         a.setv(q, 1)
         a.label('q1' + q)
+    if any(k == 'trophy' for _, k in CFG['new']):
+        a.setv('_level0/:VtTrophy', 1)  # a ação volta a "Press X" a cada abertura da página
     a.callframe('/:VtOptTexts').end()
     return flp.encode(f, a.build())
 
@@ -254,6 +265,9 @@ def change_script(f, step):
             a.getv(var).push(2).eq().not_().jumpif('on%d' % s)
             choose(s, var, 1)
             a.label('on%d' % s)
+            choose(s, var, 2)
+        elif kind == 'action':  # desbloquear troféus: X (ou direita) uma vez -> "Done"
+            a.getv(var).push(2).eq().jumpif('trava')
             choose(s, var, 2)
         elif kind == 'list':  # resolução 1..4, FPS 1..3 (30, 60, máximo)
             top = len(table)
@@ -332,8 +346,11 @@ def make_dyn(f, var, tpl=None):
     return d
 
 
-def xform(f, src, x=None, y=None):
+def xform(f, src, x=None, y=None, k=None):
     t = bytearray(f.xforms[src])
+    if k is not None:  # escala (a e d da matriz) multiplicada por k
+        a_, b_, c_, d_ = struct.unpack_from('<4i', t, 0)
+        struct.pack_into('<4i', t, 0, round(a_ * k), b_, c_, round(d_ * k))
     if x is not None:
         struct.pack_into('<h', t, 0x10, round(x * 16))
     if y is not None:
@@ -345,6 +362,60 @@ def xform(f, src, x=None, y=None):
 def handler(f, typ, idx):
     f.handlers.append((typ, idx))
     return len(f.handlers) - 1
+
+
+# GoW1, HUD com a barra do pack ("Huds and Icon", texpack_gow1_extras.tsv): as fendas da lâmina do pack ficam noutro
+# lugar. Medido com uma textura codificada (cor = coordenada) no lugar da barra: x_HUD = 123,3 + (u - 0,312) * 315,
+# y_HUD = 48,5 + (v - 0,152) * 160,8. Vida u 0,312-0,633, v 0,20 -> fenda de cima do pack u 0,37-0,785, v 0,25; magia
+# u 0,34-0,63, v 0,344 -> fenda de baixo, v 0,325. Os fundos pretos do Vita (com as pontas) somem: a fenda do pack já
+# tem fundo. (nome, borda esquerda em u, nova borda, escala da largura, deslocamento em v; None = esconder)
+# Os três medidores começam no mesmo x (~ -50 no MainMeter) e crescem para a direita com os upgrades: ficam alinhados
+# ao canto esquerdo da fenda do pack (u 0,319), largura x1,293, e as três linhas redistribuídas na altura da fenda.
+HUD_PACK = {'HealthMeter': (0.312, 0.319, 1.293, 0.035), 'MagicMeter': (0.312, 0.319, 1.293, 0.012),
+            'PowerUpMeter': (0.312, 0.319, 1.293, -0.009), 'HealthMeterBlackBar': None, 'MagicMeterBlackBar': None}
+
+
+def hud_pack_layout(f):
+    mm_h = named(f.root, f, 'MainMeter')
+    mm = f.c7[obj(f, mm_h, 7)]
+    mm_x = next(struct.unpack_from('<h', f.xforms[struct.unpack_from('<H', k, 4)[0]], 0x10)[0] / 16
+                for h, keys in f.root.anims for k in keys if struct.unpack_from('<H', k, 2)[0] == mm_h)
+    hud_x = lambda u: 123.3 + (u - 0.312) * 315  # noqa: E731
+    for h, keys in mm.anims:
+        names = {f.s(struct.unpack_from('<H', k, 8)[0]) for k in keys if struct.unpack_from('<H', k, 8)[0] != 0xffff}
+        hit = names & set(HUD_PACK)
+        if not hit:
+            continue
+        spec = HUD_PACK[hit.pop()]
+        for k in keys:  # todas as chaves do elemento (o nome só vem na primeira)
+            if struct.unpack_from('<H', k, 2)[0] == 0:
+                continue  # chave de remoção
+            t = bytearray(f.xforms[struct.unpack_from('<H', k, 4)[0]])
+            a_, b_, c_, d_ = struct.unpack_from('<4i', t, 0)
+            x, y = struct.unpack_from('<hh', t, 0x10)
+            if spec is None:
+                struct.pack_into('<4i', t, 0, 0, 0, 0, 0)
+            else:
+                u0, u1, sc, dv = spec
+                tx = mm_x + x / 16
+                left, left2 = hud_x(u0), hud_x(u1)
+                ntx = tx + (left2 - left) - (sc - 1) * (left - tx)
+                struct.pack_into('<4i', t, 0, round(a_ * sc), b_, c_, d_)
+                struct.pack_into('<hh', t, 0x10, round((ntx - mm_x) * 16), round(y + dv * 160.8 * 16))
+            f.xforms.append(t)
+            struct.pack_into('<H', k, 4, len(f.xforms) - 1)
+    # fundo preto do medidor de Power Up (malhas 26, 28 e 32: as pontas e a faixa esticada) some; o preenchimento fica
+    pu = f.c7[obj(f, next(struct.unpack_from('<H', keys[0], 2)[0] for h, keys in mm.anims
+                         if any(struct.unpack_from('<H', k, 8)[0] != 0xffff and f.s(struct.unpack_from('<H', k, 8)[0]) == 'PowerUpMeter'
+                                for k in keys)), 7)]
+    zero = len(f.xforms)
+    f.xforms.append(bytearray(f.xforms[0]))
+    struct.pack_into('<4i', f.xforms[zero], 0, 0, 0, 0, 0)
+    for h, keys in pu.anims:
+        for k in keys:
+            hd = struct.unpack_from('<H', k, 2)[0]
+            if hd and hd < len(f.handlers) and f.handlers[hd][0] == 1 and f.handlers[hd][1] in (26, 28, 32):
+                struct.pack_into('<H', k, 4, zero)
 
 
 def mod_flp(b, icons=True):
@@ -396,7 +467,7 @@ def mod_flp(b, icons=True):
         for h, keys in pm.anims:
             for k in keys:
                 if f.s(struct.unpack_from('<H', k, 8)[0]) == elem_name and struct.unpack_from('<H', k, 0)[0] in (F0, F1):
-                    struct.pack_into('<H', k, 4, xform(f, struct.unpack_from('<H', k, 4)[0], y=y))
+                    struct.pack_into('<H', k, 4, xform(f, struct.unpack_from('<H', k, 4)[0], y=y, k=CFG['row_k']))
     for st, (name, _) in CFG['old'].items():
         move(name, Y[st])
     sfx_key = next(k for h, keys in pm.anims for k in keys
@@ -405,7 +476,7 @@ def mod_flp(b, icons=True):
     depth = max(struct.unpack_from('<H', h, LO)[0] for h, _ in pm.anims)
     for s, (h_row, name) in rows.items():
         depth += 1
-        t = xform(f, t_sfx, y=Y[s])
+        t = xform(f, t_sfx, y=Y[s], k=CFG['row_k'])
         nm = f.add_string(name)
         keys = [bytearray(struct.pack('<HHHHH', F0, h_row, t, CFG['kx'], nm)),
                 bytearray(struct.pack('<HHHHH', F1, h_row, t, 0, nm)),
@@ -508,6 +579,8 @@ def mod_flp(b, icons=True):
 
     # ---- ícones dos botões com as teclas quando o teclado/mouse está em uso
     swaps = kbm_flp.add_kbm_icons(f, GAME, LO) if icons else []
+    if GAME == 'gow1':
+        hud_pack_layout(f)
 
     patch_script(f, script_of(root, f, 'PressUp'), '1', call_then_end('/:VtNavUp'))
     patch_script(f, script_of(root, f, 'PressDown'), '1', call_then_end('/:VtNavDown'))
@@ -567,7 +640,9 @@ def wad_get(w, name, rtag=30):
 
 def build_patch(psarc, files, out):
     """files: {nome no manifesto: bytes novos}. Cada arquivo novo vai comprimido (zlib, blocos do psarc)
-    para depois do fim do psarc, reaproveitando as entradas de bloco do arquivo original."""
+    para depois do fim do psarc. Cabendo nos blocos do original, reaproveita as entradas da tabela de blocos;
+    crescendo, ganha entradas novas no fim da tabela (a TOC cresce: o manifesto, que vem logo depois da TOC no
+    psarc e ficaria coberto por ela, é copiado para os extras e a entrada 0 aponta para a cópia)."""
     import zlib
     with open(psarc, 'rb') as fh:
         hdr = fh.read(32)
@@ -578,19 +653,32 @@ def build_patch(psarc, files, out):
         ents, zs, _ = P.entries(fh)
         names = P.read_file(fh, ents[0], zs, block).decode('latin1').split('\n')
         orig = os.path.getsize(psarc)
-    w = 2 if block <= 0x10000 else 3 if block <= 0x1000000 else 4
-    tab_at = 32 + n * ent_size
-    extra = bytearray()
+        w = 2 if block <= 0x10000 else 3 if block <= 0x1000000 else 4
+        tab_at = 32 + n * ent_size
+        grow = any((len(data) + block - 1) // block > (ents[names.index(name) + 1][1] + block - 1) // block
+                   for name, data in files.items())
+        extra = bytearray()
+        if grow:  # manifesto (entrada 0) para os extras, cópia crua dos blocos comprimidos
+            idx0, size0, off0 = ents[0]
+            nb0 = (size0 + block - 1) // block
+            raw = sum(zs[idx0 + k] or min(block, size0 - k * block) for k in range(nb0))
+            fh.seek(off0)
+            extra += fh.read(raw)
+            toc[32 + 25:32 + 30] = orig.to_bytes(5, 'big')
     for name, data in files.items():
         i = names.index(name) + 1
         idx, size, off = ents[i]
         nb_old = (size + block - 1) // block
         nb_new = (len(data) + block - 1) // block
-        assert nb_new <= nb_old, '%s cresceu de %d para %d blocos' % (name, nb_old, nb_new)
         e = 32 + i * ent_size
+        if nb_new > nb_old:  # entradas novas no fim da tabela
+            idx = (len(toc) - tab_at) // w
+            toc += bytes(nb_new * w)
+            toc[e + 16:e + 20] = idx.to_bytes(4, 'big')
+            print('%s: cresceu de %d para %d blocos (entradas novas na tabela)' % (name, nb_old, nb_new))
         toc[e + 20:e + 25] = len(data).to_bytes(5, 'big')
         toc[e + 25:e + 30] = (orig + len(extra)).to_bytes(5, 'big')
-        for k in range(nb_old):
+        for k in range(max(nb_old, nb_new) if nb_new <= nb_old else nb_new):
             chunk = data[k * block:(k + 1) * block]
             if not chunk:
                 z = 0
@@ -603,6 +691,7 @@ def build_patch(psarc, files, out):
                     extra += chunk + bytes(block - len(chunk))  # cru = bloco cheio
                     z = 0
             toc[tab_at + (idx + k) * w:tab_at + (idx + k + 1) * w] = z.to_bytes(w, 'big')
+    struct.pack_into('>I', toc, 12, len(toc))
     with open(out, 'wb') as fo:
         fo.write(b'VTPP' + struct.pack('<QII', orig, len(toc), len(extra)))
         fo.write(toc)
@@ -624,12 +713,6 @@ def main():
             w = P.read_file(fh, ents[names.index(name) + 1], zs, block)
             new_flp = mod_flp(wad_get(w, rname, rtag))
             files[name] = wad_replace(w, rname, new_flp, rtag)
-            if (len(files[name]) + block - 1) // block > (len(w) + block - 1) // block:
-                # o patch não pode crescer em blocos do psarc: sem os ícones de teclado (o WAD portátil do GoW2
-                # passa por ~3 KB; o modo PS TV, o padrão do vitart, usa o _VitaTV)
-                print('%s: sem espaço para os ícones de teclado' % name)
-                new_flp = mod_flp(wad_get(w, rname, rtag), icons=False)
-                files[name] = wad_replace(w, rname, new_flp, rtag)
             if LAST_KBM:
                 kbm.append((name, new_flp, LAST_KBM))
             if dump:
@@ -642,11 +725,7 @@ def main():
             f = flp.FLP(wad_get(w, sname, stag))
             swaps = kbm_flp.add_kbm_icons(f, GAME, LO)
             new_flp = f.write()
-            nw = wad_replace(w, sname, new_flp, stag)
-            if (len(nw) + block - 1) // block > (len(w) + block - 1) // block:
-                print('%s: sem espaço para os ícones de teclado' % name)
-                continue
-            files[name] = nw
+            files[name] = wad_replace(w, sname, new_flp, stag)
             kbm.append((name, new_flp, kbm_flp.locate(new_flp, swaps)))
     build_patch(psarc, files, out)
     write_kbm(kbm, out[:-len('.vtpatch')] + '.kbm.tsv' if out.endswith('.vtpatch') else out + '.kbm.tsv')

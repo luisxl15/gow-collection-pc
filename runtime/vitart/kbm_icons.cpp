@@ -27,7 +27,8 @@
 namespace vt {
 
 int game_id();           // game_options.cpp
-bool input_kbm_active(); // hle_sys.cpp
+int input_icon_mode(); // hle_sys.cpp: 0 = PlayStation, 1 = teclado/mouse, 2 = Xbox
+bool icon_atlas_available(int mode); // hle_gxm.cpp: há atlas de ícones instalado para o modo
 
 namespace {
 
@@ -139,7 +140,9 @@ void worker() {
     std::vector<int> applied(tables.size(), -1);
     uint32_t scans = 0;
     for (;;) {
-        const bool kbm = input_kbm_active();
+        // as trocas (ícone -> glifo do atlas) valem em todo modo com atlas instalado (PS5, teclado, Xbox); o atlas muda
+        // com o modo. Sem atlas do modo, os ícones originais do jogo.
+        const bool kbm = icon_atlas_available(input_icon_mode());
         for (size_t i = 0; i < tables.size(); i++) {
             if (where[i] && !still_there(tables[i], where[i])) where[i] = 0, applied[i] = -1;
             if (!where[i]) {

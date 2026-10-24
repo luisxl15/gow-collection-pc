@@ -190,8 +190,9 @@ int deflection(const State &s) {
 State poll() {
     State out;
     int best = -1;
-    auto take = [&](State s) {
+    auto take = [&](State s, uint8_t src) {
         out.buttons |= s.buttons;
+        if (s.buttons || deflection(s) > 60 * 60) out.active |= src;
         const int dfl = deflection(s);
         if (dfl > best) best = dfl, out.lx = s.lx, out.ly = s.ly, out.rx = s.rx, out.ry = s.ry;
     };
@@ -226,7 +227,7 @@ State poll() {
             s.lx = axis_x(g.sThumbLX), s.ly = axis_y(g.sThumbLY), s.rx = axis_x(g.sThumbRX), s.ry = axis_y(g.sThumbRY);
             deadzone(s.lx, s.ly, 30);
             deadzone(s.rx, s.ry, 34);
-            take(s);
+            take(s, 1);
         }
     // Controles da Sony: varredura a cada 2 s (conectar e desconectar com o jogo aberto).
     static auto last_scan = std::chrono::steady_clock::now() - std::chrono::seconds(10);
@@ -261,7 +262,7 @@ State poll() {
         sony_state(r, p->dualsense, s);
         deadzone(s.lx, s.ly, 12);
         deadzone(s.rx, s.ry, 12);
-        take(s);
+        take(s, 2);
     }
     return out;
 }

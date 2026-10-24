@@ -1,6 +1,8 @@
 """Tira da ISO do GoW1 de PS2 só os sons que o vitart usa, para não depender mais da ISO.
 
-    python tools/ps2_audio_extract.py <iso do PS2> <ps2audio.idx> <pasta de dados do vitart>
+    python tools/ps2_audio_extract.py <iso do PS2> <ps2audio.idx> <pasta de dados do vitart> [prefixo]
+
+O prefixo (padrão ps2audio; GoW2: ps2audio_gow2) dá os nomes <prefixo>.bin e <prefixo>_files.idx.
 
 Lê o índice (tools/ps2_audio_index.py: setor e tamanho de cada VPK/VAG na ISO), copia cada arquivo para
 <dados>/ps2audio.bin alinhado a 2048 bytes e grava <dados>/ps2audio_files.idx: o mesmo formato, com o
@@ -15,12 +17,13 @@ SECTOR = 2048
 
 def main():
     iso_path, idx_path, out = sys.argv[1:4]
+    pre = sys.argv[4] if len(sys.argv) > 4 else 'ps2audio'
     d = open(idx_path, 'rb').read()
     magic, nf, nk = struct.unpack_from('<III', d, 0)
     assert magic == 0x32535047, 'índice inválido'
     files = [list(struct.unpack_from('<6I', d, 12 + 24 * i)) for i in range(nf)]
     iso = open(iso_path, 'rb')
-    tmp = os.path.join(out, 'ps2audio.bin.tmp')
+    tmp = os.path.join(out, pre + '.bin.tmp')
     sector = 0
     with open(tmp, 'wb') as o:
         for i, f in enumerate(files):
@@ -38,10 +41,10 @@ def main():
     idx = bytearray(d)
     for i, f in enumerate(files):
         struct.pack_into('<6I', idx, 12 + 24 * i, *f)
-    with open(os.path.join(out, 'ps2audio_files.idx'), 'wb') as o:
+    with open(os.path.join(out, pre + '_files.idx'), 'wb') as o:
         o.write(idx)
-    os.replace(tmp, os.path.join(out, 'ps2audio.bin'))
-    print('%d sons, %.0f MB em %s' % (nf, sector * SECTOR / 2 ** 20, os.path.join(out, 'ps2audio.bin')))
+    os.replace(tmp, os.path.join(out, pre + '.bin'))
+    print('%d sons, %.0f MB em %s' % (nf, sector * SECTOR / 2 ** 20, os.path.join(out, pre + '.bin')))
 
 
 if __name__ == '__main__':

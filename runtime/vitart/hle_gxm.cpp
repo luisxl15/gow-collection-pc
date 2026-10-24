@@ -26,6 +26,7 @@
 #include <set>
 #include <memory>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 
 namespace vt {
@@ -245,9 +246,9 @@ struct TexEntry {
     uint32_t rw = 0, rh = 0; // tamanho do PNG do pack de texturas (0 = textura original)
     uint64_t tp_key = 0;      // PNG do pack sendo decodificado em segundo plano
     uint64_t mat_key = 0;     // material PBR da textura (pbr.h; 0 = sem material)
-    bool kbm_alt = false;     // há versão de teclado e mouse (texpack_kbm) desta textura
-    bool kbm_mode = false;    // modo de ícones com que foi montada (refeita quando o modo muda)
-    bool kbm_used = false;    // o PNG em uso é o de teclado e mouse (outra textura na GPU)
+    bool kbm_alt = false;     // há versão de teclado/mouse ou de Xbox (texpack_kbm, texpack_xbox) desta textura
+    int icon_mode = -1;       // modo de ícones com que foi montada (refeita quando o modo muda)
+    bool kbm_used = false;    // o PNG em uso é o de teclado/mouse ou o de Xbox (outra textura na GPU)
     uint64_t qhash = 0;       // hash rápido (amostras) da última verificação completa
 };
 
@@ -265,10 +266,17 @@ void texpack_set_enabled(bool on) {
 // Ícones de teclado e mouse (vitart-data/texpack_kbm/*/index.tsv, mesmo formato e mesma chave): com o
 // teclado/mouse como último controle usado (input_kbm_active, hle_sys.cpp), as texturas com os botões do
 // PlayStation trocam pelos PNGs com as teclas (tools/kbm_glyphs.py). Valem mesmo com "HD Textures" desligado.
-// No mapa de jobs/PNGs as chaves levam um sal, para não se confundirem com as do pack normal.
-bool input_kbm_active();
+// Com um controle XInput, os de vitart-data/texpack_xbox (botões do Xbox, tools/kbm_atlas.py --xbox); com um da Sony,
+// os de texpack_ps5 (botões do PS5, --ps5).
+// No mapa de jobs/PNGs as chaves levam um sal por variante, para não se confundirem com as do pack normal.
+int input_icon_mode(); // hle_sys.cpp: 0 = PlayStation, 1 = teclado/mouse, 2 = Xbox
 static std::unordered_map<uint64_t, std::string> g_texkbm; // chave com sal -> PNG
 constexpr uint64_t kKbmSalt = 0x4B424D5F49434F4Eull;      // "KBM_ICON"
+constexpr uint64_t kXboxSalt = 0x58424F585F49434Full;     // "XBOX_ICO"
+constexpr uint64_t kPs5Salt = 0x5053355F49434F4Eull;      // "PS5_ICON"
+static bool g_icon_atlas[3] = {}; // modo de ícones (0 PS5, 1 teclado, 2 Xbox) com atlas instalado
+// (lido pela thread de kbm_icons.cpp: só consulta; quem carrega os packs é a thread de renderização)
+bool icon_atlas_available(int mode) { return mode >= 0 && mode < 3 && g_icon_atlas[mode]; }
 static void texpack_load();
 static const std::string &tp_path(uint64_t key) {
     auto it = g_texkbm.find(key);
@@ -303,21 +311,25 @@ static void texpack_load() {
         }
         if (n) logf("vitart: pack de texturas %s: %zu texturas", dir.path().filename().string().c_str(), n);
     }
-    // VITART_TEXKBM_DIR (testes): outra pasta de ícones de teclado, sem mexer na instalada
-    const char *kd = getenv("VITART_TEXKBM_DIR");
-    const std::filesystem::path kroot = kd && *kd ? std::filesystem::path(kd) : std::filesystem::path(data_path()) / "texpack_kbm";
-    for (auto &dir : std::filesystem::directory_iterator(kroot, ec)) {
-        if (dir.path().filename().string() != want) continue;
-        std::ifstream f(dir.path() / "index.tsv");
-        std::string line;
-        size_t n = 0;
-        while (std::getline(f, line)) {
-            const size_t tab = line.find('\t');
-            if (tab == std::string::npos || line[0] == '#') continue;
-            g_texkbm[std::strtoull(line.substr(0, tab).c_str(), nullptr, 16) ^ kKbmSalt] = (dir.path() / line.substr(tab + 1)).string();
-            n++;
+    // VITART_TEXKBM_DIR / VITART_TEXXBOX_DIR (testes): outra pasta de ícones, sem mexer na instalada
+    for (const auto &[env, sub, salt, what, mode] : {std::tuple{"VITART_TEXKBM_DIR", "texpack_kbm", kKbmSalt, "teclado e mouse", 1},
+                                                     std::tuple{"VITART_TEXXBOX_DIR", "texpack_xbox", kXboxSalt, "Xbox", 2},
+                                                     std::tuple{"VITART_TEXPS5_DIR", "texpack_ps5", kPs5Salt, "PS5", 0}}) {
+        const char *kd = getenv(env);
+        const std::filesystem::path kroot = kd && *kd ? std::filesystem::path(kd) : std::filesystem::path(data_path()) / sub;
+        for (auto &dir : std::filesystem::directory_iterator(kroot, ec)) {
+            if (dir.path().filename().string() != want) continue;
+            std::ifstream f(dir.path() / "index.tsv");
+            std::string line;
+            size_t n = 0;
+            while (std::getline(f, line)) {
+                const size_t tab = line.find('\t');
+                if (tab == std::string::npos || line[0] == '#') continue;
+                g_texkbm[std::strtoull(line.substr(0, tab).c_str(), nullptr, 16) ^ salt] = (dir.path() / line.substr(tab + 1)).string();
+                n++;
+            }
+            if (n) logf("vitart: ícones de %s %s: %zu texturas", what, dir.path().filename().string().c_str(), n), g_icon_atlas[mode] = true;
         }
-        if (n) logf("vitart: ícones de teclado e mouse %s: %zu texturas", dir.path().filename().string().c_str(), n);
     }
 }
 static uint64_t fnv64(const uint8_t *p, size_t n, uint64_t h = 0xCBF29CE484222325ull) {
@@ -362,18 +374,18 @@ static std::unordered_map<uint64_t, std::shared_ptr<TexpackJob>> g_tp_jobs;
 static std::mutex g_tp_sem_mutex;
 static std::condition_variable g_tp_sem_cv;
 static int g_tp_running = 0;
-// Versão de teclado e mouse da textura (chave com sal), se houver; 0 = nenhuma.
-static uint64_t texkbm_key(const gxmtex::Info &info, size_t base_bytes) {
+// Versão de teclado/mouse (kKbmSalt) ou de Xbox (kXboxSalt) da textura (chave com sal), se houver; 0 = nenhuma.
+static uint64_t texkbm_key(const gxmtex::Info &info, size_t base_bytes, uint64_t salt) {
     texpack_load();
     if (g_texkbm.empty() || !base_bytes) return 0;
     const uint32_t wh[2] = {info.width, info.height};
     const uint64_t key = fnv64(ptr<uint8_t>(info.data), std::min<size_t>(4096, base_bytes),
                                fnv64(reinterpret_cast<const uint8_t *>(wh), 8));
     if (info.base == 0x95000000u && info.palette) {
-        const uint64_t kp = fnv64(ptr<uint8_t>(info.palette), 1024, key) ^ kKbmSalt;
+        const uint64_t kp = fnv64(ptr<uint8_t>(info.palette), 1024, key) ^ salt;
         if (g_texkbm.count(kp)) return g_texpack_rejected.count(kp) ? 0 : kp;
     }
-    return g_texkbm.count(key ^ kKbmSalt) && !g_texpack_rejected.count(key ^ kKbmSalt) ? key ^ kKbmSalt : 0;
+    return g_texkbm.count(key ^ salt) && !g_texpack_rejected.count(key ^ salt) ? key ^ salt : 0;
 }
 static uint64_t texpack_key(const gxmtex::Info &info, size_t base_bytes) {
     texpack_load();
@@ -900,15 +912,26 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
                     if (pal) h = content_hash(pal, 1024, h);
                 }
                 e.qhash = q;
-                const bool kbm_now = input_kbm_active();
-                if (!e.px || h != e.hash || (e.kbm_alt && e.kbm_mode != kbm_now)) {
+                const int mode = input_icon_mode();
+                if (!e.px || h != e.hash || (e.kbm_alt && e.icon_mode != mode)) {
                     auto px = std::make_shared<std::vector<uint8_t>>();
                     const bool ok = n && gxmtex::decode(ptr<uint8_t>(0), info, *px);
-                    e.rw = e.rh = 0, e.tp_key = 0, e.kbm_used = false, e.kbm_mode = kbm_now;
+                    e.rw = e.rh = 0, e.tp_key = 0, e.kbm_used = false, e.icon_mode = mode;
                     if (ok) texdump(info, n, *px);
-                    const uint64_t kk = ok ? texkbm_key(info, n) : 0;
-                    e.kbm_alt = kk != 0;
-                    if (kk && kbm_now) texpack_start(kk), e.tp_key = kk; // ícones de teclado e mouse
+                    if (static const bool tl = getenv("VITART_TEXLOG") != nullptr; tl) { // diagnóstico: cada textura decodificada
+                        static std::set<uint64_t> seen;
+                        const uint32_t wh[2] = {info.width, info.height};
+                        uint64_t key = fnv64(ptr<uint8_t>(info.data), std::min<size_t>(4096, n), fnv64(reinterpret_cast<const uint8_t *>(wh), 8));
+                        if (info.base == 0x95000000u && info.palette) key = fnv64(ptr<uint8_t>(info.palette), 1024, key);
+                        if (seen.insert(key).second)
+                            logf("vitart: textura %016llx %ux%u base 0x%08x tipo %u ok %d n %zu", (unsigned long long)key, info.width,
+                                 info.height, info.base, info.type, (int)ok, n);
+                    }
+                    const uint64_t kk0 = ok ? texkbm_key(info, n, kPs5Salt) : 0, kk1 = ok ? texkbm_key(info, n, kKbmSalt) : 0,
+                                   kk2 = ok ? texkbm_key(info, n, kXboxSalt) : 0;
+                    const uint64_t kk = mode == 1 ? kk1 : mode == 2 ? kk2 : kk0;
+                    e.kbm_alt = kk0 || kk1 || kk2;
+                    if (kk) texpack_start(kk), e.tp_key = kk; // ícones de teclado/mouse ou de Xbox
                     else if (ok)
                         if (const uint64_t k = texpack_key(info, n)) texpack_start(k), e.tp_key = k; // HD em segundo plano
                     e.mat_key = ok ? pbr::key_for(ptr<uint8_t>(info.data), n, info.width, info.height,
@@ -937,7 +960,7 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
             if ((int)i == pinfo_f.diffuse) diffuse_idx = (int)d.textures.size(), diffuse_key = e.mat_key;
             keep.push_back(e.px);
             t.rgba = e.px->data();
-            t.key = (e.kbm_used ? e.hash ^ kKbmSalt : e.rw ? e.hash ^ 0x9E3779B97F4A7C15ull : e.hash) | 1; // HD do pack é outra textura na GPU
+            t.key = (e.kbm_used ? e.hash ^ (e.icon_mode == 2 ? kXboxSalt : e.icon_mode == 1 ? kKbmSalt : kPs5Salt) : e.rw ? e.hash ^ 0x9E3779B97F4A7C15ull : e.hash) | 1; // HD do pack é outra textura na GPU
             if (e.rw) {
                 // HD do pack: tamanho do PNG e cadeia de mipmaps completa (sem cintilar de longe).
                 t.width = e.rw, t.height = e.rh;

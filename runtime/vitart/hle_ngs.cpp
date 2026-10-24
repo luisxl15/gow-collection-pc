@@ -31,6 +31,7 @@
 #include <vector>
 
 namespace vt {
+int game_id(); // game_options.cpp: 1 = GoW1, 2 = GoW2
 namespace {
 
 constexpr uint32_t SCE_OK = 0;
@@ -310,16 +311,19 @@ static bool available() {
     static const bool ok = [] {
         // Sons extraídos (tools/ps2_audio_extract.py): <dados>/ps2audio.bin + ps2audio_files.idx, sem ISO.
         // Sem eles: a ISO do iniciador (VITART_PS2_AUDIO) ou a lembrada em vitart_options.ini (ps2_iso=).
-        std::string iso, idx = data_path() + "/ps2audio.idx";
-        if (FILE *b = fopen((data_path() + "/ps2audio.bin").c_str(), "rb")) {
+        // GoW2: ps2audio_gow2.bin + ps2audio_gow2_files.idx (só os extraídos; a ISO lembrada é a do GoW1)
+        const bool g2 = game_id() == 2;
+        const std::string pre = data_path() + (g2 ? "/ps2audio_gow2" : "/ps2audio");
+        std::string iso, idx = pre + ".idx";
+        if (FILE *b = fopen((pre + ".bin").c_str(), "rb")) {
             fclose(b);
-            if (FILE *x = fopen((data_path() + "/ps2audio_files.idx").c_str(), "rb")) {
+            if (FILE *x = fopen((pre + "_files.idx").c_str(), "rb")) {
                 fclose(x);
-                iso = data_path() + "/ps2audio.bin", idx = data_path() + "/ps2audio_files.idx";
+                iso = pre + ".bin", idx = pre + "_files.idx";
             }
         }
-        if (iso.empty() && getenv("VITART_PS2_AUDIO")) iso = getenv("VITART_PS2_AUDIO");
-        if (iso.empty())
+        if (iso.empty() && !g2 && getenv("VITART_PS2_AUDIO")) iso = getenv("VITART_PS2_AUDIO");
+        if (iso.empty() && !g2)
             if (FILE *ini = fopen((data_path() + "/vitart_options.ini").c_str(), "r")) {
                 char line[1024];
                 while (fgets(line, sizeof line, ini))
