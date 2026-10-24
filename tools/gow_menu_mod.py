@@ -418,6 +418,37 @@ def hud_pack_layout(f):
                 struct.pack_into('<H', k, 4, zero)
 
 
+# HUD sem esticar (como o do GoW3): o FLP é um quadro 800x600 (4:3) esticado na tela 16:9 -> os elementos da raiz que
+# aparecem desde o quadro 0 (medidores, contadores, menus) encolhem na horizontal por 0,75 (= (4/3)/(16/9)), cada um
+# ancorado no lado mais perto: à esquerda de 300 fica preso à borda esquerda, à direita de 500 à direita; os do meio
+# (menus com fundo de tela inteira) ficam como estão. Os da biblioteca de ícones (quadros 49+, desenhados dentro dos textos) não mudam.
+HUD_ASPECT = 0.75
+
+
+def hud_unstretch(f):
+    seen = {}
+    for h, keys in f.root.anims:
+        if not keys or struct.unpack_from('<H', keys[0], 0)[0] != 0:
+            continue
+        for k in keys:
+            hd, t = struct.unpack_from('<HH', k, 2)
+            if not hd or t >= len(f.xforms):
+                continue
+            if t not in seen:
+                x = bytearray(f.xforms[t])
+                a_, b_, c_, d_ = struct.unpack_from('<4i', x, 0)
+                px = struct.unpack_from('<h', x, 0x10)[0] / 16
+                if 300 <= px <= 500:  # centro: menus com fundo de tela inteira, ficam como estão
+                    seen[t] = t
+                    continue
+                anchor = 0.0 if px < 300 else 800.0
+                struct.pack_into('<4i', x, 0, round(a_ * HUD_ASPECT), round(b_ * HUD_ASPECT), c_, d_)
+                struct.pack_into('<h', x, 0x10, round((anchor + (px - anchor) * HUD_ASPECT) * 16))
+                f.xforms.append(x)
+                seen[t] = len(f.xforms) - 1
+            struct.pack_into('<H', k, 4, seen[t])
+
+
 def mod_flp(b, icons=True):
     f = flp.FLP(b)
     pm = f.c7[obj(f, named(f.root, f, 'PauseMenu'), 7)]
@@ -581,6 +612,8 @@ def mod_flp(b, icons=True):
     swaps = kbm_flp.add_kbm_icons(f, GAME, LO) if icons else []
     if GAME == 'gow1':
         hud_pack_layout(f)
+    if os.environ.get('VT_HUD_STRETCH') != '1':
+        hud_unstretch(f)
 
     patch_script(f, script_of(root, f, 'PressUp'), '1', call_then_end('/:VtNavUp'))
     patch_script(f, script_of(root, f, 'PressDown'), '1', call_then_end('/:VtNavDown'))
