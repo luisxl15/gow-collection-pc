@@ -455,6 +455,15 @@ def main():
                 tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), spec[0])
                 fname = '_'.join([os.path.splitext(spec[0])[0]] + spec[1:]) + '.png'
                 subprocess.run([sys.executable, tool, packzip, os.path.join(outdir, fname)] + spec[1:], check=True)
+            elif c[1].startswith('fixo:'):  # PNG pronto fora do pack (p. ex. textura do Vita ampliada): texpack_fixos/<jogo>
+                fname = c[1][5:]
+                src = os.path.join(os.environ.get('TEXPACK_FIXOS', os.path.join(os.path.dirname(os.path.abspath(outdir)),
+                                                                                 '..', 'texpack_fixos', game)), fname)
+                if not os.path.exists(src):
+                    print(f'extra fixo não achado: {src}', flush=True)
+                    continue
+                with open(src, 'rb') as fi, open(os.path.join(outdir, fname), 'wb') as fo:
+                    fo.write(fi.read())
             elif c[1] in by_name:
                 fname = c[1]
                 index[vk] = by_name[fname]
