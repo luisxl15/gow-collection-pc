@@ -99,7 +99,34 @@ def tex_record(template, rgba):
 
 
 # ------------------------------------------------------------------ malha
-def gmdl_record(mesh, template, nmat):
+def model_material_rgba(recs, i):
+    """Texturas (RGBA) dos materiais do modelo recs[i], na ordem do índice de material da malha: as referências
+    MAT_* logo depois do MDL_ -> corpo do MAT (nome do TXR) -> TXR (GFX e PAL)."""
+    body = {}
+    for r in recs:
+        if r[4] and r[3]:
+            body.setdefault(r[2], r[3])
+    out = []
+    for r in recs[i + 1:]:
+        if not (r[0] == 1 and not r[3] and r[2].startswith('MAT_')):
+            break
+        rgba = None
+        try:
+            mb = body[r[2]]
+            k = mb.index(b'TXR_')
+            tb = body[mb[k:k + 24].split(bytes(1))[0].decode('latin1')]
+            g, pl = (tb[o:o + 24].split(bytes(1))[0].decode('latin1') for o in (4, 28))
+            rgba = ps2_rgba(body[g], body[pl])
+        except (KeyError, ValueError, TypeError):
+            pass
+        out.append(rgba)
+    return out
+
+
+def gmdl_record(mesh, template, nmat, mat_rgba=None):
+    """mat_rgba: textura de cada material; objetos que usam a parte transparente dela (franjas de saia, por exemplo)
+    vão para o fim da lista de desenho, depois do que fica atrás deles (senão gravam profundidade nos pixels
+    transparentes e escondem o que é desenhado depois)."""
     parts = ps2_mesh.parse(mesh)
     t = template[4:]
     tmpl_offs = struct.unpack_from('>%dI' % struct.unpack_from('>I', t, 16)[0], t, 0x18)
@@ -112,6 +139,8 @@ def gmdl_record(mesh, template, nmat):
             remap = {i: jmap.index(j) for i, j in enumerate(ob.joint_map)}
             v0, i0 = len(P), len(idx)
             seen = {}
+            img = mat_rgba[ob.material] if mat_rgba and ob.material < len(mat_rgba) else None
+            clear = tris = 0
             for p in ob.packets[0]:
                 ids = []
                 for i in range(len(p.xyz)):
@@ -130,8 +159,16 @@ def gmdl_record(mesh, template, nmat):
                 for i in range(2, len(ids)):
                     if not p.skip[i]:
                         idx += [ids[i - 2], ids[i - 1], ids[i]]
+                        if img is not None and p.uv:
+                            u = (p.uv[i - 2][0] + p.uv[i - 1][0] + p.uv[i][0]) / 3
+                            v = (p.uv[i - 2][1] + p.uv[i - 1][1] + p.uv[i][1]) / 3
+                            h, w = img.shape[:2]
+                            clear += img[int((v % 1) * h) % h, int((u % 1) * w) % w, 3] < 250
+                            tris += 1
             pos = np.array(P[v0:], np.float32)[:, :3]
-            meta.append((pos.min(0), pos.max(0), ob.material, v0, len(P) - v0, i0, len(idx) - i0, jmap))
+            meta.append((pos.min(0), pos.max(0), ob.material, v0, len(P) - v0, i0, len(idx) - i0, jmap,
+                         tris and clear / tris > 0.05))
+        meta = [m[:8] for m in sorted(meta, key=lambda m: m[8])]  # transparentes por último (ordem estável)
         assert len(P) < 65536
         streams = [('POS0', 2, np.array(P, '<f4').tobytes()), ('NRM0', 9, np.array(N, 'i1').tobytes()),
                    ('COL0', 6, np.array(C, '<f2').tobytes()), ('TEX0', 5, np.array(U, '<f2').tobytes()),
@@ -255,7 +292,7 @@ def convert(mod, vita):
             else:
                 nmat = struct.unpack_from('<I', body, 0x14)[0]  # TextureCount do modelo (god_of_war_browser, mdl.go)
                 tmpl = vgmdl.get(gname) or next(iter(vgmdl.values()))
-                out.append([1, 0, gname, gmdl_record(mesh[3], tmpl, nmat), True, 0])
+                out.append([1, 0, gname, gmdl_record(mesh[3], tmpl, nmat, model_material_rgba(mrec, i)), True, 0])
                 gm_new.append(gname)
     print('texturas novas: %d de %d, GMDL novos: %s, registros: %d -> %d' % (
         sum(1 for v in newtex.values() if v[2] not in {x[2] for x in vtex}), tex_n, gm_new, len(mrec), len(out)))
