@@ -38,6 +38,7 @@
 namespace vt {
 int game_id(); // abaixo: 1 = GoW1, 2 = GoW2
 int trophy_unlock_all(); // hle_sys.cpp: cheat "Unlock All Trophies"
+void enemy_hp_tick(int game); // enemy_hp.cpp: barras de vida dos inimigos
 
 void texpack_set_enabled(bool on);
 bool texpack_available();
@@ -428,6 +429,7 @@ void game_options_tick() {
         }
     if (g_req_trophy.exchange(0) == 2) trophy_unlock_all();
     cheats_tick(game_id());
+    enemy_hp_tick(game_id());
     if (changed) save();
     // estado para o menu mostrar
     const uint32_t obj = rd32(op->optr);
