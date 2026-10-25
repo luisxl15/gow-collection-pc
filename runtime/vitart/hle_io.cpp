@@ -5,7 +5,10 @@
 #include "video_hd.h"
 #include <thread>
 
+#include <algorithm>
 #include <cctype>
+#include <fstream>
+#include <iterator>
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
@@ -64,28 +67,88 @@ struct PsarcPatch {
     uint64_t orig = 0;
     std::vector<uint8_t> toc, extra;
 };
-// Carregador de mods: <mods>/<id>/<psarc>.vtpatch é um patch completo (o do vitart mais os arquivos do mod, gerado
-// por tools/gow2_mod_wad.py + tools/gow_menu_mod.py --wad) e vale no lugar de <mods>/<psarc>.vtpatch quando
-// vitart_options.ini tem mod_<id>=1 (menu de pausa: Options > Mods, aplicado ao reiniciar). Sem mod ligado (ou sem
-// o arquivo do mod para este psarc), a pasta de sempre.
-std::string mods_dir_for(const std::string &psarc_name) {
+// Carregador de mods (docs/modding/README.md). Por cima do patch do vitart, cada mod ligado (mod_<id>=1 no
+// vitart_options.ini; menu de pausa: Options > Mods, aplicado ao reiniciar) troca arquivos inteiros do psarc:
+// <mods>/<id>/entries.tsv lista "<psarc>\t<entrada da TOC>\t<arquivo no mod>". Vários mods juntos: vale a ordem de
+// mods/modlist.tsv (o último ganha). Os arquivos entram crus (blocos sem compressão) no fim dos extras.
+std::string mods_dir_for(const std::string &) {
     const char *md = getenv("VITART_MODS_DIR"); // testes: outra pasta de patches, sem mexer nos instalados
-    const std::string base = md && *md ? std::string(md) : data_path() + "/mods";
+    return md && *md ? std::string(md) : data_path() + "/mods";
+}
+// Mods ligados, na ordem de modlist.tsv ("<jogo>\t<índice no menu>\t<id>\t<nome>").
+std::vector<std::string> enabled_mods() {
+    std::vector<std::string> on, out;
     if (FILE *f = fopen((data_path() + "/vitart_options.ini").c_str(), "r")) {
         char line[512];
-        std::string found;
         while (fgets(line, sizeof line, f)) {
             char id[128];
             unsigned v = 0;
-            if (sscanf(line, "mod_%127[A-Za-z0-9_]=%u", id, &v) == 2 && v && found.empty()) {
-                std::error_code ec;
-                if (fs::exists(base + "/" + id + "/" + psarc_name + ".vtpatch", ec)) found = base + "/" + id;
-            }
+            if (sscanf(line, "mod_%127[A-Za-z0-9_]=%u", id, &v) == 2 && v) on.push_back(id);
         }
         fclose(f);
-        if (!found.empty()) return found;
     }
-    return base;
+    if (FILE *f = fopen((mods_dir_for("") + "/modlist.tsv").c_str(), "r")) {
+        char line[1024];
+        while (fgets(line, sizeof line, f)) {
+            char game[16], id[128];
+            unsigned idx = 0;
+            if (sscanf(line, "%15s %u %127s", game, &idx, id) == 3 && std::find(on.begin(), on.end(), id) != on.end())
+                out.push_back(id);
+        }
+        fclose(f);
+    }
+    return out;
+}
+static uint64_t be(const uint8_t *p, int n) {
+    uint64_t v = 0;
+    for (int i = 0; i < n; i++) v = v << 8 | p[i];
+    return v;
+}
+static void put_be(uint8_t *p, int n, uint64_t v) {
+    for (int i = n - 1; i >= 0; i--, v >>= 8) p[i] = (uint8_t)v;
+}
+// Troca a entrada idx da TOC (já remendada) por data: entradas novas no fim da tabela de blocos (0 = bloco cheio cru)
+// e os dados, completados até o bloco, no fim dos extras.
+static void overlay_file(std::vector<uint8_t> &toc, std::vector<uint8_t> &extra, uint64_t orig, uint32_t idx,
+                         const std::vector<uint8_t> &data) {
+    const uint32_t ent = (uint32_t)be(&toc[16], 4), n = (uint32_t)be(&toc[20], 4), block = (uint32_t)be(&toc[24], 4);
+    const int w = block <= 0x10000 ? 2 : block <= 0x1000000 ? 3 : 4;
+    const size_t tab_at = 32 + (size_t)n * ent;
+    if (idx == 0 || idx >= n) return;
+    const uint64_t nb = (data.size() + block - 1) / block;
+    const uint64_t first = (toc.size() - tab_at) / w;
+    toc.resize(toc.size() + nb * w, 0);
+    uint8_t *e = &toc[32 + (size_t)idx * ent];
+    put_be(e + 16, 4, first);
+    put_be(e + 20, 5, data.size());
+    put_be(e + 25, 5, orig + extra.size());
+    extra.insert(extra.end(), data.begin(), data.end());
+    extra.resize(extra.size() + (nb * block - data.size()), 0);
+}
+// A TOC cresceu: o que o psarc tinha logo depois dela (o manifesto, entrada 0, e o que mais estiver no trecho
+// coberto) ficaria escondido pela TOC nova; esses dados são copiados crus para os extras.
+static void relocate_shadowed(std::vector<uint8_t> &toc, std::vector<uint8_t> &extra, uint64_t orig, FILE *ps,
+                              uint64_t orig_toc_len) {
+    const uint32_t ent = (uint32_t)be(&toc[16], 4), n = (uint32_t)be(&toc[20], 4), block = (uint32_t)be(&toc[24], 4);
+    const int w = block <= 0x10000 ? 2 : block <= 0x1000000 ? 3 : 4;
+    const size_t tab_at = 32 + (size_t)n * ent;
+    for (uint32_t i = 0; i < n; i++) {
+        uint8_t *e = &toc[32 + (size_t)i * ent];
+        const uint64_t bi = be(e + 16, 4), size = be(e + 20, 5), off = be(e + 25, 5);
+        if (off >= orig || off >= toc.size() || !size) continue;
+        uint64_t raw = 0;
+        for (uint64_t k = 0; k * block < size; k++) {
+            const size_t at = tab_at + (size_t)(bi + k) * w;
+            const uint64_t z = at + w <= toc.size() ? be(&toc[at], w) : 0;
+            raw += z ? z : block;
+        }
+        if (off + raw <= orig_toc_len) continue;
+        std::vector<uint8_t> buf(raw);
+        _fseeki64(ps, (int64_t)off, SEEK_SET);
+        if (fread(buf.data(), 1, raw, ps) != raw) continue;
+        put_be(e + 25, 5, orig + extra.size());
+        extra.insert(extra.end(), buf.begin(), buf.end());
+    }
 }
 static std::shared_ptr<PsarcPatch> psarc_patch(const std::string &hp) {
     if (hp.size() < 6 || _stricmp(hp.c_str() + hp.size() - 6, ".psarc") != 0) return nullptr;
@@ -97,25 +160,71 @@ static std::shared_ptr<PsarcPatch> psarc_patch(const std::string &hp) {
     if (auto it = cache.find(hp); it != cache.end()) return it->second;
     auto &slot = cache[hp];
     const std::string name = fs::path(hp).filename().string();
-    const std::string pp = mods_dir_for(name) + "/" + name + ".vtpatch";
-    FILE *f = fopen(pp.c_str(), "rb");
-    if (!f) return nullptr;
+    const std::string dir = mods_dir_for(name);
+    const std::string pp = dir + "/" + name + ".vtpatch";
     auto pt = std::make_shared<PsarcPatch>();
-    char magic[4] = {};
-    uint32_t tl = 0, el = 0;
-    bool ok = fread(magic, 1, 4, f) == 4 && !memcmp(magic, "VTPP", 4) && fread(&pt->orig, 8, 1, f) == 1 &&
-              fread(&tl, 4, 1, f) == 1 && fread(&el, 4, 1, f) == 1;
-    if (ok) {
-        pt->toc.resize(tl), pt->extra.resize(el);
-        ok = fread(pt->toc.data(), 1, tl, f) == tl && fread(pt->extra.data(), 1, el, f) == el;
-    }
-    fclose(f);
     std::error_code ec;
-    if (!ok || fs::file_size(hp, ec) != pt->orig) {
-        logf("vitart: %s ignorado (não corresponde a este %s)", pp.c_str(), name.c_str());
-        return nullptr;
+    bool have = false;
+    if (FILE *f = fopen(pp.c_str(), "rb")) {
+        char magic[4] = {};
+        uint32_t tl = 0, el = 0;
+        bool ok = fread(magic, 1, 4, f) == 4 && !memcmp(magic, "VTPP", 4) && fread(&pt->orig, 8, 1, f) == 1 &&
+                  fread(&tl, 4, 1, f) == 1 && fread(&el, 4, 1, f) == 1;
+        if (ok) {
+            pt->toc.resize(tl), pt->extra.resize(el);
+            ok = fread(pt->toc.data(), 1, tl, f) == tl && fread(pt->extra.data(), 1, el, f) == el;
+        }
+        fclose(f);
+        if (!ok || fs::file_size(hp, ec) != pt->orig) {
+            logf("vitart: %s ignorado (não corresponde a este %s)", pp.c_str(), name.c_str());
+            pt = std::make_shared<PsarcPatch>();
+        } else {
+            have = true;
+            logf("vitart: mods em %s: TOC remendada, %u bytes de arquivos trocados", name.c_str(), el);
+        }
     }
-    logf("vitart: mods em %s: TOC remendada, %u bytes de arquivos trocados", name.c_str(), el);
+    // mods do carregador: arquivos inteiros por cima (docs/modding/README.md)
+    FILE *ps = fopen(hp.c_str(), "rb");
+    if (!ps) return have ? slot = pt : nullptr;
+    uint8_t hdr[32] = {};
+    const bool hdr_ok = fread(hdr, 1, 32, ps) == 32 && !memcmp(hdr, "PSAR", 4);
+    const uint64_t orig_toc_len = hdr_ok ? be(hdr + 12, 4) : 0;
+    if (hdr_ok && !have) {
+        pt->orig = fs::file_size(hp, ec);
+        pt->toc.resize(orig_toc_len);
+        _fseeki64(ps, 0, SEEK_SET);
+        if (fread(pt->toc.data(), 1, orig_toc_len, ps) != orig_toc_len) pt->toc.clear();
+    }
+    int nmods = 0, nfiles = 0;
+    if (hdr_ok && !pt->toc.empty())
+        for (const std::string &id : enabled_mods()) {
+            FILE *t = fopen((dir + "/" + id + "/entries.tsv").c_str(), "r");
+            if (!t) continue;
+            char line[1024];
+            int got = 0;
+            while (fgets(line, sizeof line, t)) {
+                char pn[256], rel[700];
+                unsigned idx = 0;
+                if (sscanf(line, "%255[^\t]\t%u\t%699[^\t\r\n]", pn, &idx, rel) != 3 || _stricmp(pn, name.c_str()) != 0)
+                    continue;
+                std::ifstream in(fs::u8path(dir + "/" + id + "/" + rel), std::ios::binary);
+                std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                if (data.empty()) {
+                    logf("vitart: mod %s: %s não encontrado", id.c_str(), rel);
+                    continue;
+                }
+                overlay_file(pt->toc, pt->extra, pt->orig, idx, data);
+                got++;
+            }
+            fclose(t);
+            if (got) nmods++, nfiles += got, logf("vitart: mod %s: %d arquivos em %s", id.c_str(), got, name.c_str());
+        }
+    if (nfiles) {
+        if (pt->toc.size() > orig_toc_len) relocate_shadowed(pt->toc, pt->extra, pt->orig, ps, orig_toc_len);
+        put_be(&pt->toc[12], 4, pt->toc.size());
+    }
+    fclose(ps);
+    if (!have && !nfiles) return nullptr;
     return slot = pt;
 }
 

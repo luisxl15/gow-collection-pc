@@ -39,6 +39,7 @@ namespace vt {
 int game_id(); // abaixo: 1 = GoW1, 2 = GoW2
 int trophy_unlock_all(); // hle_sys.cpp: cheat "Unlock All Trophies"
 void enemy_hp_tick(int game); // enemy_hp.cpp: barras de vida dos inimigos
+std::string mods_dir_for(const std::string &psarc_name); // hle_io.cpp: pasta dos mods
 
 void texpack_set_enabled(bool on);
 bool texpack_available();
@@ -74,12 +75,41 @@ struct Options {
     bool auto_qte = false; // QTE automático (game_qte_auto)
     bool inf_health = false, inf_magic = false, inf_rage = false; // cheats (cheats_tick)
     bool hp_bars = true; // barras de vida dos inimigos (enemy_hp.cpp)
-    bool mod_kratos = false; // mod "GoW3 Kratos" (vitart-data/mods/gow3_kratos, hle_io.cpp); vale ao reiniciar
 };
 Options g_opt;
 // Pedidos vindos do menu (thread do jogo), aplicados no próximo quadro: 0 = nenhum.
 std::atomic<uint32_t> g_req_tex{0}, g_req_aud{0}, g_req_res{0}, g_req_fps{0}, g_req_cnt{0}, g_req_dsp{0}, g_req_vsync{0}, g_req_qte{0},
-    g_req_hp{0}, g_req_mp{0}, g_req_rage{0}, g_req_trophy{0}, g_req_kratos{0}, g_req_restart{0};
+    g_req_hp{0}, g_req_mp{0}, g_req_rage{0}, g_req_trophy{0}, g_req_restart{0};
+// Carregador de mods (hle_io.cpp, docs/modding/README.md): mod_<id>=0/1 no ini (vale ao reiniciar). O menu lista os mods
+// de mods/modlist.tsv deste jogo pelo índice (moda..modp = 0..15).
+std::vector<std::pair<std::string, bool>> g_mods; // (id, ligado), todos os mod_* do ini
+std::atomic<uint32_t> g_req_mod[16];
+std::vector<std::string> menu_mods(int game) { // ids na ordem do menu
+    std::vector<std::string> out;
+    if (FILE *f = fopen((mods_dir_for("") + "/modlist.tsv").c_str(), "r")) {
+        char line[1024];
+        while (fgets(line, sizeof line, f)) {
+            char g[16], id[128];
+            unsigned idx = 0;
+            if (sscanf(line, "%15s %u %127s", g, &idx, id) == 3 && idx < 16 && !std::strcmp(g, game == 1 ? "gow1" : "gow2")) {
+                if (out.size() <= idx) out.resize(idx + 1);
+                out[idx] = id;
+            }
+        }
+        fclose(f);
+    }
+    return out;
+}
+bool mod_on(const std::string &id) {
+    for (auto &[k, v] : g_mods)
+        if (k == id) return v;
+    return false;
+}
+void set_mod(const std::string &id, bool on) {
+    for (auto &[k, v] : g_mods)
+        if (k == id) return void(v = on);
+    g_mods.emplace_back(id, on);
+}
 
 std::string ini_path() { return data_path() + "/vitart_options.ini"; }
 std::string g_iso; // ISO do PS2 lembrada (o iniciador a passa em VITART_PS2_AUDIO)
@@ -96,7 +126,7 @@ void save() {
         fprintf(f, "cheat_infinite_health=%u\ncheat_infinite_magic=%u\ncheat_infinite_rage=%u\n", g_opt.inf_health ? 1u : 0u,
                 g_opt.inf_magic ? 1u : 0u, g_opt.inf_rage ? 1u : 0u);
         fprintf(f, "enemy_health_bars=%u\n", g_opt.hp_bars ? 1u : 0u);
-        fprintf(f, "mod_gow3_kratos=%u\n", g_opt.mod_kratos ? 1u : 0u); // carregador de mods (hle_io.cpp)
+        for (auto &[id, on] : g_mods) fprintf(f, "mod_%s=%u\n", id.c_str(), on ? 1u : 0u); // carregador de mods
         if (!iso.empty()) fprintf(f, "ps2_iso=%s\n", iso.c_str());
         fclose(f);
     }
@@ -120,7 +150,8 @@ void load() {
             if (sscanf(line, "cheat_infinite_magic=%u", &v) == 1) g_opt.inf_magic = v != 0;
             if (sscanf(line, "cheat_infinite_rage=%u", &v) == 1) g_opt.inf_rage = v != 0;
             if (sscanf(line, "enemy_health_bars=%u", &v) == 1) g_opt.hp_bars = v != 0;
-            if (sscanf(line, "mod_gow3_kratos=%u", &v) == 1) g_opt.mod_kratos = v != 0;
+            char mid[128];
+            if (sscanf(line, "mod_%127[A-Za-z0-9_]=%u", mid, &v) == 2) set_mod(mid, v != 0);
             if (!strncmp(line, "ps2_iso=", 8)) {
                 g_iso = line + 8;
                 while (!g_iso.empty() && (unsigned char)g_iso.back() < 32) g_iso.pop_back();
@@ -143,8 +174,7 @@ uint32_t encode() {
     const uint32_t aud = ps2audio_available() ? (g_opt.audio ? 2u : 1u) : 3u;
     uint32_t fps = g_opt.counter ? gvk::measured_fps() : 0;
     fps = fps > 127 ? 127 : fps; // a palavra passa por float no menu: até 2^24
-    // bit 16: o mod GoW3 Kratos escolhido (o menu mostra a escolha; o WAD carregado muda ao reiniciar)
-    return (g_opt.mod_kratos ? 0x10000u : 0u) | tex | aud << 2 | cur_scale() << 4 | g_opt.fps << 7 | (g_opt.vsync ? 1u : 0u) << 9 |
+    return tex | aud << 2 | cur_scale() << 4 | g_opt.fps << 7 | (g_opt.vsync ? 1u : 0u) << 9 |
            (g_opt.auto_qte ? 1u : 0u) << 10 | (g_opt.counter ? 1u : 0u) << 11 | (g_opt.borderless ? 1u : 0u) << 12 |
            (g_opt.inf_health ? 1u : 0u) << 13 | (g_opt.inf_magic ? 1u : 0u) << 14 | (g_opt.inf_rage ? 1u : 0u) << 15 | fps << 17;
 }
@@ -196,8 +226,22 @@ void on_import(arc_ctx *ctx, uint32_t stub) {
     if (!std::strcmp(key, "mp")) g_req_mp = v;
     if (!std::strcmp(key, "rage")) g_req_rage = v;
     if (!std::strcmp(key, "trophy")) g_req_trophy = v;
-    if (!std::strcmp(key, "kratos")) g_req_kratos = v;
     if (!std::strcmp(key, "restart")) g_req_restart = v;
+    // moda..modp: liga/desliga o mod de índice 0..15 do menu
+    if (!std::strncmp(key, "mod", 3) && key[3] >= 'a' && key[3] <= 'p' && !key[4]) g_req_mod[key[3] - 'a'] = v;
+    // modq: consulta síncrona do menu (a página Mods): 1 = os bits dos mods (ligados) no campo do estado, que o
+    // script do menu lê logo em seguida; 2 = o estado de sempre de volta
+    if (!std::strcmp(key, "modq")) {
+        uint32_t word = encode();
+        if (v == 1) {
+            word = 0;
+            const auto ids = menu_mods(game_id());
+            for (size_t i = 0; i < ids.size(); i++)
+                if (!ids[i].empty() && mod_on(ids[i])) word |= 1u << i;
+        }
+        const uint32_t obj = rd32(op->optr);
+        if (obj && rd32(obj) == op->vtbl) wr32(obj + op->field, word);
+    }
 }
 
 // Cheats (menu de pausa: Infinite Health / Magic / Rage), aplicados a cada quadro dentro do jogo.
@@ -456,10 +500,14 @@ void game_options_tick() {
             logf("vitart: cheat %s %s", what, *opt ? "ligado" : "desligado");
         }
     if (g_req_trophy.exchange(0) == 2) trophy_unlock_all();
-    if (const uint32_t v = g_req_kratos.exchange(0); v == 1 || v == 2) {
-        g_opt.mod_kratos = v == 2, changed = true;
-        logf("vitart: mod GoW3 Kratos %s (vale ao reiniciar)", g_opt.mod_kratos ? "ligado" : "desligado");
-    }
+    for (int i = 0; i < 16; i++)
+        if (const uint32_t v = g_req_mod[i].exchange(0); v == 1 || v == 2) {
+            const auto ids = menu_mods(game_id());
+            if ((size_t)i < ids.size() && !ids[i].empty()) {
+                set_mod(ids[i], v == 2), changed = true;
+                logf("vitart: mod %s %s (vale ao reiniciar)", ids[i].c_str(), v == 2 ? "ligado" : "desligado");
+            }
+        }
     if (g_req_restart.exchange(0) == 2) {
         save();
         restart_process(); // aplica os mods: o psarc é aberto (e remendado) de novo do começo

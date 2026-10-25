@@ -47,3 +47,5 @@ pbr_dump/
 # sistema
 Thumbs.db
 desktop.ini
+tools/bin/
+tools/modkit_config.json

@@ -29,11 +29,11 @@ import kbm_flp  # noqa: E402
 import psarc_gxp as P  # noqa: E402
 
 # Estado de todas as opções num número só, na variável PS2_Cheat (campo +0x2bc do objeto de opções,
-# sem tratador no jogo): mod GoW3 Kratos << 16 | textura | áudio << 2 | resolução << 4 | fps << 7 | vsync << 9 | QTE automático << 10 |
+# sem tratador no jogo): textura | áudio << 2 | resolução << 4 | fps << 7 | vsync << 9 | QTE automático << 10 |
 # contador << 11 | modo << 12 | cheats: vida << 13, magia << 14, fúria << 15 | FPS medidos << 17. As alternâncias têm um
 # bit (0/1) e o menu as lê como 1/2.
 # Ver runtime/vitart/game_options.cpp.
-FIELDS = [('_level0/:VtKratos', 65536, 1), ('_level0/:VtRage', 32768, 1), ('_level0/:VtMp', 16384, 1), ('_level0/:VtHp', 8192, 1), ('_level0/:VtDsp', 4096, 1), ('_level0/:VtCnt', 2048, 1), ('_level0/:VtQte', 1024, 1),
+FIELDS = [('_level0/:VtRage', 32768, 1), ('_level0/:VtMp', 16384, 1), ('_level0/:VtHp', 8192, 1), ('_level0/:VtDsp', 4096, 1), ('_level0/:VtCnt', 2048, 1), ('_level0/:VtQte', 1024, 1),
           ('_level0/:VtVsync', 512, 1), ('_level0/:VtFps', 128, 3), ('_level0/:VtRes', 16, 7),
           ('_level0/:VtAud', 4, 3), ('_level0/:VtTex', 1, 3)]
 RES_TEXT = {1: '1x  (960x544)', 2: '2x  (1920x1088)', 3: '3x  (2880x1632)', 4: '4x  (3840x2176)'}
@@ -60,12 +60,13 @@ LINES = {
     'cat_game': ('VtCatGame', 'Audio & Gameplay', '_level0/:VtCatA', '_level0/:VtCatAText', 'submenu', 2),
     'cat_cheat': ('VtCatCheats', 'Cheats', '_level0/:VtCatC', '_level0/:VtCatCText', 'submenu', 3),
     'back': ('VtBack', 'Back', '_level0/:VtBackV', '_level0/:VtBackText', 'back', None),
-    # carregador de mods (runtime/vitart/hle_io.cpp: mods/<id>/<psarc>.vtpatch): liga/desliga e reinicia para aplicar
+    # carregador de mods (runtime/vitart/hle_io.cpp, docs/modding/README.md): a página Mods ganha uma linha por mod
+    # instalado (moda..modp, criadas em configure a partir de mods/modlist.tsv) e o "Apply & Restart"
     'cat_mods': ('VtCatMods', 'Mods', '_level0/:VtCatM', '_level0/:VtCatMText', 'submenu', 4),
-    'kratos': ('VtKratos', 'GoW3 Kratos', '_level0/:VtKratos', '_level0/:VtKratosText', 'toggle', {1: 'Off', 2: 'On'}),
     'restart': ('VtRestart', 'Apply & Restart', '_level0/:VtRestart', '_level0/:VtRestartText', 'action',
                 {1: 'Press X', 2: 'Restarting'}),
 }
+MODS = []  # nomes dos mods da página Mods (configure)
 PAGE = '_level0/:VtPage'
 GAMES = {
     'gow1': dict(
@@ -81,9 +82,8 @@ GAMES = {
         state='PS2_OverUnder', wad=(1, b'FLP_HUDA'), shell=(1, b'FLP_ShellA'), nobody=(0, 24),  # tag 0: parâmetro (o tamanho é o valor)
         new=[(7, 'res'), (8, 'fps'), (9, 'vsync'), (10, 'cnt'), (11, 'dsp'), (12, 'qte'), (13, 'tex'), (14, 'aud'),
              (15, 'hp'), (16, 'mp'), (17, 'rage'), (18, 'trophy'), (19, 'cat_gfx'), (20, 'cat_game'), (21, 'cat_cheat'),
-             (22, 'back'), (23, 'cat_mods'), (24, 'kratos'), (25, 'restart')],
-        pages={0: [1, 2, 3, 4, 5, 19, 20, 21, 23, 6], 1: [13, 7, 8, 9, 10, 11, 22], 2: [14, 12, 22], 3: [15, 16, 17, 18, 22],
-               4: [24, 25, 22]},
+             (22, 'back')],
+        pages={0: [1, 2, 3, 4, 5, 19, 20, 21, 6], 1: [13, 7, 8, 9, 10, 11, 22], 2: [14, 12, 22], 3: [15, 16, 17, 18, 22]},
         old={1: ('MessageTips', 'A'), 2: ('MusicVolume', 'A'), 3: ('SFXVolume', 'A'), 4: ('Controller', 'B'),
              5: ('FlightControls', 'A'), 6: ('Return', 'B')},
         y=(-165.0, 207.5), row_k=1.0, frames=(9, 10, 11), kx=19, x_state='4',
@@ -91,10 +91,30 @@ GAMES = {
 }
 
 
-def configure(game):
-    """Põe nas variáveis do módulo a configuração do jogo (as funções abaixo as usam)."""
-    global GAME, CFG, STATE, ROWS, PATH, ORDER, PAGES, Y, FIRST_NEW, LAST_NEW, KEY, LO
-    GAME, CFG = game, GAMES[game]
+def configure(game, mods=()):
+    """Põe nas variáveis do módulo a configuração do jogo (as funções abaixo as usam). mods: nomes dos mods
+    instalados para este jogo, na ordem de mods/modlist.tsv (até 16): página Mods com uma linha liga/desliga
+    por mod e o Apply & Restart."""
+    global GAME, CFG, STATE, ROWS, PATH, ORDER, PAGES, Y, FIRST_NEW, LAST_NEW, KEY, LO, MODS
+    GAME = game
+    CFG = dict(GAMES[game], new=list(GAMES[game]['new']), pages={k: list(v) for k, v in GAMES[game]['pages'].items()})
+    MODS = list(mods)[:16]
+    if MODS:
+        nxt = max(st for st, _ in CFG['new']) + 1
+        back = next(st for st, k in CFG['new'] if k == 'back')
+        cat, rows = nxt, []
+        CFG['new'].append((cat, 'cat_mods'))
+        for i, name in enumerate(MODS):
+            key = 'mod' + 'abcdefghijklmnop'[i]
+            LINES[key] = ('VtMod' + key[3].upper(), name[:24], '_level0/:VtMod' + key[3].upper(),
+                          '_level0/:VtMod' + key[3].upper() + 'Text', 'toggle', {1: 'Off', 2: 'On'})
+            CFG['new'].append((nxt + 1 + i, key))
+            rows.append(nxt + 1 + i)
+        restart = nxt + 1 + len(MODS)
+        CFG['new'].append((restart, 'restart'))
+        main = CFG['pages'][0]
+        main.insert(len(main) - 1, cat)  # antes de "Return to Pause Menu"
+        CFG['pages'][4] = rows + [restart, back]
     STATE = CFG['state']
     # ROWS: (estado, nome do clipe, rótulo, variável decodificada, peso, variável do texto) nas linhas novas
     weights = {name: w for name, w, _ in FIELDS}
@@ -251,7 +271,7 @@ def show_script(f):
         a.label('f' + name)
     # alternâncias: um bit (0/1) na palavra -> 1/2 como o menu usa
     for q in ('_level0/:VtQte', '_level0/:VtVsync', '_level0/:VtCnt', '_level0/:VtDsp', '_level0/:VtHp', '_level0/:VtMp',
-              '_level0/:VtRage', '_level0/:VtKratos'):
+              '_level0/:VtRage'):
         a.getv(q).push(1).eq().not_().jumpif('q0' + q)
         a.setv(q, 2).jump('q1' + q)
         a.label('q0' + q)
@@ -259,8 +279,22 @@ def show_script(f):
         a.label('q1' + q)
     if any(k == 'trophy' for _, k in CFG['new']):
         a.setv('_level0/:VtTrophy', 1)  # a ação volta a "Press X" a cada abertura da página
-    if any(k == 'restart' for _, k in CFG['new']):
+    if MODS:
+        # estado dos mods: consulta síncrona ao vitart (game_options.cpp, "modq"): com 1 ele põe no campo do estado
+        # um bit por mod ligado, lido aqui mesmo; com 2 volta o estado de sempre
         a.setv('_level0/:VtRestart', 1)
+        a.fscommand('FSCommand:VT_modq_1')
+        a.push(X).getv(STATE).setvar()
+        for i in range(len(MODS) - 1, -1, -1):
+            var = '_level0/:VtMod' + 'ABCDEFGHIJKLMNOP'[i]
+            a.getv(X).push(1 << i).lt().jumpif('mo%d' % i)
+            a.setv(var, 2)
+            a.push(X).getv(X).push(1 << i).sub().setvar()
+            a.jump('mf%d' % i)
+            a.label('mo%d' % i)
+            a.setv(var, 1)
+            a.label('mf%d' % i)
+        a.fscommand('FSCommand:VT_modq_2')
     a.setv(PAGE, 0.0)  # abre sempre na página principal
     a.callframe('/:VtOptTexts').callframe('/:VtShowPage').end()
     return flp.encode(f, a.build())
@@ -529,7 +563,7 @@ def hud_unstretch(f):
 # de volume) encostados à direita na outra. Margens em unidades do PauseMenu (centro 0; a tela vai de cerca de -352 a
 # +352, medido nas capturas com margens de teste). Na captura europeia os rótulos começam a 8% da largura e os valores
 # terminam a 92%.
-JUSTIFY = {'gow2': (-294.0, 294.0), 'gow1': (-294.0, 294.0)}
+JUSTIFY = {'gow2': (-294.0, 260.0), 'gow1': (-294.0, 260.0)}  # direita menor: a linha destacada cresce ~1,2x
 BAR_W = 200.0     # largura da barra de volume a partir da origem do clipe dela (unidades da linha, medida)
 
 
@@ -905,10 +939,27 @@ def build_patch(psarc, files, out):
     print('%s: TOC %d bytes, %d bytes novos (%d arquivos)' % (out, len(toc), len(extra), len(files)))
 
 
+def read_modlist(path, game):
+    """Nomes dos mods do jogo em mods/modlist.tsv ("<jogo>\t<índice>\t<id>\t<nome>"), na ordem do índice."""
+    out = {}
+    if path and os.path.exists(path):
+        for line in open(path, encoding='utf-8'):
+            f = line.rstrip('\r\n').split('\t')
+            if len(f) >= 4 and f[0] == game:
+                out[int(f[1])] = f[3]
+    return [out[k] for k in sorted(out)]
+
+
 def main():
     psarc, out = sys.argv[1], sys.argv[2]
     dump = sys.argv[sys.argv.index('--dump') + 1] if '--dump' in sys.argv else None
-    configure('gow2' if 'gow2' in os.path.basename(psarc).lower() else 'gow1')
+    game = 'gow2' if 'gow2' in os.path.basename(psarc).lower() else 'gow1'
+    # --modlist <mods/modlist.tsv>: página Mods com os mods instalados (tools/vitart_modkit.py escreve a lista)
+    modlist = sys.argv[sys.argv.index('--modlist') + 1] if '--modlist' in sys.argv else None
+    configure(game, read_modlist(modlist, game))
+    # --files-out <pasta>: grava também os arquivos trocados, crus (os mods que trocam o r_perma/r_shella recebem
+    # assim o menu e os ícones do vitart por cima; ver tools/vitart_modkit.py)
+    files_out = sys.argv[sys.argv.index('--files-out') + 1] if '--files-out' in sys.argv else None
     rtag, rname = CFG['wad']
     files = {}
     # --wad wad/<nome>.wad_psp2=<arquivo>: WADs inteiros trocados (mods convertidos por tools/gow2_mod_wad.py), na
@@ -946,6 +997,14 @@ def main():
     for name, body in WAD_OVERRIDE.items():
         if name in names and name not in files:
             files[name] = body
+    if files_out:
+        for name, body in files.items():
+            dst = os.path.join(files_out, *name.split('/'))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            open(dst, 'wb').write(body)
+        print('%d arquivos em %s' % (len(files), files_out))
+    if out == '-':
+        return
     build_patch(psarc, files, out)
     write_kbm(kbm, out[:-len('.vtpatch')] + '.kbm.tsv' if out.endswith('.vtpatch') else out + '.kbm.tsv')
 
