@@ -29,11 +29,11 @@ import kbm_flp  # noqa: E402
 import psarc_gxp as P  # noqa: E402
 
 # Estado de todas as opções num número só, na variável PS2_Cheat (campo +0x2bc do objeto de opções,
-# sem tratador no jogo): 0x10000 | textura | áudio << 2 | resolução << 4 | fps << 7 | vsync << 9 | QTE automático << 10 |
+# sem tratador no jogo): mod GoW3 Kratos << 16 | textura | áudio << 2 | resolução << 4 | fps << 7 | vsync << 9 | QTE automático << 10 |
 # contador << 11 | modo << 12 | cheats: vida << 13, magia << 14, fúria << 15 | FPS medidos << 17. As alternâncias têm um
 # bit (0/1) e o menu as lê como 1/2.
 # Ver runtime/vitart/game_options.cpp.
-FIELDS = [('_level0/:VtRage', 32768, 1), ('_level0/:VtMp', 16384, 1), ('_level0/:VtHp', 8192, 1), ('_level0/:VtDsp', 4096, 1), ('_level0/:VtCnt', 2048, 1), ('_level0/:VtQte', 1024, 1),
+FIELDS = [('_level0/:VtKratos', 65536, 1), ('_level0/:VtRage', 32768, 1), ('_level0/:VtMp', 16384, 1), ('_level0/:VtHp', 8192, 1), ('_level0/:VtDsp', 4096, 1), ('_level0/:VtCnt', 2048, 1), ('_level0/:VtQte', 1024, 1),
           ('_level0/:VtVsync', 512, 1), ('_level0/:VtFps', 128, 3), ('_level0/:VtRes', 16, 7),
           ('_level0/:VtAud', 4, 3), ('_level0/:VtTex', 1, 3)]
 RES_TEXT = {1: '1x  (960x544)', 2: '2x  (1920x1088)', 3: '3x  (2880x1632)', 4: '4x  (3840x2176)'}
@@ -60,6 +60,11 @@ LINES = {
     'cat_game': ('VtCatGame', 'Audio & Gameplay', '_level0/:VtCatA', '_level0/:VtCatAText', 'submenu', 2),
     'cat_cheat': ('VtCatCheats', 'Cheats', '_level0/:VtCatC', '_level0/:VtCatCText', 'submenu', 3),
     'back': ('VtBack', 'Back', '_level0/:VtBackV', '_level0/:VtBackText', 'back', None),
+    # carregador de mods (runtime/vitart/hle_io.cpp: mods/<id>/<psarc>.vtpatch): liga/desliga e reinicia para aplicar
+    'cat_mods': ('VtCatMods', 'Mods', '_level0/:VtCatM', '_level0/:VtCatMText', 'submenu', 4),
+    'kratos': ('VtKratos', 'GoW3 Kratos', '_level0/:VtKratos', '_level0/:VtKratosText', 'toggle', {1: 'Off', 2: 'On'}),
+    'restart': ('VtRestart', 'Apply & Restart', '_level0/:VtRestart', '_level0/:VtRestartText', 'action',
+                {1: 'Press X', 2: 'Restarting'}),
 }
 PAGE = '_level0/:VtPage'
 GAMES = {
@@ -76,8 +81,9 @@ GAMES = {
         state='PS2_OverUnder', wad=(1, b'FLP_HUDA'), shell=(1, b'FLP_ShellA'), nobody=(0, 24),  # tag 0: parâmetro (o tamanho é o valor)
         new=[(7, 'res'), (8, 'fps'), (9, 'vsync'), (10, 'cnt'), (11, 'dsp'), (12, 'qte'), (13, 'tex'), (14, 'aud'),
              (15, 'hp'), (16, 'mp'), (17, 'rage'), (18, 'trophy'), (19, 'cat_gfx'), (20, 'cat_game'), (21, 'cat_cheat'),
-             (22, 'back')],
-        pages={0: [1, 2, 3, 4, 5, 19, 20, 21, 6], 1: [13, 7, 8, 9, 10, 11, 22], 2: [14, 12, 22], 3: [15, 16, 17, 18, 22]},
+             (22, 'back'), (23, 'cat_mods'), (24, 'kratos'), (25, 'restart')],
+        pages={0: [1, 2, 3, 4, 5, 19, 20, 21, 23, 6], 1: [13, 7, 8, 9, 10, 11, 22], 2: [14, 12, 22], 3: [15, 16, 17, 18, 22],
+               4: [24, 25, 22]},
         old={1: ('MessageTips', 'A'), 2: ('MusicVolume', 'A'), 3: ('SFXVolume', 'A'), 4: ('Controller', 'B'),
              5: ('FlightControls', 'A'), 6: ('Return', 'B')},
         y=(-165.0, 207.5), row_k=1.0, frames=(9, 10, 11), kx=19, x_state='4',
@@ -202,10 +208,9 @@ def page_script(f):
 
 
 def push_fps(a, state):
-    """Empilha os FPS medidos que o vitart pôs em PS2_Cheat (bits 17+): int(estado / 131072 - 0,5).
-    O resto do estado é >= 65536 (bit 16), então a parte fracionária fica em [0, 0,5): truncar ou
-    arredondar dá o mesmo número."""
-    a.getv(state).push(131072).div().push(0.5).sub().toint()
+    """Empilha os FPS medidos que o vitart pôs em PS2_Cheat (bits 17+): int(estado / 131072). A divisão por
+    potência de 2 é exata em float e o resto (bits 0..16) fica na parte fracionária."""
+    a.getv(state).push(131072).div().toint()
 
 
 def fps_counter_script():
@@ -234,7 +239,7 @@ def show_script(f):
     X = '_level0/:VtX'
     a.push(X).getv(STATE)
     push_fps(a, STATE)
-    a.push(131072).mul().sub().push(65536).sub().setvar()
+    a.push(131072).mul().sub().setvar()
     for name, w, maxv in FIELDS:
         for v in range(maxv, 0, -1):
             a.getv(X).push(v * w).lt().jumpif('m%s%d' % (name, v))  # X < v*w -> tenta o menor
@@ -246,7 +251,7 @@ def show_script(f):
         a.label('f' + name)
     # alternâncias: um bit (0/1) na palavra -> 1/2 como o menu usa
     for q in ('_level0/:VtQte', '_level0/:VtVsync', '_level0/:VtCnt', '_level0/:VtDsp', '_level0/:VtHp', '_level0/:VtMp',
-              '_level0/:VtRage'):
+              '_level0/:VtRage', '_level0/:VtKratos'):
         a.getv(q).push(1).eq().not_().jumpif('q0' + q)
         a.setv(q, 2).jump('q1' + q)
         a.label('q0' + q)
@@ -254,6 +259,8 @@ def show_script(f):
         a.label('q1' + q)
     if any(k == 'trophy' for _, k in CFG['new']):
         a.setv('_level0/:VtTrophy', 1)  # a ação volta a "Press X" a cada abertura da página
+    if any(k == 'restart' for _, k in CFG['new']):
+        a.setv('_level0/:VtRestart', 1)
     a.setv(PAGE, 0.0)  # abre sempre na página principal
     a.callframe('/:VtOptTexts').callframe('/:VtShowPage').end()
     return flp.encode(f, a.build())
@@ -904,12 +911,22 @@ def main():
     configure('gow2' if 'gow2' in os.path.basename(psarc).lower() else 'gow1')
     rtag, rname = CFG['wad']
     files = {}
+    # --wad wad/<nome>.wad_psp2=<arquivo>: WADs inteiros trocados (mods convertidos por tools/gow2_mod_wad.py), na
+    # versão normal e na do PS TV (wad/_VitaTV/), que é a que o vitart carrega. O r_perma e o r_shella trocados
+    # recebem por cima as mudanças deste script (menu, ícones).
+    global WAD_OVERRIDE
+    WAD_OVERRIDE = {}
+    for i, a in enumerate(sys.argv):
+        if a == '--wad':
+            dst, src = sys.argv[i + 1].split('=', 1)
+            body = open(src, 'rb').read()
+            WAD_OVERRIDE[dst] = WAD_OVERRIDE[dst.replace('wad/', 'wad/_VitaTV/', 1)] = body
     kbm = []  # trocas dos ícones por arquivo (runtime/vitart/kbm_icons.cpp)
     with open(psarc, 'rb') as fh:
         ents, zs, block = P.entries(fh)
         names = P.read_file(fh, ents[0], zs, block).decode('latin1').split('\n')
         for name in ('wad/r_perma.wad_psp2', 'wad/_VitaTV/r_perma.wad_psp2'):
-            w = P.read_file(fh, ents[names.index(name) + 1], zs, block)
+            w = WAD_OVERRIDE.get(name) or P.read_file(fh, ents[names.index(name) + 1], zs, block)
             new_flp = mod_flp(wad_get(w, rname, rtag))
             files[name] = wad_replace(w, rname, new_flp, rtag)
             if LAST_KBM:
@@ -920,12 +937,15 @@ def main():
         # menu principal (Shell): só os ícones de teclado
         stag, sname = CFG['shell']
         for name in ('wad/r_shella.wad_psp2', 'wad/_VitaTV/r_shella.wad_psp2'):
-            w = P.read_file(fh, ents[names.index(name) + 1], zs, block)
+            w = WAD_OVERRIDE.get(name) or P.read_file(fh, ents[names.index(name) + 1], zs, block)
             f = flp.FLP(wad_get(w, sname, stag))
             swaps = kbm_flp.add_kbm_icons(f, GAME, LO)
             new_flp = f.write()
             files[name] = wad_replace(w, sname, new_flp, stag)
             kbm.append((name, new_flp, kbm_flp.locate(new_flp, swaps)))
+    for name, body in WAD_OVERRIDE.items():
+        if name in names and name not in files:
+            files[name] = body
     build_patch(psarc, files, out)
     write_kbm(kbm, out[:-len('.vtpatch')] + '.kbm.tsv' if out.endswith('.vtpatch') else out + '.kbm.tsv')
 

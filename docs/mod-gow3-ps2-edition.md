@@ -75,3 +75,21 @@ comparar os registros de `R_HERO01.WAD` original e do mod (quais servidores muda
 - Vídeos `.PSS`/`.PSW`: reencodados (menores) para a ISO caber numa camada; não servem ao Vita.
 No Vita (`wad/r_hero01.wad_psp2`) os nomes são os mesmos (`GFX_kratos01_1..3`, `MAT_kratos1A..3B`, `MDL_hero_0`,
 este com uns 236 KB): a conversão é registro a registro, com o MDL como trabalho principal.
+
+25/10, **mod funcionando no Vita** (convertido por inteiro):
+- `tools/ps2_mesh.py` (malha de PS2, porte do god_of_war_browser), `tools/gmdl.py` (GMDL do Vita) e
+  `tools/gow2_mod_wad.py` (WAD de PS2 -> WAD do Vita). Validado: dos 40 WADs originais, 36 saem byte a byte
+  iguais aos do Vita; r_shella e r_perma têm registros só do Vita e são mesclados (só o que o mod mudou entra).
+- Conversão da malha: POS0 = (x, y, z, 1 - peso), BONI com o mapa de ossos em ordem crescente, NRM0 int8, COL0
+  RGB/255 e alfa*2/255, TEX0 em half, um triângulo (a, b, c) por vértice sem a flag de pular. Texturas novas em BC3
+  swizzled com mipmaps; o TXR aponta para o registro '~' no 3o campo; tweak templates (tags 11-16) ficam as do Vita.
+- As versões wad/_VitaTV/ (a que o vitart carrega) são convertidas contra elas mesmas (r_shella, r_perma e os
+  r_hero têm conteúdo próprio do PS TV).
+- Carregador de mods: `vitart-data/mods/gow3_kratos/` (patch completo + kbm.tsv + mod.ini), ligado por
+  `mod_gow3_kratos=1` no vitart_options.ini (menu de pausa: Options > Mods > GoW3 Kratos, Apply & Restart:
+  o vitart reinicia sozinho). `hle_io.cpp: mods_dir_for` escolhe a pasta.
+- O mod não troca o rosto 3D do Kratos do menu principal (nem no PS2): no R_SHELLA ele muda só o logo e as imagens
+  dos trajes bônus. A cena com armadura do começo é modelo de cutscene, também fora do mod.
+Gerar de novo: `python tools/ps2_xdelta_wads.py <xdelta3> <zip do mod> <ISO> gow-dump/gow3mod_ps2`, extrair os originais
+para `gow3mod_ps2/orig`, `python tools/gow2_mod_wad.py --all gow-dump/gow3mod_ps2 <psarc> gow-dump/gow3mod_vita` e
+`python tools/gow_menu_mod.py <psarc> mods/gow3_kratos/gow2_psp2_SCEA.psarc.vtpatch $(cat gow3mod_vita/wad_args.txt)`.

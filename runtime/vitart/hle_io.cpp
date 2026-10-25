@@ -64,6 +64,29 @@ struct PsarcPatch {
     uint64_t orig = 0;
     std::vector<uint8_t> toc, extra;
 };
+// Carregador de mods: <mods>/<id>/<psarc>.vtpatch é um patch completo (o do vitart mais os arquivos do mod, gerado
+// por tools/gow2_mod_wad.py + tools/gow_menu_mod.py --wad) e vale no lugar de <mods>/<psarc>.vtpatch quando
+// vitart_options.ini tem mod_<id>=1 (menu de pausa: Options > Mods, aplicado ao reiniciar). Sem mod ligado (ou sem
+// o arquivo do mod para este psarc), a pasta de sempre.
+std::string mods_dir_for(const std::string &psarc_name) {
+    const char *md = getenv("VITART_MODS_DIR"); // testes: outra pasta de patches, sem mexer nos instalados
+    const std::string base = md && *md ? std::string(md) : data_path() + "/mods";
+    if (FILE *f = fopen((data_path() + "/vitart_options.ini").c_str(), "r")) {
+        char line[512];
+        std::string found;
+        while (fgets(line, sizeof line, f)) {
+            char id[128];
+            unsigned v = 0;
+            if (sscanf(line, "mod_%127[A-Za-z0-9_]=%u", id, &v) == 2 && v && found.empty()) {
+                std::error_code ec;
+                if (fs::exists(base + "/" + id + "/" + psarc_name + ".vtpatch", ec)) found = base + "/" + id;
+            }
+        }
+        fclose(f);
+        if (!found.empty()) return found;
+    }
+    return base;
+}
 static std::shared_ptr<PsarcPatch> psarc_patch(const std::string &hp) {
     if (hp.size() < 6 || _stricmp(hp.c_str() + hp.size() - 6, ".psarc") != 0) return nullptr;
     static const bool off = getenv("VITART_NO_MODS") != nullptr;
@@ -74,9 +97,7 @@ static std::shared_ptr<PsarcPatch> psarc_patch(const std::string &hp) {
     if (auto it = cache.find(hp); it != cache.end()) return it->second;
     auto &slot = cache[hp];
     const std::string name = fs::path(hp).filename().string();
-    // VITART_MODS_DIR (testes): outra pasta de patches, sem mexer nos instalados
-    const char *md = getenv("VITART_MODS_DIR");
-    const std::string pp = (md && *md ? std::string(md) : data_path() + "/mods") + "/" + name + ".vtpatch";
+    const std::string pp = mods_dir_for(name) + "/" + name + ".vtpatch";
     FILE *f = fopen(pp.c_str(), "rb");
     if (!f) return nullptr;
     auto pt = std::make_shared<PsarcPatch>();

@@ -25,6 +25,7 @@
 #include <windows.h>
 
 namespace vt {
+std::string mods_dir_for(const std::string &psarc_name); // hle_io.cpp: pasta do patch (com o mod ligado)
 
 int game_id();           // game_options.cpp
 int input_icon_mode(); // hle_sys.cpp: 0 = PlayStation, 1 = teclado/mouse, 2 = Xbox
@@ -49,9 +50,8 @@ std::vector<uint8_t> unhex(const std::string &h) {
 
 std::vector<FlpTable> load_tables(int game) {
     std::vector<FlpTable> out;
-    const char *md = getenv("VITART_MODS_DIR");
-    const std::string dir = md && *md ? std::string(md) : data_path() + "/mods";
-    std::ifstream f(dir + (game == 1 ? "/gow1_psp2_SCEA.psarc.kbm.tsv" : "/gow2_psp2_SCEA.psarc.kbm.tsv"));
+    const std::string psarc = game == 1 ? "gow1_psp2_SCEA.psarc" : "gow2_psp2_SCEA.psarc";
+    std::ifstream f(mods_dir_for(psarc) + "/" + psarc + ".kbm.tsv"); // a mesma pasta do patch (hle_io.cpp)
     std::string line;
     while (std::getline(f, line)) {
         if (line.empty() || line[0] == '#') continue;
