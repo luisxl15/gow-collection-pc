@@ -64,3 +64,14 @@ com o patch não é gravada). A ISO do mod tem 4,30 GB e camada única (a origin
 os mesmos 913 nomes e **122 arquivos mudam** (1,4 GB, em `gow-dump/gow3mod_ps2/`, lista em `mudados.tsv`): os
 `R_HERO*`, `R_WEAPON*`, `R_S_*` (armas secundárias), `R_SHELLA` e também vídeos (`.PSS`/`.PSW`). Próximo: passo 2,
 comparar os registros de `R_HERO01.WAD` original e do mod (quais servidores mudaram) e decodificar o MDL de PS2.
+
+25/10, passo 2 (comparação por registro, `texpack_ps2.walk`; originais dos WADs em `gow-dump/gow3mod_ps2/orig/`):
+- `R_HERO01.WAD` (o Kratos): `MDL_hero_0` trocado (193.440 -> 178.336 bytes); as três texturas `kratos01_1..3`
+  (GFX+PAL+TXR) saem e entram `kratos02_1..3` (GFX 65.560 bytes cada, ou seja 256x256 em 8 bits); material novo
+  `MAT_kratos2B`; um registro sem nome de 27.904 bytes muda com o mesmo tamanho (provável esqueleto/OBJ).
+- `R_WEAPON*`: textura da lâmina (`GFX_blade0` 8.216 -> 16.408) e o modelo (`MDL_MAIBlade_0` 10.144 -> 27.856).
+- `R_S_*` (armas secundárias): texturas e `MDL_*` trocados com tamanhos parecidos.
+- `R_SHELLA`: só texturas do menu.
+- Vídeos `.PSS`/`.PSW`: reencodados (menores) para a ISO caber numa camada; não servem ao Vita.
+No Vita (`wad/r_hero01.wad_psp2`) os nomes são os mesmos (`GFX_kratos01_1..3`, `MAT_kratos1A..3B`, `MDL_hero_0`,
+este com uns 236 KB): a conversão é registro a registro, com o MDL como trabalho principal.
