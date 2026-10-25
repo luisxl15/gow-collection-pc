@@ -73,6 +73,7 @@ struct Options {
     uint32_t scale = 0; // 0 = automática pelo monitor
     bool auto_qte = false; // QTE automático (game_qte_auto)
     bool inf_health = false, inf_magic = false, inf_rage = false; // cheats (cheats_tick)
+    bool hp_bars = true; // barras de vida dos inimigos (enemy_hp.cpp)
 };
 Options g_opt;
 // Pedidos vindos do menu (thread do jogo), aplicados no próximo quadro: 0 = nenhum.
@@ -93,6 +94,7 @@ void save() {
                 g_opt.auto_qte ? 1u : 0u);
         fprintf(f, "cheat_infinite_health=%u\ncheat_infinite_magic=%u\ncheat_infinite_rage=%u\n", g_opt.inf_health ? 1u : 0u,
                 g_opt.inf_magic ? 1u : 0u, g_opt.inf_rage ? 1u : 0u);
+        fprintf(f, "enemy_health_bars=%u\n", g_opt.hp_bars ? 1u : 0u);
         if (!iso.empty()) fprintf(f, "ps2_iso=%s\n", iso.c_str());
         fclose(f);
     }
@@ -115,6 +117,7 @@ void load() {
             if (sscanf(line, "cheat_infinite_health=%u", &v) == 1) g_opt.inf_health = v != 0;
             if (sscanf(line, "cheat_infinite_magic=%u", &v) == 1) g_opt.inf_magic = v != 0;
             if (sscanf(line, "cheat_infinite_rage=%u", &v) == 1) g_opt.inf_rage = v != 0;
+            if (sscanf(line, "enemy_health_bars=%u", &v) == 1) g_opt.hp_bars = v != 0;
             if (!strncmp(line, "ps2_iso=", 8)) {
                 g_iso = line + 8;
                 while (!g_iso.empty() && (unsigned char)g_iso.back() < 32) g_iso.pop_back();
@@ -234,6 +237,8 @@ void cheats_tick(int game) {
 const bool g_watch = (watch_import(on_import), true);
 
 } // namespace
+
+bool enemy_bars_enabled() { return g_opt.hp_bars; }
 
 // Antes do primeiro quadro: aplica as escolhas salvas (texturas, áudio e resolução valem também no GoW2).
 void game_options_init() {

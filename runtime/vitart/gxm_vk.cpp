@@ -1112,6 +1112,54 @@ void begin_scene(uint32_t color_addr, uint8_t stencil) {
     it->second.dver++;
 }
 
+// Barras de vida dos inimigos (enemy_hp.cpp), no estilo do GoW3: moldura escura, fundo vermelho-escuro e o
+// preenchimento vermelho em degradê com um brilho em cima. Copiadas para o alvo de cor antes do present (a captura de
+// teste também as vê), pelo anel de upload do quadro.
+void draw_enemy_bars(uint32_t color_addr, const EnemyBar *bars, uint32_t n) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    auto it = g_targets.find(color_addr);
+    if (!g_dev || !n || it == g_targets.end()) return;
+    Image &im = it->second.color;
+    const uint32_t bh = std::max(6u, (uint32_t)(im.h * 0.016f + 0.5f)), bw = std::max(36u, (uint32_t)(im.h * 0.11f + 0.5f));
+    const uint32_t edge = std::max(1u, bh / 4);
+    const VkDeviceSize bytes = (VkDeviceSize)bw * bh * 4;
+    if (!frame_reserve(n * (bytes + 16))) return;
+    end_pass();
+    std::vector<uint32_t> px(bw * bh);
+    std::vector<VkBufferImageCopy> regs;
+    for (uint32_t i = 0; i < n; i++) {
+        const int32_t x0 = (int32_t)(bars[i].x * im.w) - (int32_t)bw / 2, y0 = (int32_t)(bars[i].y * im.h) - (int32_t)bh;
+        if (x0 < 0 || y0 < 0 || x0 + (int32_t)bw > (int32_t)im.w || y0 + (int32_t)bh > (int32_t)im.h) continue;
+        const float frac = bars[i].frac < 0.f ? 0.f : bars[i].frac > 1.f ? 1.f : bars[i].frac;
+        const uint32_t fill = edge + (uint32_t)((bw - 2 * edge) * frac + 0.5f);
+        for (uint32_t y = 0; y < bh; y++)
+            for (uint32_t x = 0; x < bw; x++) {
+                uint32_t r, g, b;
+                if (x < edge || y < edge || x >= bw - edge || y >= bh - edge) {
+                    r = 26, g = 16, b = 10; // moldura (bronze escuro)
+                } else if (x < fill) {
+                    const float t = (float)(y - edge) / (float)std::max(1u, bh - 2 * edge - 1); // 0 em cima, 1 embaixo
+                    r = (uint32_t)(235 - 110 * t), g = (uint32_t)(40 - 25 * t), b = (uint32_t)(28 - 18 * t);
+                    if (y == edge) r = 255, g = 120, b = 90; // brilho
+                } else {
+                    r = 58, g = 10, b = 8; // vazio
+                }
+                px[y * bw + x] = 0xFF000000u | b << 16 | g << 8 | r; // RGBA na memória
+            }
+        VkBufferImageCopy c{};
+        c.bufferOffset = ring_put(px.data(), bytes, 16);
+        c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        c.imageOffset = {x0, y0, 0};
+        c.imageExtent = {bw, bh, 1};
+        regs.push_back(c);
+    }
+    if (regs.empty()) return;
+    barrier(im, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    vkCmdCopyBufferToImage(g_cmd, g_ring.buf, im.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (uint32_t)regs.size(), regs.data());
+    barrier(im, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    it->second.cver++;
+}
+
 // Contador de FPS (opção "FPS Counter" do menu de pausa): quadros apresentados por segundo, medidos a cada
 // meio segundo, escritos no canto da imagem do jogo depois do blit para a swapchain. O texto é um bitmap
 // 5x7 ampliado (sem pipeline gráfico: cópia de buffer para a imagem, que já é destino de transferência).

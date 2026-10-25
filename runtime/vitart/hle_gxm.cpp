@@ -287,6 +287,7 @@ bool texpack_available() {
     return !g_texpack.empty();
 }
 int game_id(); // game_options.cpp: 1 = GoW1, 2 = GoW2, 0 = menu da coletânea
+void enemy_hp_draw(uint32_t fb); // enemy_hp.cpp: barras de vida dos inimigos
 static void texpack_load() {
     static bool done = false;
     if (done) return;
@@ -1091,6 +1092,7 @@ void gxm_present(uint32_t fb) {
                 e.px.reset();
             }
     }
+    enemy_hp_draw(fb); // barras de vida dos inimigos (enemy_hp.cpp), antes da captura e do present
     static uint32_t frame = 0;
     static const uint32_t dump_at = getenv("VITART_VK_DUMP") ? (uint32_t)std::atoi(getenv("VITART_VK_DUMP")) : 0;
     static const bool pbr_ab = getenv("VITART_PBR_AB") != nullptr;

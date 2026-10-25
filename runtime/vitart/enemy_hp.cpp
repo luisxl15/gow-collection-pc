@@ -5,6 +5,7 @@
 // medidor do HUD é vida / máxima * 100. Tabela de handles em [0x812cba94]: entrada k em +8 + 12k = {handle, ?, objeto},
 // com k = handle >> 23. [0x812cbae4] -> +4 = criatura do Kratos.
 #include "vitart.h"
+#include "gxm_vk.h"
 
 #include <algorithm>
 #include <cmath>
@@ -97,6 +98,22 @@ void diag_gow2(uint32_t frame) {
     const uint32_t kp = rd32(0x812cbae4u);
     const uint32_t kratos = kp && readable(kp + 4, 4) ? rd32(kp + 4) : 0;
     fprintf(log, "q%u tabela=%08x kratos=%08x\n", frame, table, kratos);
+    // todas as criaturas no heap (vtable do Kratos), estejam ou não na tabela de handles
+    if (kratos && frame % 120 == 0) {
+        const uint32_t vt_c = rd32(kratos);
+        for (uint32_t a = 0x82000000u; a < 0x90000000u;) {
+            MEMORY_BASIC_INFORMATION mi{};
+            if (!VirtualQuery(mem_base() + a, &mi, sizeof mi)) break;
+            const uint32_t end =
+                (uint32_t)std::min<uint64_t>(0x90000000ull, (uint64_t)((uint8_t *)mi.BaseAddress - mem_base()) + mi.RegionSize);
+            if (mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+                for (uint32_t q = (a + 15) & ~15u; q + 0x180 <= end; q += 16)
+                    if (rd32(q) == vt_c)
+                        fprintf(log, "  heap %08x hp=%g/%g pos=(%.0f %.0f %.0f)%s\n", q, rdf(q + 0x170), rdf(q + 0x174),
+                                rdf(q + 0x80), rdf(q + 0x84), rdf(q + 0x88), q == kratos ? " KRATOS" : "");
+            a = end;
+        }
+    }
     if (!table || !readable(table, 8)) return;
     uint32_t enemies[64];
     int ne = 0;
@@ -150,6 +167,61 @@ void enemy_hp_tick(int game) {
     static uint32_t frame = 0;
     frame++;
     if (diag && game == 2 && frame % 60 == 0) diag_gow2(frame);
+}
+
+int game_id();
+bool enemy_bars_enabled(); // game_options.cpp (opção enemy_health_bars)
+
+// No present, antes da captura: uma barra sobre cada inimigo ferido e vivo, só na ação ([0x812ec498] == 0xc, a mesma
+// condição do medidor de chefe; pausa, Power Up e cenas têm outro estado). Ponto da barra = posição (+0x80) com a
+// altura da cabeça somada em y, projetado por The_Viewport +0x40 (mundo -> clip, por colunas).
+void enemy_hp_draw(uint32_t fb) {
+    if (game_id() != 2 || !enemy_bars_enabled() || rd32(0x812ec498u) != 0xcu) return;
+    static const float head = getenv("VITART_HPBAR_H") ? (float)atof(getenv("VITART_HPBAR_H")) : 42.f;
+    const uint32_t vp = rd32(0x812cc1ecu), table = rd32(0x812cba94u), kp = rd32(0x812cbae4u);
+    if (!vp || !table || !kp || !readable(vp, 0x80) || !readable(kp + 4, 4)) return;
+    const uint32_t kratos = rd32(kp + 4);
+    if (!kratos || !readable(kratos, 0x180)) return;
+    const uint32_t creature_vt = rd32(kratos);
+    float M[16];
+    std::memcpy(M, ptr<float>(vp + 0x40), sizeof M);
+    gvk::EnemyBar bars[48];
+    uint32_t n = 0;
+    for (uint32_t k = 0; k < 1024 && n < 48; k++) {
+        const uint32_t e = table + 8 + 12 * k;
+        if ((k & 63) == 0 && !readable(e, 12 * 64)) break;
+        const uint32_t h = rd32(e), obj = rd32(e + 8);
+        if (!obj || obj == kratos || (h >> 23) != k || !readable(obj, 0x180) || rd32(obj) != creature_vt) continue;
+        const float hp = rdf(obj + 0x170), mx = rdf(obj + 0x174);
+        if (static FILE *hl = getenv("VITART_ENEMYLOG") ? fopen("enemy_hp_changes.txt", "w") : nullptr; hl) {
+            // floats do objeto (até +0x800) que diminuíram desde a última amostra: onde fica a vida dos inimigos comuns
+            static float snap[64][512];
+            static uint32_t who[64];
+            static uint32_t q = 0;
+            if (k >= 40 && k < 104 && ++q % 4 == 0 && readable(obj, 0x800)) {
+                const uint32_t s = k - 40;
+                if (who[s] == obj)
+                    for (uint32_t i = 0; i < 512; i++) {
+                        const float v = rdf(obj + 4 * i);
+                        if (std::isfinite(v) && std::isfinite(snap[s][i]) && v < snap[s][i] && snap[s][i] - v >= 0.5f &&
+                            snap[s][i] <= 10000.f && v >= -1.f && i * 4 != 0x80 && i * 4 != 0x84 && i * 4 != 0x88)
+                            fprintf(hl, "k%u obj=%08x +%03x %g -> %g\n", k, obj, i * 4, snap[s][i], v);
+                    }
+                who[s] = obj;
+                for (uint32_t i = 0; i < 512; i++) snap[s][i] = rdf(obj + 4 * i);
+                fflush(hl);
+            }
+        }
+        static const bool all = getenv("VITART_HPBAR_ALL") != nullptr; // teste: barra em todas as criaturas
+        if (!(mx > 0.f && mx < 5000.f && hp > 0.f && (hp < mx || all))) continue;
+        const float X = rdf(obj + 0x80), Y = rdf(obj + 0x84) + head, Z = rdf(obj + 0x88);
+        const float cx = M[0] * X + M[4] * Y + M[8] * Z + M[12];
+        const float cy = M[1] * X + M[5] * Y + M[9] * Z + M[13];
+        const float cw = M[3] * X + M[7] * Y + M[11] * Z + M[15];
+        if (!(cw > 1.f && cw < 4000.f)) continue;
+        bars[n++] = {0.5f + 0.5f * cx / cw, 0.5f + 0.5f * cy / cw, hp / mx};
+    }
+    if (n) gvk::draw_enemy_bars(fb, bars, n);
 }
 
 } // namespace vt

@@ -1,7 +1,13 @@
 # Barras de vida dos inimigos (como no GoW3)
 
-Estado em 25/10: **GoW2 levantado, falta desenhar**. `runtime/vitart/enemy_hp.cpp` só tem o diagnóstico
-(`VITART_ENEMYLOG=1` grava `enemy_log.txt` no diretório do executável; `VITART_CAMREF=<hex>` procura ponteiros).
+Estado em 25/10: **GoW2 funcionando**. `enemy_hp.cpp: enemy_hp_draw` monta as barras no present (antes da captura
+de teste) e `gxm_vk.cpp: draw_enemy_bars` as copia para o alvo de cor pelo anel de upload. Opção
+`enemy_health_bars=1` no `vitart_options.ini` (padrão ligado; ainda sem linha no menu). Testes: `VITART_HPBAR_ALL=1`
+mostra a barra em todas as criaturas, `VITART_HPBAR_H` muda a altura (padrão 42 unidades acima dos pés),
+`VITART_ENEMYLOG=1` liga o diagnóstico (`enemy_log.txt`, `enemy_hp_changes.txt`).
+
+Atenção ao testar: a entrada automática dos scripts aperta X (pulo); para ferir inimigos é preciso apertar quadrado
+(0x8000). Os legionários do começo têm 20 de vida.
 
 ## GoW2: o que foi medido
 

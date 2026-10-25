@@ -57,4 +57,10 @@ apareceriam embaralhadas. Precisa trocar o modelo **e** as texturas juntos.
 
 ## Estado
 
-24/10: só levantamento (este documento). Falta o `.xdelta` (download com login) para o passo 1.
+24/10: só levantamento (este documento).
+
+25/10: passo 1 feito com `tools/ps2_xdelta_wads.py` (xdelta3 3.1.0 oficial; o patch é lido de dentro do zip, a ISO
+com o patch não é gravada). A ISO do mod tem 4,30 GB e camada única (a original tem 8,5 GB e duas camadas); o TOC tem
+os mesmos 913 nomes e **122 arquivos mudam** (1,4 GB, em `gow-dump/gow3mod_ps2/`, lista em `mudados.tsv`): os
+`R_HERO*`, `R_WEAPON*`, `R_S_*` (armas secundárias), `R_SHELLA` e também vídeos (`.PSS`/`.PSW`). Próximo: passo 2,
+comparar os registros de `R_HERO01.WAD` original e do mod (quais servidores mudaram) e decodificar o MDL de PS2.

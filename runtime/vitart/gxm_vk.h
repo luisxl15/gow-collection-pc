@@ -119,6 +119,11 @@ uint32_t auto_render_scale();
 bool set_render_scale(uint32_t s);
 // Contador de FPS no canto da imagem (opção do menu de pausa).
 void set_fps_counter(bool on);
+// Barras de vida dos inimigos: centro (x) e base (y) em 0..1 da imagem do jogo, fração da vida.
+struct EnemyBar {
+    float x, y, frac;
+};
+void draw_enemy_bars(uint32_t color_addr, const EnemyBar *bars, uint32_t n);
 // Quadros apresentados por segundo (medidos a cada meio segundo).
 uint32_t measured_fps();
 // Janela sem bordas ocupando o monitor (o mesmo modo do F11 / Alt+Enter).
