@@ -54,29 +54,40 @@ LINES = {
     'rage': ('VtInfRage', 'Infinite Rage', '_level0/:VtRage', '_level0/:VtRageText', 'toggle', {1: 'Off', 2: 'On'}),
     'trophy': ('VtTrophies', 'Unlock Trophies', '_level0/:VtTrophy', '_level0/:VtTrophyText', 'action',
                {1: 'Press X', 2: 'Done'}),
+    # submenus: X entra na página (o número), Back volta à principal. Uma página mostra só as linhas dela (setprop
+    # _visible, a propriedade 7, como o próprio GoW2 faz com o HUD)
+    'cat_gfx': ('VtCatGraphics', 'Graphics', '_level0/:VtCatG', '_level0/:VtCatGText', 'submenu', 1),
+    'cat_game': ('VtCatGame', 'Audio & Gameplay', '_level0/:VtCatA', '_level0/:VtCatAText', 'submenu', 2),
+    'cat_cheat': ('VtCatCheats', 'Cheats', '_level0/:VtCatC', '_level0/:VtCatCText', 'submenu', 3),
+    'back': ('VtBack', 'Back', '_level0/:VtBackV', '_level0/:VtBackText', 'back', None),
 }
+PAGE = '_level0/:VtPage'
 GAMES = {
     'gow1': dict(
         state='PS2_Cheat', wad=(30, b'FLP_HUD'), shell=(30, b'FLP_Shell'), nobody=(24,),
         new=[(5, 'tex'), (6, 'aud'), (7, 'res'), (8, 'fps'), (11, 'vsync'), (9, 'cnt'), (10, 'dsp'), (12, 'qte'),
-             (13, 'hp'), (14, 'mp'), (15, 'rage'), (16, 'trophy')],
+             (13, 'hp'), (14, 'mp'), (15, 'rage'), (16, 'trophy'), (17, 'cat_gfx'), (18, 'cat_game'), (19, 'cat_cheat'),
+             (20, 'back')],
+        pages={0: [1, 2, 17, 18, 19, 3, 4], 1: [5, 7, 8, 11, 9, 10, 20], 2: [6, 12, 20], 3: [13, 14, 15, 16, 20]},
         old={1: ('MusicVolume', 'A'), 2: ('SFXVolume', 'A'), 3: ('Controller', 'B'), 4: ('Return', 'B')},
-        order=[1, 2, 5, 6, 7, 8, 11, 9, 10, 12, 13, 14, 15, 16, 3, 4], y=(-200.0, 215.0), row_k=0.82, frames=(7, 8, 9), kx=22, x_state='3',
+        y=(-175.0, 175.0), row_k=1.0, frames=(7, 8, 9), kx=22, x_state='3',
         dyn_label=False),
     'gow2': dict(
         state='PS2_OverUnder', wad=(1, b'FLP_HUDA'), shell=(1, b'FLP_ShellA'), nobody=(0, 24),  # tag 0: parâmetro (o tamanho é o valor)
         new=[(7, 'res'), (8, 'fps'), (9, 'vsync'), (10, 'cnt'), (11, 'dsp'), (12, 'qte'), (13, 'tex'), (14, 'aud'),
-             (15, 'hp'), (16, 'mp'), (17, 'rage'), (18, 'trophy')],
+             (15, 'hp'), (16, 'mp'), (17, 'rage'), (18, 'trophy'), (19, 'cat_gfx'), (20, 'cat_game'), (21, 'cat_cheat'),
+             (22, 'back')],
+        pages={0: [1, 2, 3, 4, 5, 19, 20, 21, 6], 1: [13, 7, 8, 9, 10, 11, 22], 2: [14, 12, 22], 3: [15, 16, 17, 18, 22]},
         old={1: ('MessageTips', 'A'), 2: ('MusicVolume', 'A'), 3: ('SFXVolume', 'A'), 4: ('Controller', 'B'),
              5: ('FlightControls', 'A'), 6: ('Return', 'B')},
-        order=[1, 2, 3, 4, 5, 13, 14, 7, 8, 9, 10, 11, 12, 15, 16, 17, 18, 6], y=(-205.0, 228.0), row_k=0.82, frames=(9, 10, 11), kx=19, x_state='4',
+        y=(-165.0, 207.5), row_k=1.0, frames=(9, 10, 11), kx=19, x_state='4',
         dyn_label=True),
 }
 
 
 def configure(game):
     """Põe nas variáveis do módulo a configuração do jogo (as funções abaixo as usam)."""
-    global GAME, CFG, STATE, ROWS, PATH, ORDER, Y, FIRST_NEW, LAST_NEW, KEY, LO
+    global GAME, CFG, STATE, ROWS, PATH, ORDER, PAGES, Y, FIRST_NEW, LAST_NEW, KEY, LO
     GAME, CFG = game, GAMES[game]
     STATE = CFG['state']
     # ROWS: (estado, nome do clipe, rótulo, variável decodificada, peso, variável do texto) nas linhas novas
@@ -89,9 +100,17 @@ def configure(game):
     PATH = {st: ('PauseMenu/' + name, grp) for st, (name, grp) in CFG['old'].items()}
     for st, key in CFG['new']:
         PATH[st] = ('PauseMenu/' + LINES[key][0], 'A')
-    ORDER = CFG['order']
+    PAGES = CFG['pages']
+    ORDER = PAGES[0]
+    # posições por página (as linhas escondidas não aparecem, então páginas diferentes usam os mesmos lugares); o
+    # Back fica sempre no último lugar
     y0, y1 = CFG['y']
-    Y = {st: y0 + (y1 - y0) / (len(ORDER) - 1) * i for i, st in enumerate(ORDER)}
+    n = max(len(v) for v in PAGES.values())
+    step = (y1 - y0) / (n - 1)
+    Y = {}
+    for page in PAGES.values():
+        for i, st in enumerate(page):
+            Y[st] = y1 if KEY.get(st) == 'back' else y0 + step * i
     FIRST_NEW, LAST_NEW = min(KEY), max(KEY)
     LO = 4 if game == 'gow2' else 0  # quadro dos rótulos e profundidade das animações (versão 0x1b do FLP)
 
@@ -148,17 +167,36 @@ def obj(f, h, typ):
 
 def nav_script(f, step):
     a = flp.Asm()
-    for i, s in enumerate(ORDER):
-        n = ORDER[(i + step) % len(ORDER)]
-        a.getv(ST).push(s).eq().not_().jumpif('n%d' % s)
-        a.settarget(PATH[s][0]).gotolabel('Off').play().settarget('')
-        a.settarget(PATH[n][0]).gotolabel('On').play().settarget('')
-        if PATH[s][1] != PATH[n][1]:
-            on_a = PATH[n][1] == 'A'
-            a.settarget('/PauseMenu/ButtonBack').gotolabel('On' if on_a else 'Off').play().settarget('')
-            a.settarget('/PauseMenu/ButtonSelectBack').gotolabel('Off' if on_a else 'On').play().settarget('')
-        a.setv(ST, n).jump('fim')
-        a.label('n%d' % s)
+    for p, order in PAGES.items():
+        a.getv(PAGE).push(float(p)).eq().not_().jumpif('p%d' % p)
+        for i, st in enumerate(order):
+            n = order[(i + step) % len(order)]
+            a.getv(ST).push(st).eq().not_().jumpif('n%d_%d' % (p, st))
+            a.settarget(PATH[st][0]).gotolabel('Off').play().settarget('')
+            a.settarget(PATH[n][0]).gotolabel('On').play().settarget('')
+            if PATH[st][1] != PATH[n][1]:
+                on_a = PATH[n][1] == 'A'
+                a.settarget('/PauseMenu/ButtonBack').gotolabel('On' if on_a else 'Off').play().settarget('')
+                a.settarget('/PauseMenu/ButtonSelectBack').gotolabel('Off' if on_a else 'On').play().settarget('')
+            a.setv(ST, n).jump('fim')
+            a.label('n%d_%d' % (p, st))
+        a.jump('fim')
+        a.label('p%d' % p)
+    a.label('fim').end()
+    return flp.encode(f, a.build())
+
+
+def page_script(f):
+    """Mostra só as linhas da página atual (VtPage): setprop(alvo, 7 = _visible, 0/1)."""
+    a = flp.Asm()
+    rows = sorted(PATH)
+    for p, order in PAGES.items():
+        a.getv(PAGE).push(float(p)).eq().not_().jumpif('p%d' % p)
+        for st in rows:
+            a.push('/' + PATH[st][0]).push(7.0).push('1' if st in order else '0')
+            a.ins.append([0x23, None])
+        a.jump('fim')
+        a.label('p%d' % p)
     a.label('fim').end()
     return flp.encode(f, a.build())
 
@@ -216,7 +254,8 @@ def show_script(f):
         a.label('q1' + q)
     if any(k == 'trophy' for _, k in CFG['new']):
         a.setv('_level0/:VtTrophy', 1)  # a ação volta a "Press X" a cada abertura da página
-    a.callframe('/:VtOptTexts').end()
+    a.setv(PAGE, 0.0)  # abre sempre na página principal
+    a.callframe('/:VtOptTexts').callframe('/:VtShowPage').end()
     return flp.encode(f, a.build())
 
 
@@ -227,7 +266,9 @@ def texts_script(f):
         clip, text, var, txt, kind, table = LINES[key]
         if CFG['dyn_label']:
             a.setv(label_var(key), text)
-        if kind == 'avail':
+        if kind in ('submenu', 'back'):
+            a.setv(txt, '')
+        elif kind == 'avail':
             a.getv(var).push(2).eq().not_().jumpif('x' + txt)
             a.setv(txt, 'On').jump('y' + txt)
             a.label('x' + txt)
@@ -266,6 +307,31 @@ def change_script(f, step):
             choose(s, var, 1)
             a.label('on%d' % s)
             choose(s, var, 2)
+        elif kind == 'submenu':  # X (ou direita) entra na página
+            target = table
+            first = PAGES[target][0]
+            if step > 0:
+                a.setv(PAGE, float(target))
+                a.settarget(PATH[s][0]).gotolabel('Off').play().settarget('')
+                a.settarget(PATH[first][0]).gotolabel('On').play().settarget('')
+                a.setv(ST, first).callframe('/:VtShowPage').jump('mostra')
+            else:
+                a.jump('trava')
+        elif kind == 'back':  # volta à página principal, na linha do submenu de onde veio
+            if step > 0:
+                for key, (_, _, _, _, k2, page) in LINES.items():
+                    if k2 != 'submenu':
+                        continue
+                    cat = next((st for st, kk in CFG['new'] if kk == key), None)
+                    if cat is None:
+                        continue
+                    a.getv(PAGE).push(float(page)).eq().not_().jumpif('b%d' % page)
+                    a.setv(PAGE, 0.0)
+                    a.settarget(PATH[s][0]).gotolabel('Off').play().settarget('')
+                    a.settarget(PATH[cat][0]).gotolabel('On').play().settarget('')
+                    a.setv(ST, cat).callframe('/:VtShowPage').jump('mostra')
+                    a.label('b%d' % page)
+            a.jump('trava')
         elif kind == 'action':  # desbloquear troféus: X (ou direita) uma vez -> "Done"
             a.getv(var).push(2).eq().jumpif('trava')
             choose(s, var, 2)
@@ -311,8 +377,8 @@ def glyph_advances(f, font_h):
     return {g: c.most_common(1)[0][0] for g, c in seen.items()}
 
 
-def make_label(f, ref, text):
-    """Rótulo estático novo com a mesma fonte, cor e altura de ref, alinhado à direita como ref."""
+def make_label(f, ref, text, center=False):
+    """Rótulo estático novo com a mesma fonte, cor e altura de ref, alinhado à direita como ref (ou centrado)."""
     font = f.fonts[0]
     cmd0 = ref.cmds[0]
     adv = glyph_advances(f, cmd0['font'])
@@ -327,7 +393,10 @@ def make_label(f, ref, text):
     w_ref = sum(w for c in ref.cmds for _, w in c['glyphs'])
     w_new = sum(w for _, w in glyphs)
     x_ref = struct.unpack_from('<h', ref.h, 0x10)[0]
-    struct.pack_into('<h', st.h, 0x10, x_ref + w_ref - w_new)  # mesma borda direita (colado ao valor)
+    if center:  # mesmo centro (linhas sem valor, como Controller e Return)
+        struct.pack_into('<h', st.h, 0x10, x_ref + (w_ref - w_new) // 2)
+    else:
+        struct.pack_into('<h', st.h, 0x10, x_ref + w_ref - w_new)  # mesma borda direita (colado ao valor)
     return st
 
 
@@ -457,19 +526,29 @@ def mod_flp(b, icons=True):
         sfx_label_dyn = f.dyns[obj(f, struct.unpack_from('<H', sfx.anims[0][1][0], 2)[0], 5)]
     else:
         sfx_label = f.statics[obj(f, struct.unpack_from('<H', sfx.anims[0][1][0], 2)[0], 4)]
+    # linhas sem valor (submenus, Back): rótulo centrado como o de "Return to Pause Menu"
+    ret = f.c7[obj(f, named(pm, f, 'Return'), 7)]
+    ret_label = struct.unpack_from('<H', ret.anims[0][1][0], 2)[0]
     F0, F1, F2 = CFG['frames']
 
     # ---- linhas novas
     rows = {}
     for s, clip_name, text, _, _, txt_var in ROWS:
-        if CFG['dyn_label']:
+        center = LINES[KEY[s]][4] in ('submenu', 'back')
+        if CFG['dyn_label'] and center:
+            d = bytearray(f.dyns[obj(f, ret_label, 5)])
+            struct.pack_into('<H', d, 0, f.add_string(label_var(KEY[s])))
+            f.dyns.append(d)
+            h_lab = handler(f, 5, len(f.dyns) - 1)
+            f.dyns.append(make_dyn(f, txt_var, sfx_label_dyn))
+        elif CFG['dyn_label']:
             d = bytearray(sfx_label_dyn)
             struct.pack_into('<H', d, 0, f.add_string(label_var(KEY[s])))
             f.dyns.append(d)
             h_lab = handler(f, 5, len(f.dyns) - 1)
             f.dyns.append(make_dyn(f, txt_var, sfx_label_dyn))
         else:
-            st = make_label(f, sfx_label, text)
+            st = make_label(f, f.statics[obj(f, ret_label, 4)] if center else sfx_label, text, center)
             f.statics.append(st)
             h_lab = handler(f, 4, len(f.statics) - 1)
             f.dyns.append(make_dyn(f, txt_var))
@@ -478,6 +557,8 @@ def mod_flp(b, icons=True):
         c.h = bytearray(sfx.h)
         c.frames = sfx.frames
         c.anims = [[bytearray(h), [bytearray(k) for k in keys]] for h, keys in sfx.anims]
+        if center:  # posição e escala do rótulo (no quadro de destaque) as do Return
+            c.anims[0] = [bytearray(ret.anims[0][0]), [bytearray(k) for k in ret.anims[0][1]]]
         c.labels = [[bytearray(h), [[bytearray(sh), code] for sh, code in subs]] for h, subs in sfx.labels]
         for k in c.anims[0][1]:
             struct.pack_into('<H', k, 2, h_lab)
@@ -504,10 +585,13 @@ def mod_flp(b, icons=True):
     sfx_key = next(k for h, keys in pm.anims for k in keys
                    if f.s(struct.unpack_from('<H', k, 8)[0]) == 'SFXVolume' and struct.unpack_from('<H', k, 0)[0] == F0)
     t_sfx = struct.unpack_from('<H', sfx_key, 4)[0]
+    # linhas centradas: o x do clipe é o da linha Return (no GoW2 a linha SFX fica à esquerda do centro)
+    t_ret = next(struct.unpack_from('<H', k, 4)[0] for h, keys in pm.anims for k in keys
+                 if f.s(struct.unpack_from('<H', k, 8)[0]) == 'Return' and struct.unpack_from('<H', k, 0)[0] == F0)
     depth = max(struct.unpack_from('<H', h, LO)[0] for h, _ in pm.anims)
     for s, (h_row, name) in rows.items():
         depth += 1
-        t = xform(f, t_sfx, y=Y[s], k=CFG['row_k'])
+        t = xform(f, t_ret if LINES[KEY[s]][4] in ('submenu', 'back') else t_sfx, y=Y[s], k=CFG['row_k'])
         nm = f.add_string(name)
         keys = [bytearray(struct.pack('<HHHHH', F0, h_row, t, CFG['kx'], nm)),
                 bytearray(struct.pack('<HHHHH', F1, h_row, t, 0, nm)),
@@ -580,7 +664,7 @@ def mod_flp(b, icons=True):
     proto_h, proto_subs = root.labels[find_label(root, f, 'PauseReset')]
     new = [(49, 'VtNavUp', nav_script(f, -1)), (50, 'VtNavDown', nav_script(f, +1)),
            (51, 'VtLeft', change_script(f, -1)), (52, 'VtRight', change_script(f, +1)),
-           (53, 'VtOptShow', show_script(f)), (54, 'VtOptTexts', texts_script(f))]
+           (53, 'VtOptShow', show_script(f)), (54, 'VtOptTexts', texts_script(f)), (55, 'VtShowPage', page_script(f))]
     for frame, name, code in new:
         h = bytearray(proto_h)
         struct.pack_into('<H', h, LO, frame)
