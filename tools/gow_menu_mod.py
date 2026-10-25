@@ -518,6 +518,87 @@ def hud_unstretch(f):
             struct.pack_into('<H', k, 4, seen[t])
 
 
+# Layout da versão europeia ("justificado"): rótulos alinhados à esquerda numa margem e valores (texto, setas, barra
+# de volume) encostados à direita na outra. Margens em unidades do PauseMenu (centro 0; a tela vai de cerca de -352 a
+# +352, medido nas capturas com margens de teste). Na captura europeia os rótulos começam a 8% da largura e os valores
+# terminam a 92%.
+JUSTIFY = {'gow2': (-294.0, 294.0), 'gow1': (-294.0, 294.0)}
+BAR_W = 200.0     # largura da barra de volume a partir da origem do clipe dela (unidades da linha, medida)
+
+
+def justify(f, pm):
+    left, right = JUSTIFY[GAME]
+    F0 = CFG['frames'][0]
+
+    def key_x(k):
+        return struct.unpack_from('<h', f.xforms[struct.unpack_from('<H', k, 4)[0]], 0x10)[0] / 16
+
+    def shift(keys, dx):
+        for k in keys:
+            if struct.unpack_from('<H', k, 2)[0] < len(f.handlers):
+                struct.pack_into('<H', k, 4, xform(f, struct.unpack_from('<H', k, 4)[0], x=key_x(k) + dx))
+
+    for st, (path, _) in PATH.items():
+        name = path.split('/')[-1]
+        row_x = row_k = None
+        for h, keys in pm.anims:
+            for k in keys:
+                if f.s(struct.unpack_from('<H', k, 8)[0]) == name and struct.unpack_from('<H', k, 0)[0] == F0:
+                    t = f.xforms[struct.unpack_from('<H', k, 4)[0]]
+                    row_x, row_k = struct.unpack_from('<h', t, 0x10)[0] / 16, struct.unpack_from('<i', t, 0)[0] / 65536
+        clip = f.c7[obj(f, named(pm, f, name), 7)]
+        t_left, t_right = (left - row_x) / row_k, (right - row_x) / row_k  # margens no espaço da linha
+        # rótulo: o primeiro texto do clipe (no MessageTips as setas vêm antes)
+        li = next(i for i, (h, keys) in enumerate(clip.anims)
+                  if struct.unpack_from('<H', keys[0], 2)[0] < len(f.handlers) and f.handlers[struct.unpack_from('<H', keys[0], 2)[0]][0] in (4, 5))
+        lab_keys = clip.anims[li][1]
+        typ, idx = f.handlers[struct.unpack_from('<H', lab_keys[0], 2)[0]]
+        x0 = key_x(lab_keys[0])
+        if typ == 5:
+            d = f.dyns[idx]
+            d[0x1e] = 0
+            edge = x0 + struct.unpack_from('<h', d, 0x16)[0] / 16
+        else:
+            st_ = f.statics[idx]
+            edge = x0 + struct.unpack_from('<h', st_.h, 0x10)[0] / 16
+        shift(lab_keys, t_left - edge)
+        # valores: o grupo inteiro anda junto, até a borda direita do elemento mais à direita
+        edge = None
+        values = [keys for i, (h, keys) in enumerate(clip.anims) if i != li]
+        for keys in values:
+            k = keys[0]
+            hd = struct.unpack_from('<H', k, 2)[0]
+            if hd >= len(f.handlers):
+                continue
+            typ, idx = f.handlers[hd]
+            nm = f.s(struct.unpack_from('<H', k, 8)[0]) if struct.unpack_from('<H', k, 8)[0] != 0xffff else ''
+            e = None
+            if typ == 5:
+                d = f.dyns[idx]
+                if f.s(struct.unpack_from('<H', d, 0)[0]).startswith('_level0/:Vt'):
+                    # valor das linhas novas: alinhado à direita na própria caixa
+                    d[0x1e] = 1
+                bx, _, bw, _ = struct.unpack_from('<hhHH', d, 0x16)
+                e = key_x(k) + (bx + bw) / 16 if d[0x1e] == 1 else None
+            elif nm == 'Opt':  # valor das linhas originais com setas: o texto passa a ser alinhado à direita
+                ik = f.c7[idx].anims[0][1][0]
+                it, ii = f.handlers[struct.unpack_from('<H', ik, 2)[0]]
+                if it == 5:
+                    d = f.dyns[ii]
+                    d[0x1e] = 1
+                    bx, _, bw, _ = struct.unpack_from('<hhHH', d, 0x16)
+                    t_in = f.xforms[struct.unpack_from('<H', ik, 4)[0]]
+                    k_in = struct.unpack_from('<i', t_in, 0)[0] / 65536
+                    e = key_x(k) + struct.unpack_from('<h', t_in, 0x10)[0] / 16 + (bx + bw) / 16 * k_in
+            elif nm.endswith('Bar'):
+                e = key_x(k) + BAR_W
+            if e is not None:
+                edge = e if edge is None else max(edge, e)
+        if edge is not None:
+            for keys in values:
+                shift(keys, t_right - edge)
+
+
 def mod_flp(b, icons=True):
     f = flp.FLP(b)
     pm = f.c7[obj(f, named(f.root, f, 'PauseMenu'), 7)]
@@ -599,6 +680,7 @@ def mod_flp(b, icons=True):
         head = bytearray(pm.anims[0][0])
         struct.pack_into('<H', head, LO, depth)
         pm.anims.append([head, keys])
+    justify(f, pm)
 
     # ---- contador de FPS no estilo do contador de HITS: número grande (o rótulo dinâmico do HITS) com
     # "FPS" menor embaixo, num clipe de 2 quadros em laço no canto superior direito do HUD (800x600)
