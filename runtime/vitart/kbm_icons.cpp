@@ -1,10 +1,5 @@
-// Ícones dos botões com as teclas quando o teclado/mouse está em uso (tools/kbm_flp.py).
-//
-// O motor desenha os clipes de ícone do HUD (FLP) sempre no quadro 0 e sem scripts, então a troca é feita
-// aqui, na memória do jogo: <mods>/<psarc>.kbm.tsv lista, para cada FLP (WAD portátil e de PS TV),
-// as chaves de animação (10 bytes) a trocar entre a original e a de teclado. Uma thread acha o FLP carregado
-// pelas próprias chaves (varre a memória do jogo) e escreve o conjunto do modo atual; depois só
-// confere, a cada segundo, se o FLP continua no mesmo lugar.
+// troca o quadradinho/bolinha pelas teclas quando você tá no teclado
+// (a explicação comprida mora em docs/teclado-mouse-qte.md)
 #include "vitart.h"
 
 #include <algorithm>
@@ -51,7 +46,7 @@ std::vector<uint8_t> unhex(const std::string &h) {
 std::vector<FlpTable> load_tables(int game) {
     std::vector<FlpTable> out;
     const std::string psarc = game == 1 ? "gow1_psp2_SCEA.psarc" : "gow2_psp2_SCEA.psarc";
-    std::ifstream f(mods_dir_for(psarc) + "/" + psarc + ".kbm.tsv"); // a mesma pasta do patch (hle_io.cpp)
+    std::ifstream f(mods_dir_for(psarc) + "/" + psarc + ".kbm.tsv");
     std::string line;
     while (std::getline(f, line)) {
         if (line.empty() || line[0] == '#') continue;
@@ -74,8 +69,7 @@ std::vector<FlpTable> load_tables(int game) {
     return out;
 }
 
-// Endereço do FLP (início): procura a 1ª chave original e confere as 8 seguintes nas distâncias da tabela
-// (o jogo ajusta ponteiros do FLP ao carregar, mas as chaves de animação ficam como no arquivo); 0 = não achou.
+// caça o FLP na memória; 0 se ele se escondeu bem
 uint32_t find_flp(const FlpTable &t) {
     if (t.swaps.size() < 2) return 0;
     const Swap &s0 = t.swaps[0];
@@ -115,7 +109,7 @@ std::string base_name(const std::string &n) {
     return k == std::string::npos ? n : n.substr(k + 1);
 }
 
-// O FLP continua no lugar: a primeira chave tem a original ou a de teclado.
+// ainda tá lá? só conferindo
 bool still_there(const FlpTable &t, uint32_t at) {
     const uint8_t *p = ptr<uint8_t>(at + t.swaps[0].off);
     return !std::memcmp(p, t.swaps[0].ps, 10) || !std::memcmp(p, t.swaps[0].kb, 10);
@@ -125,7 +119,7 @@ void apply(const FlpTable &t, uint32_t at, bool kbm) {
     for (const Swap &s : t.swaps) {
         uint8_t *p = ptr<uint8_t>(at + s.off);
         const uint8_t *want = kbm ? s.kb : s.ps, *other = kbm ? s.ps : s.kb;
-        if (std::memcmp(p, want, 10) && !std::memcmp(p, other, 10)) std::memcpy(p, want, 10); // só se for nossa chave
+        if (std::memcmp(p, want, 10) && !std::memcmp(p, other, 10)) std::memcpy(p, want, 10); // só mexe no que é nosso
     }
 }
 
@@ -140,16 +134,12 @@ void worker() {
     std::vector<int> applied(tables.size(), -1);
     uint32_t scans = 0;
     for (;;) {
-        // as trocas (ícone -> glifo do atlas) valem em todo modo com atlas instalado (PS5, teclado, Xbox); o atlas muda
-        // com o modo. Sem atlas do modo, os ícones originais do jogo.
         const bool kbm = icon_atlas_available(input_icon_mode());
         for (size_t i = 0; i < tables.size(); i++) {
             if (where[i] && !still_there(tables[i], where[i])) where[i] = 0, applied[i] = -1;
             if (!where[i]) {
-                // procura a cada 2 s até achar (o FLP do HUD é carregado no começo e fica; só um dos WADs, o
-                // portátil ou o de PS TV, é usado): achada uma versão, a outra não é procurada. HUD e menu principal são
-                // FLPs diferentes e podem estar carregados juntos
-                if (scans % 8) continue; // a cada 2 s
+                // paciência: tenta de novo daqui a pouco
+                if (scans % 8) continue;
                 bool twin = false;      // a outra versão (portátil / PS TV) do mesmo arquivo já está carregada
                 for (size_t j = 0; j < tables.size(); j++)
                     twin |= j != i && where[j] && base_name(tables[j].name) == base_name(tables[i].name);
@@ -162,14 +152,14 @@ void worker() {
             }
             if (where[i] && applied[i] != (int)kbm) apply(tables[i], where[i], kbm), applied[i] = kbm;
         }
-        scans++; // 250 ms por volta
+        scans++;
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
 }
 
 } // namespace
 
-// Chamado no primeiro quadro (game_options_tick).
+// liga a thread logo no começo do jogo
 void kbm_icons_start() {
     static std::once_flag once;
     std::call_once(once, [] { std::thread(worker).detach(); });

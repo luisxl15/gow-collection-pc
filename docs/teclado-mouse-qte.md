@@ -76,3 +76,21 @@ Toques a cerca de 14 por segundo (serve para os QTEs de repetir), "Hold" segurad
 Diagnóstico: `VITART_QTELOG=1` registra cada ícone; `VITART_AUTO_QTE=1` liga sem o menu.
 
 A opção fica no bit 10 da palavra de estado do menu (`auto_qte=` no `vitart_options.ini`).
+
+## Troca dos ícones na memória (runtime/vitart/kbm_icons.cpp)
+
+O motor desenha os clipes de ícone do HUD (FLP) sempre no quadro 0 e sem scripts. Por isso a troca é feita
+direto na memória do jogo:
+
+- **A tabela.** `<mods>/<psarc>.kbm.tsv`, na mesma pasta do patch (hle_io.cpp), lista para cada FLP (do WAD
+  portátil e do de PS TV) as chaves de animação de 10 bytes. Cada uma tem a versão original e a de teclado.
+- **Achar o FLP.** Uma thread varre a memória atrás da 1ª chave original e confere as 8 seguintes nas
+  distâncias da tabela. O jogo ajusta os ponteiros do FLP ao carregar, mas as chaves ficam como no arquivo. O
+  FLP inteiro tem de caber na região mapeada.
+- **Ritmo.** A procura roda a cada 2 s até achar, numa volta de 250 ms. O FLP do HUD carrega no começo e fica.
+  Só um dos WADs é usado (portátil ou PS TV): achada uma versão, a outra não é procurada. HUD e menu
+  principal são FLPs diferentes e podem estar carregados juntos.
+- **Depois de achar.** A thread grava o conjunto do modo atual. A cada segundo, só confere se a primeira chave
+  ainda tem a versão original ou a de teclado. Uma chave só é trocada se estiver com a outra versão nossa.
+- **Modos.** As trocas (ícone -> glifo do atlas) valem em todo modo com atlas instalado (PS5, teclado, Xbox),
+  e o atlas muda com o modo. Sem atlas do modo, ficam os ícones originais do jogo.
