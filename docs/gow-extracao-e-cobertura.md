@@ -130,8 +130,7 @@ contexto), chama `arc_ret_mismatch`, que nos testes é fatal e no backend do Vit
 
 ## 6. REA neste ambiente (TESTADA)
 
-* `rea-agents` 6.2.0 instalado e registrado no Claude Code (`rea setup --client claude_code`):
-  entrada MCP em `~/.claude.json` (com backup) e a skill `reverse-engineer-anything`.
+* `rea-agents` 6.2.0 instalado e registrado como servidor MCP, com a skill `reverse-engineer-anything`.
 * `rea inspect-artifact gow1.elf`: funciona (inventário + SHA-256, formato `elf`, arquitetura `null`).
   Evidência: `gow-dump/rea/artifact-gow1.json`.
 * `rea inspect-binary-layout`: `capability_unavailable` — o perfil pwntools só existe em Linux x64.
