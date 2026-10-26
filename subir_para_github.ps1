@@ -210,6 +210,6 @@ Write-Host ""
 Write-Host "Pronto!" -ForegroundColor Green
 Write-Host "Repositorio: https://github.com/$fullName ($visibility)"
 Write-Host ""
-Write-Host "Mande isto para o Claude (ja esta na area de transferencia):" -ForegroundColor Cyan
+Write-Host "Nome do repositorio (ja esta na area de transferencia):" -ForegroundColor Cyan
 Write-Host "    $fullName" -ForegroundColor White
 Write-Host ""
