@@ -23,6 +23,7 @@ from tkinter import filedialog, messagebox, ttk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vitart_modkit as K  # noqa: E402
+import vitart_tema as T  # noqa: E402
 
 DOCS = os.path.join(K.REPO, 'docs', 'modding', 'README.md')
 
@@ -59,15 +60,22 @@ class Studio(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title('vitart Mod Studio')
-        self.geometry('1100x720')
-        self.minsize(900, 600)
+        self.geometry('1180x820')
+        self.minsize(960, 680)
         self.cfg = K.load_config()
         self.busy = False
-        style = ttk.Style(self)
-        if 'vista' in style.theme_names():
-            style.theme_use('vista')
+        T.style_ttk(self)
+        T.set_icon(self)
+        # cabeçalho com a arte do jogo e o friso grego no pé (redesenhados quando a largura muda)
+        self.art = T.game_art(self.cfg.get('app'))
+        self.head = tk.Label(self, bg=T.BG, bd=0)
+        self.head.pack(fill='x')
+        self.foot = tk.Label(self, bg=T.BG, bd=0)
+        self.foot.pack(fill='x', side='bottom')
+        self._art_w = None
+        self.bind('<Configure>', lambda e: self.after_idle(self._paint_chrome) if e.widget is self else None)
         nb = ttk.Notebook(self)
-        nb.pack(fill='both', expand=True, padx=6, pady=6)
+        nb.pack(fill='both', expand=True, padx=12, pady=(10, 8))
         self.tab_mods = ttk.Frame(nb)
         self.tab_conv = ttk.Frame(nb)
         self.tab_tex = ttk.Frame(nb)
@@ -85,6 +93,17 @@ class Studio(tk.Tk):
         self.build_cfg()
         self.build_help()
         self.refresh_mods()
+
+    def _paint_chrome(self):
+        from PIL import ImageTk
+        w = self.winfo_width()
+        if w < 200 or w == self._art_w:
+            return
+        self._art_w = w
+        self._head_ph = ImageTk.PhotoImage(T.banner(w, 150, 'MOD STUDIO', 'VITART  ·  GOD OF WAR COLLECTION', self.art))
+        self._foot_ph = ImageTk.PhotoImage(T.meander(w, 16))
+        self.head.config(image=self._head_ph)
+        self.foot.config(image=self._foot_ph)
 
     # -------------------------------------------------------------- trabalho em segundo plano
     def work(self, log, fn, done=None):
@@ -128,7 +147,7 @@ class Studio(tk.Tk):
                            ('Atualizar lista', self.refresh_mods)):
             ttk.Button(btns, text=label, command=cmd, width=26).pack(pady=3)
         ttk.Label(btns, text='Ligar/desligar aqui vale ao abrir\no jogo. No menu de pausa\n(Options > Mods > Apply) vale na hora.',
-                  foreground='#555').pack(pady=10)
+                  foreground=T.DIM).pack(pady=10)
         self.mod_info = tk.Text(f, height=5, wrap='word', state='disabled')
         self.mod_info.pack(fill='x', padx=8)
         self.mods_log = Log(f, height=9)
@@ -216,7 +235,7 @@ class Studio(tk.Tk):
             if key == 'game':
                 ttk.Combobox(g, textvariable=self.conv[key], values=['gow2'], state='readonly', width=10).grid(
                     row=r, column=1, sticky='w')
-                ttk.Label(g, text='(GoW1: ainda não há conversor de malha do PS2 do GoW1)', foreground='#777').grid(
+                ttk.Label(g, text='(GoW1: ainda não há conversor de malha do PS2 do GoW1)', foreground=T.DIM).grid(
                     row=r, column=2, sticky='w')
                 continue
             ttk.Entry(g, textvariable=self.conv[key], width=80).grid(row=r, column=1, sticky='we', padx=4)
@@ -347,7 +366,8 @@ class Studio(tk.Tk):
         self.tex_tree.bind('<<TreeviewSelect>>', lambda e: self.preview())
         right = ttk.Frame(mid)
         right.pack(side='left', fill='y')
-        self.canvas = tk.Label(right, text='(prévia)', width=40, relief='sunken')
+        self.canvas = tk.Label(right, text='(prévia)', width=40, relief='flat', bg='#0f0b09', fg=T.DIM,
+                               highlightthickness=1, highlightbackground=T.GOLD_DIM)
         self.canvas.pack(pady=4)
         for label, cmd in (('Exportar PNG...', self.export_png), ('Trocar por PNG...', self.import_png),
                            ('Desfazer troca', self.undo_png), ('Exportar todas do WAD...', self.export_all)):
@@ -493,7 +513,7 @@ class Studio(tk.Tk):
         g.columnconfigure(1, weight=1)
         ttk.Button(f, text='Salvar', command=self.save_cfg).pack(anchor='w', padx=10)
         ttk.Label(f, text='O xdelta3 oficial: github.com/jmacd/xdelta-gpl/releases (xdelta3-3.1.0-x86_64.exe).',
-                  foreground='#555').pack(anchor='w', padx=10, pady=10)
+                  foreground=T.DIM).pack(anchor='w', padx=10, pady=10)
 
     def save_cfg(self):
         for k, v in self.cfg_vars.items():

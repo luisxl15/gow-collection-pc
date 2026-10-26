@@ -33,8 +33,17 @@ import subprocess
 import sys
 import tempfile
 
-TOOLS = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(TOOLS)
+FROZEN = getattr(sys, 'frozen', False)
+if FROZEN:
+    # exe do PyInstaller (tools/build_exes.py): o código vem de dentro do exe; as ferramentas chamadas por
+    # subprocesso, a documentação e a configuração ficam no repositório, achado por VITART_REPO ou pela posição
+    # do exe (gow-dump/rt -> ../../vita-recomp-lab).
+    REPO = os.environ.get('VITART_REPO') or os.path.normpath(
+        os.path.join(os.path.dirname(sys.executable), '..', '..', 'vita-recomp-lab'))
+    TOOLS = os.path.join(REPO, 'tools')
+else:
+    TOOLS = os.path.dirname(os.path.abspath(__file__))
+    REPO = os.path.dirname(TOOLS)
 sys.path.insert(0, TOOLS)
 
 PSARC = {'gow1': 'gow1_psp2_SCEA.psarc', 'gow2': 'gow2_psp2_SCEA.psarc'}
@@ -52,7 +61,7 @@ def default_config():
         'work': os.path.join(proj, 'gow-dump', 'modkit_work'),
         'xdelta3': os.path.join(TOOLS, 'bin', 'xdelta3.exe'),
         'sevenzip': r'C:\Program Files\7-Zip\7z.exe',
-        'python': sys.executable,
+        'python': (shutil.which('python') or 'python') if FROZEN else sys.executable,
     }
 
 
