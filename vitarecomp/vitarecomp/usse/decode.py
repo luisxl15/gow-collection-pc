@@ -82,6 +82,7 @@ class Program:
     containers: list = None      # (índice, ?, base_sa_offset, tamanho em f32)
     uniform_buffers: list = None  # (buffer onde reside, ldst_base_offset, ldst_base_value)
     literals: list = None         # (deslocamento em SA, valor)
+    dep_samplers: list = None     # (layout, sa_offset) dos samplers de leitura dependente
     vertex_outputs: list = None   # vértice: (nome, location, n componentes, 1º registrador OUTPUT)
     frag_inputs: list = None      # fragmento: iteradores e leituras de textura não dependentes (dicts)
     output_type: int = 0          # fragmento: SceGxmParameterType da cor de saída
@@ -122,6 +123,9 @@ class Program:
         prog.containers = [struct.unpack_from("<HHHH", blob, rel(0x94) + 8 * i) for i in range(u32(0x90))]
         prog.uniform_buffers = [struct.unpack_from("<HHi", blob, rel(0x7C) + 8 * i) for i in range(u32(0x78))]
         prog.literals = [struct.unpack_from("<If", blob, rel(0x74) + 8 * i) for i in range(u32(0x70))]
+        # Samplers das leituras dependentes (smp): {layout, sa_offset}; recurso = layout // 4, e os 4 layouts de um
+        # recurso são as 4 palavras do estado da textura em SA (base do contêiner 19 + sa_offset).
+        prog.dep_samplers = [struct.unpack_from("<HH", blob, rel(0x84) + 4 * i) for i in range(u32(0x80))]
         prog._parse_varyings(rel(0x2C))
         return prog
 

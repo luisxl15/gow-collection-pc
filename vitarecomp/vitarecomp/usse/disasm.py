@@ -120,6 +120,23 @@ def lower(ins, second=False):
         cmp = [["ne", "lt", "gt"], ["eq", "le", "ge"]][eq][f["sign_test"]]
         d = O.Operand(O.PRED, f["pdst_n"])
         return ("vtst_%s_%s%s" % (alu, cmp, "" if f["prec"] else ".f16"), d, 1 << f["chan_cc"], [s1, s2])
+    if ins.op == "vtstmsk":
+        # Teste que grava máscara: 1.0/0.0 por canal no registrador de destino (Vita3K vtstmsk). Só o
+        # caso de vetor flutuante (alu_sel 0) com escrita ligada; tst_mask_type 2 grava os 4 canais.
+        if f["alu_sel"] != 0 or f["rpt_count"] or not f["test_wben"] or f["tst_mask_type"] == 3:
+            return None
+        alu = {2: "add", 9: "min", 10: "max", 13: "mul", 14: "sub"}.get(f["alu_op"])
+        if alu is None or f["sign_test"] == 3:
+            return None
+        s1 = O.src12(f["src1_n"], f["src1_bank"], f["src1_ext"], True, 8, second)
+        s2 = O.src12(f["src2_n"], f["src2_bank"], f["src2_ext"], True, 8, second)
+        s1.neg = bool(f["test_flag_2"])
+        if f["src2_vscomp"]:
+            s2.swizzle = (O.X, O.X, O.X, O.X)
+        cmp = [["ne", "lt", "gt"], ["eq", "le", "ge"]][f["zero_test"] == 1][f["sign_test"]]
+        d = O.dest(f["dest_n"], f["dest_bank"], f["dest_ext"], True, 8, second)
+        mask = 0xF if f["tst_mask_type"] == 2 else 1
+        return ("vtstmsk_%s_%s%s" % (alu, cmp, "" if f["prec"] else ".f16"), d, mask, [s1, s2])
     if ins.op == "vpck":
         # Só formatos de ponto flutuante (f32/f16) por enquanto; cada componente vira uma fonte de
         # canal único em srcs (a escolha entre src1/src2 já resolvida).
@@ -129,8 +146,6 @@ def lower(ins, second=False):
             if f["scale"]:
                 return None
         if f["src_fmt"] not in fmts or f["dest_fmt"] not in fmts:
-            return None
-        if f["repeat_count"] and fmts.get(f["dest_fmt"]) == "u16":
             return None
         sf, df = fmts[f["src_fmt"]], fmts[f["dest_fmt"]]
         d = O.dest(f["dest_n"], f["dest_bank_sel"], f["dest_bank_ext"], False, 7, second)

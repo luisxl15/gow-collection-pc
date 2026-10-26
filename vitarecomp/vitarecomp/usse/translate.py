@@ -13,7 +13,7 @@ from . import spirv as S
 from .disasm import lower
 from .interp import FPC0, FPC1
 
-GLSL_PACKH, GLSL_UNPACKH, GLSL_PACKUNORM4X8 = 58, 62, 55
+GLSL_PACKH, GLSL_UNPACKH, GLSL_PACKUNORM4X8, GLSL_UNPACKUNORM4X8 = 58, 62, 55, 64
 GLSL_FABS, GLSL_FMA, GLSL_INVSQRT, GLSL_LOG2, GLSL_EXP2, GLSL_FLOOR, GLSL_FMIN, GLSL_FMAX = 4, 50, 32, 30, 29, 8, 37, 40
 OpFNegate = 127
 BANK_VAR = {O.TEMP: "temp", O.PA: "pa", O.SA: "sa", O.OUT: "out", O.FPI: "fpi"}
@@ -44,6 +44,18 @@ class Translator:
         self.preds = b.variable(b.array(self.f32, 4), S.SCPrivate, "pred")
         self.cur_pred = None  # (id do bool) enquanto a instrução atual é predicada
         self.rep = O.RepeatState()
+        self.samplers = {}  # recurso -> variável do sampler (set 1, binding = recurso)
+        self.extra_ifaces = []  # interfaces criadas por instruções (gl_FragDepth do depthf)
+        self.frag_depth = None
+
+    def sampler_var(self, res):
+        if res not in self.samplers:
+            b = self.b
+            sv = b.variable(b.sampled_image(), S.SCUniformConstant, "tex%d" % res)
+            b.decorate(sv, S.DecDescriptorSet, 1)
+            b.decorate(sv, S.DecBinding, res)
+            self.samplers[res] = sv
+        return self.samplers[res]
 
     def const(self, v):
         return self.b.const(self.f32, float(v))
@@ -117,6 +129,16 @@ class Translator:
         if ins.op == "smlsi":
             self.rep.smlsi(ins.f)
             return
+        if ins.op == "depthf":
+            self.depthf(ins, second)
+            return
+        if ins.op == "smp":
+            self.cur_pred = self.pred_bool(ins)
+            try:
+                self.smp(ins, second)
+            finally:
+                self.cur_pred = None
+            return
         low = lower(ins, second)
         if low is None:
             raise Unsupported(ins.op)
@@ -135,6 +157,91 @@ class Translator:
             self._instr(mn, d, m, srcs)
         finally:
             self.cur_pred = None
+
+    def pred_bool(self, ins):
+        try:
+            pr = O.predicate(ins)
+        except ValueError as e:
+            raise Unsupported(str(e))
+        if pr is None:
+            return None
+        pv = self.b.load(self.f32, self.b.chain(S.SCPrivate, self.f32, self.preds, self.b.const(self.i32, pr[0])))
+        return self.b.emit(182 if not pr[1] else 180, self.boolt, pv, self.const(0))
+
+    def depthf(self, ins, second):
+        """Profundidade do fragmento vinda do shader (Vita3K depthf): src0 vai para gl_FragDepth."""
+        f, b = ins.f, self.b
+        if not self.p.fragment or f["pred"]:
+            raise Unsupported("depthf predicado ou no vértice")
+        src0 = O.src0(f["src0_n"], f["src0_bank"], f["src0_bank_ext"], True, 7, second)
+        if self.frag_depth is None:
+            self.frag_depth = b.variable(self.f32, S.SCOutput, "gl_FragDepth")
+            b.decorate(self.frag_depth, S.DecBuiltIn, S.BuiltInFragDepth)
+            b.need_modes.append(S.ExecDepthReplacing)
+            self.extra_ifaces.append(self.frag_depth)
+        b.store(self.frag_depth, self.read(src0, 1)[0])
+
+    def smp(self, ins, second):
+        """Leitura de textura dependente (coordenada calculada no shader), como o smp do Vita3K
+        (shader/src/translator/texture.cpp). O sampler é o recurso cujo estado está no SA de src1 (tabela de
+        samplers dependentes do GXP); o número de componentes vem do parâmetro do sampler. Cobre 2D, sem LOD,
+        retorno F16/F32 (fconv_type 2/3), amostra simples (sb_mode 0) e gather4 + coeficientes bilineares
+        (sb_mode 3, o PCF das sombras)."""
+        f, p, b = ins.f, self.p, self.b
+        if not p.fragment:
+            raise Unsupported("smp no vértice")
+        if f["lod_mode"] or f["dim"] != 1 or f["sb_mode"] not in (0, 3) or f["fconv_type"] not in (2, 3):
+            raise Unsupported("smp lod=%d dim=%d sb=%d fconv=%d" % (f["lod_mode"], f["dim"], f["sb_mode"], f["fconv_type"]))
+        src0 = O.src0(f["src0_n"], f["src0_bank"], f["src0_ext"], True, 8, second)
+        src1 = O.src12(f["src1_n"], f["src1_bank"], f["src1_ext"], True, 8, second)
+        base = {ci: sa for ci, _, sa, _ in (p.containers or [])}.get(19, 0)
+        res = next((lay // 4 for lay, sa in (p.dep_samplers or []) if src1.bank == O.SA and base + sa == src1.num), None)
+        if res is None:
+            raise Unsupported("smp sem sampler em %s%d" % (src1.bank, src1.num))
+        ncomp = next((q["components"] for q in p.params if q["category"] == 2 and q["resource"] == res), 4) or 4
+        if f["src0_type"] == 0:
+            cx, cy = self.read(src0, 0b11)
+        elif f["src0_type"] == 1:
+            base0 = BANK_VAR.get(src0.bank)
+            if base0 is None:
+                raise Unsupported("smp coordenada em %s" % src0.bank)
+            cx, cy = self.read_half(base0, src0.num, 0), self.read_half(base0, src0.num, 1)
+        else:
+            raise Unsupported("smp coordenada C10")
+        coord = b.emit(S.OpCompositeConstruct, self.v2, cx, cy)
+        img = b.load(b.sampled_image(), self.sampler_var(res))
+        half = f["fconv_type"] == 2
+        bank = O.PA if f["dest_use_pa"] else O.TEMP
+        if second and bank == O.PA:
+            bank = O.SA
+        d = O.Operand(bank, f["dest_n"])
+        if f["sb_mode"] == 0:
+            texel = b.emit(S.OpImageSampleImplicitLod, self.v4, img, coord)
+            self.write(d, (1 << ncomp) - 1, [b.emit(S.OpCompositeExtract, self.f32, texel, c) for c in range(ncomp)], half)
+            return
+        # gather4: os 4 texels de cada componente; com mais de um componente, gravados pixel a pixel (x1 y1 .. x2 y2 ..)
+        step = 2 if half else 4  # registradores de 4 valores
+        g = [b.emit(S.OpImageGather, self.v4, img, coord, b.const(self.i32, c)) for c in range(ncomp)]
+        vals = [b.emit(S.OpCompositeExtract, self.f32, g[c], px) for px in range(4) for c in range(ncomp)] \
+            if ncomp > 1 else [b.emit(S.OpCompositeExtract, self.f32, g[0], px) for px in range(4)]
+        for k in range(0, len(vals), 4):
+            self.write(d, 0xF, vals[k:k + 4], half)
+            d = O.Operand(d.bank, d.num + step)
+        # coeficientes bilineares em F16, na ordem que o código do jogo espera:
+        # ((1-u)(1-v), u(1-v), uv, (1-u)v) com u, v = fract(coord * tamanho - 0.5)
+        b.need_caps.add(S.CapImageQuery)
+        raw = b.emit(S.OpImage, b._tcache[("img", S.Dim2D)], img)
+        v2i = b.vec(self.i32, 2)
+        size = b.emit(S.OpConvertSToF, self.v2, b.emit(S.OpImageQuerySizeLod, v2i, raw, b.const(self.i32, 0)))
+        uv = []
+        for c in range(2):
+            t = b.emit(S.OpFSub, self.f32, b.emit(S.OpFMul, self.f32, (cx, cy)[c], b.emit(S.OpCompositeExtract, self.f32, size, c)),
+                       self.const(0.5))
+            uv.append(b.emit(S.OpFSub, self.f32, t, self.ext(GLSL_FLOOR, t)))
+        u, v = uv
+        mu, mv = (b.emit(S.OpFSub, self.f32, self.const(1), x) for x in (u, v))
+        mul = lambda x, y: b.emit(S.OpFMul, self.f32, x, y)
+        self.write(d, 0xF, [mul(mu, mv), mul(u, mv), mul(u, v), mul(mu, v)], True)
 
     def _target(self, ins, i):
         f = ins.f
@@ -302,6 +409,27 @@ class Translator:
             return [b.emit(S.OpFSub, F, a[0][0], self.ext(GLSL_FLOOR, a[1][0]))]
         raise Unsupported(n)
 
+    def write_u16(self, d, m, vals):
+        """Conversão sem escala para u16, dois por palavra (canal par na metade baixa)."""
+        b, u32 = self.b, self.b.u32()
+        k = 0
+        for i in range(4):
+            if m >> i & 1:
+                if d.bank not in BANK_VAR:
+                    raise Unsupported("destino %s" % d.bank)
+                n = d.num + i // 2
+                v = b.emit(109, u32, vals[k])  # OpConvertFToU
+                v = b.emit(199, u32, v, b.const(u32, 0xFFFF))
+                w = b.emit(S.OpBitcast, u32, self.regs.read(BANK_VAR[d.bank], n))
+                keep = b.emit(199, u32, w, b.const(u32, 0xFFFF0000 if i % 2 == 0 else 0x0000FFFF))
+                if i % 2:
+                    v = b.emit(196, u32, v, b.const(u32, 16))
+                nw = b.emit(S.OpBitcast, self.f32, b.emit(197, u32, keep, v))
+                if self.cur_pred is not None:
+                    nw = b.emit(169, self.f32, self.cur_pred, nw, self.regs.read(BANK_VAR[d.bank], n))
+                self.regs.write(BANK_VAR[d.bank], n, nw)
+                k += 1
+
     def _vdp_once(self, mn, d, m, srcs, rd):
         n = 3 if mn == "vdp3" else 4
         full = (1 << n) - 1
@@ -324,28 +452,15 @@ class Translator:
                 for r in range(int(parts[3][3:]) + 1):
                     picks = [O.shifted(op, self.rep.offset(getattr(op, "src_index", 1), r, op.bank, 2)) for op in srcs]
                     dst = O.shifted(d, self.rep.offset(3, r, d.bank, 1))
-                    self.write(dst, m, [self.read(op, 1, sf == "f16")[0] for op in picks], df == "f16")
+                    vals = [self.read(op, 1, sf == "f16")[0] for op in picks]
+                    if df == "u16":
+                        self.write_u16(dst, m, vals)
+                    else:
+                        self.write(dst, m, vals, df == "f16")
                 return
             vals = [self.read(op, 1, sf == "f16")[0] for op in srcs]
             if df == "u16":
-                b, u32 = self.b, self.b.u32()
-                k = 0
-                for i in range(4):
-                    if m >> i & 1:
-                        if d.bank not in BANK_VAR:
-                            raise Unsupported("destino %s" % d.bank)
-                        n = d.num + i // 2
-                        v = b.emit(109, u32, vals[k])  # OpConvertFToU
-                        v = b.emit(199, u32, v, b.const(u32, 0xFFFF))
-                        w = b.emit(S.OpBitcast, u32, self.regs.read(BANK_VAR[d.bank], n))
-                        keep = b.emit(199, u32, w, b.const(u32, 0xFFFF0000 if i % 2 == 0 else 0x0000FFFF))
-                        if i % 2:
-                            v = b.emit(196, u32, v, b.const(u32, 16))
-                        nw = b.emit(S.OpBitcast, self.f32, b.emit(197, u32, keep, v))
-                        if self.cur_pred is not None:
-                            nw = b.emit(169, self.f32, self.cur_pred, nw, self.regs.read(BANK_VAR[d.bank], n))
-                        self.regs.write(BANK_VAR[d.bank], n, nw)
-                        k += 1
+                self.write_u16(d, m, vals)
                 return
             self.write(d, m, vals, df == "f16")
             return
@@ -448,6 +563,24 @@ class Translator:
                 old = b.load(self.f32, b.chain(S.SCPrivate, self.f32, self.preds, b.const(self.i32, d.num)))
                 val = b.emit(169, self.f32, self.cur_pred, val, old)
             b.store(b.chain(S.SCPrivate, self.f32, self.preds, b.const(self.i32, d.num)), val)
+            return
+        if mn.startswith("vtstmsk_"):
+            _, alu, cmp = mn.split("_")
+            op = {"ne": 182, "eq": 180, "lt": 184, "le": 188, "gt": 186, "ge": 190}[cmp]
+            res = []
+            for a, x in zip(rd(srcs[0], m), rd(srcs[1], m)):
+                if alu == "sub":
+                    lhs, rhs = a, x
+                else:
+                    rhs = self.const(0)
+                    if alu == "add":
+                        lhs = b.emit(S.OpFAdd, self.f32, a, x)
+                    elif alu == "mul":
+                        lhs = b.emit(S.OpFMul, self.f32, a, x)
+                    else:
+                        lhs = self.ext(GLSL_FMIN if alu == "min" else GLSL_FMAX, a, x)
+                res.append(b.emit(169, self.f32, b.emit(op, self.boolt, lhs, rhs), self.const(1), self.const(0)))
+            self.write(d, m, res, half)
             return
         if mn.startswith("vmovrep"):
             for r in range(int(mn[7:]) + 1):
@@ -552,7 +685,6 @@ class Translator:
                 locs[loc] = v
             return locs[loc]
 
-        samplers = {}
         for inp in p.frag_inputs or []:
             if inp["kind"] == "iter":
                 if inp["loc"] < -1:
@@ -564,13 +696,9 @@ class Translator:
             if inp["coord"] > 9:
                 raise Unsupported("textura com coordenada de sprite")
             simg = b.sampled_image()
-            if inp["sampler"] not in samplers:
-                sv = b.variable(simg, S.SCUniformConstant, "tex%d" % inp["sampler"])
-                b.decorate(sv, S.DecDescriptorSet, 1)
-                b.decorate(sv, S.DecBinding, inp["sampler"])
-                samplers[inp["sampler"]] = sv
+            sv = self.sampler_var(inp["sampler"])
             coord = b.load(self.v4, input_var(4 + inp["coord"], "texcoord%d" % inp["coord"]))
-            img = b.load(simg, samplers[inp["sampler"]])
+            img = b.load(simg, sv)
             if inp["proj"] is None:
                 c2 = b.emit(S.OpVectorShuffle, self.v2, coord, coord, 0, 1)
                 texel = b.emit(S.OpImageSampleImplicitLod, self.v4, img, c2)
@@ -593,6 +721,9 @@ class Translator:
             vals = [self.read_half(bank, base, c) for c in range(n)]
         elif p.output_type == 0:
             vals = [self.regs.read(bank, base + c) for c in range(n)]
+        elif p.output_type == 7:  # U8: os 4 componentes numa palavra
+            v4 = self.b.emit(S.OpExtInst, self.v4, self.glsl, GLSL_UNPACKUNORM4X8, self.word_u(bank, base))
+            vals = [self.b.emit(S.OpCompositeExtract, self.f32, v4, c) for c in range(n)]
         else:
             raise Unsupported("saída de fragmento tipo %d" % p.output_type)
         while len(vals) < 4:
@@ -698,6 +829,7 @@ class Translator:
                 vals = [self.regs.read("out", reg + c) for c in range(n)] + [self.const(0)] * (4 - n)
                 b.store(v, b.emit(S.OpCompositeConstruct, self.v4, *vals))
         b.body += b.inst(S.OpReturn) + b.inst(S.OpFunctionEnd)
+        ifaces += self.extra_ifaces
         return b.finish(S.ExecFragment if p.fragment else S.ExecVertex, main, ifaces, frag=p.fragment)
 
 

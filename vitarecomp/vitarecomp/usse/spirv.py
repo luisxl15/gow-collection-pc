@@ -23,16 +23,17 @@ OpFAdd, OpFSub, OpFMul, OpFDiv, OpIAdd, OpIMul = 129, 131, 133, 136, 128, 132
 OpLabel, OpReturn = 248, 253
 OpTypeImage, OpTypeSampledImage, OpVectorShuffle = 25, 27, 79
 OpImageSampleImplicitLod, OpImageSampleProjImplicitLod = 87, 91
+OpImageGather, OpImage, OpImageQuerySizeLod, OpConvertSToF = 96, 100, 103, 111
 
 # enums
-CapShader = 1
+CapShader, CapImageQuery = 1, 50
 AddrLogical, MemGLSL450 = 0, 1
 ExecVertex, ExecFragment = 0, 4
 SCUniformConstant, SCInput, SCUniform, SCOutput, SCPrivate, SCFunction, SCStorageBuffer = 0, 1, 2, 3, 6, 7, 12
 DecBlock, DecBuiltIn, DecLocation, DecBinding, DecDescriptorSet, DecOffset, DecArrayStride, DecNonWritable = 2, 11, 30, 33, 34, 35, 6, 24
-BuiltInPosition, BuiltInFragCoord = 0, 15
+BuiltInPosition, BuiltInFragCoord, BuiltInFragDepth = 0, 15, 22
 Dim2D, DimCube = 1, 3
-ExecOriginUpperLeft = 7
+ExecOriginUpperLeft, ExecDepthReplacing = 7, 12
 
 
 def _str_words(s):
@@ -48,6 +49,8 @@ class Builder:
         self.types = []  # tipos, constantes e variáveis globais (ordem importa)
         self.body = []
         self._tcache = {}
+        self.need_caps = set()  # capacidades além de Shader (ex.: ImageQuery)
+        self.need_modes = []    # modos de execução além de OriginUpperLeft (ex.: DepthReplacing)
 
     def id(self):
         i = self.bound
@@ -131,10 +134,14 @@ class Builder:
     # --------------------------------------------------------------- módulo
     def finish(self, model, main, interfaces, frag=False):
         self.caps = self.inst(OpCapability, CapShader)
+        for c in sorted(self.need_caps):
+            self.caps += self.inst(OpCapability, c)
         mm = self.inst(OpMemoryModel, AddrLogical, MemGLSL450)
         self.entry = self.inst(OpEntryPoint, model, main, *_str_words("main"), *interfaces)
         if frag:
             self.modes = self.inst(OpExecutionMode, main, ExecOriginUpperLeft)
+            for m in self.need_modes:
+                self.modes += self.inst(OpExecutionMode, main, m)
         words = self.caps + self.ext + mm + self.entry + self.modes + self.names + self.decos + self.types + self.body
         return struct.pack("<%dI" % (5 + len(words)), MAGIC, 0x00010300, 0, self.bound, 0, *words)
 
