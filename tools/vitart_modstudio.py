@@ -70,12 +70,10 @@ class Studio(tk.Tk):
         self.art = T.game_art(self.cfg.get('app'))
         self.head = tk.Label(self, bg=T.BG, bd=0)
         self.head.pack(fill='x')
-        self.foot = tk.Label(self, bg=T.BG, bd=0)
-        self.foot.pack(fill='x', side='bottom')
         self._art_w = None
         self.bind('<Configure>', lambda e: self.after_idle(self._paint_chrome) if e.widget is self else None)
         nb = ttk.Notebook(self)
-        nb.pack(fill='both', expand=True, padx=12, pady=(10, 8))
+        nb.pack(fill='both', expand=True, padx=24, pady=(14, 18))
         self.tab_mods = ttk.Frame(nb)
         self.tab_conv = ttk.Frame(nb)
         self.tab_tex = ttk.Frame(nb)
@@ -100,10 +98,8 @@ class Studio(tk.Tk):
         if w < 200 or w == self._art_w:
             return
         self._art_w = w
-        self._head_ph = ImageTk.PhotoImage(T.banner(w, 150, 'MOD STUDIO', 'VITART  ·  GOD OF WAR COLLECTION', self.art))
-        self._foot_ph = ImageTk.PhotoImage(T.meander(w, 16))
+        self._head_ph = ImageTk.PhotoImage(T.banner(w, 140, 'Mod Studio', 'GOD OF WAR COLLECTION', self.art))
         self.head.config(image=self._head_ph)
-        self.foot.config(image=self._foot_ph)
 
     # -------------------------------------------------------------- trabalho em segundo plano
     def work(self, log, fn, done=None):

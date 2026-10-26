@@ -13,6 +13,9 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 FONTS = os.path.join(os.environ.get('WINDIR', r'C:\Windows'), 'Fonts')
 
+# Direção (revisada com a skill UI/UX Pro Max): quase-preto com ouro só como acento, texto marfim sólido,
+# vermelho apenas para o estado ativo/progresso, filetes de 1 px no lugar de molduras, um único friso grego
+# discreto. Nada de degradê dourado em tudo, auréolas ou cantos ornamentados.
 # Cores (hex para o Tk, tuplas para o PIL)
 BG = '#0c0908'          # obsidiana
 STONE = '#17110e'       # painel de pedra
@@ -24,8 +27,8 @@ GOLD_DIM = '#8c6a2e'
 RED = '#a3170f'
 RED_HI = '#d22a1c'
 RED_DARK = '#4a0b07'
-TEXT = '#eadcc0'        # pergaminho
-DIM = '#8f8270'
+TEXT = '#e8dfcf'        # marfim
+DIM = '#9a8e7e'
 
 TYPE_RGB = {'P': (176, 196, 222), 'G': (226, 186, 78), 'S': (196, 200, 206), 'B': (192, 122, 70)}
 
@@ -165,6 +168,58 @@ def wrap(text, f, width):
     return lines
 
 
+# ------------------------------------------------------------------ texto sólido
+def plain_text(text, size, color=TEXT, kind='title', spacing=0.0, shadow=True):
+    """Texto de cor sólida com sombra curta (sem degradê): a base da tipografia."""
+    f = font(size, kind)
+    gap = size * spacing
+    w = int(sum(f.getlength(c) for c in text) + gap * max(0, len(text) - 1)) + 8
+    asc, desc = f.getmetrics()
+    h = asc + desc + 6
+    mask = Image.new('L', (w, h), 0)
+    d = ImageDraw.Draw(mask)
+    x = 3
+    for c in text:
+        d.text((x, 2), c, font=f, fill=255)
+        x += f.getlength(c) + gap
+    out = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+    if shadow:
+        out.paste((0, 0, 0, 200), (0, 0), ImageChops.offset(mask.filter(ImageFilter.GaussianBlur(1.2)), 0, 2))
+    out.paste((rgb(color) if isinstance(color, str) else color) + (255,), (0, 0), mask)
+    return out
+
+
+def magnifier(size=16, color=GOLD_DIM):
+    """Lupa desenhada (nada de emoji como ícone)."""
+    s = 4
+    S = size * s
+    img = Image.new('RGBA', (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    c = rgb(color) + (255,)
+    r = S * 0.3
+    d.ellipse([S * 0.12, S * 0.12, S * 0.12 + 2 * r, S * 0.12 + 2 * r], outline=c, width=int(S * 0.1))
+    d.line([(S * 0.62, S * 0.62), (S * 0.9, S * 0.9)], fill=c, width=int(S * 0.12))
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def line_bar(w, frac, h=3, color=RED, track='#2a211b'):
+    img = Image.new('RGBA', (w, h), rgb(track) + (255,))
+    k = int(w * max(0.0, min(1.0, frac)))
+    if k:
+        ImageDraw.Draw(img).rectangle([0, 0, k - 1, h - 1], fill=rgb(color) + (255,))
+    return img
+
+
+def dot(size, ttype):
+    """Marca do tipo de troféu: um ponto na cor do metal, com aro escuro."""
+    s = 4
+    S = size * s
+    img = Image.new('RGBA', (S, S), (0, 0, 0, 0))
+    ImageDraw.Draw(img).ellipse([s, s, S - s, S - s], fill=TYPE_RGB[ttype] + (255,), outline=(12, 9, 8, 255),
+                                width=s)
+    return img.resize((size, size), Image.LANCZOS)
+
+
 # ------------------------------------------------------------------ ornamentos
 def meander(w, h=22, color=GOLD, bg=None):
     """Friso grego: filetes em cima e embaixo e as espirais do meandro entre eles."""
@@ -302,25 +357,24 @@ def cover(img, w, h, focus_x=0.5):
 
 
 def banner(w, h, title, subtitle, art=None):
-    """Cabeçalho: arte do jogo à direita, escurecida para a esquerda, ômega, título em ouro e o friso embaixo."""
-    base = stone(w, h, (18, 13, 11), seed=3).convert('RGBA')
+    """Cabeçalho: arte do jogo à direita, apagada para a esquerda; sobretítulo pequeno, título marfim e um
+    friso grego fino e discreto no pé (o único ornamento)."""
+    base = Image.new('RGBA', (w, h), rgb(BG) + (255,))
     if art is not None:
-        a = cover(art, w, h, focus_x=0.8).convert('RGBA')
-        fade = Image.linear_gradient('L').rotate(90).resize((w, h))  # 0 à esquerda, 255 à direita
-        fade = fade.point(lambda v: min(255, max(0, int((v - 70) * 1.9))))
+        a = cover(art, w, h, focus_x=0.85).convert('RGBA')
+        a = Image.blend(a, Image.new('RGBA', a.size, (0, 0, 0, 255)), 0.25)
+        fade = Image.linear_gradient('L').rotate(90).resize((w, h))
+        fade = fade.point(lambda v: min(255, max(0, int((v - 95) * 1.6))))
         base = Image.composite(a, base, fade)
-    shade = vgradient(w, h, [(0, (0, 0, 0)), (0.7, (0, 0, 0)), (1, (12, 9, 8))]).convert('L')
-    base = Image.composite(base, Image.new('RGBA', (w, h), (12, 9, 8, 255)), shade.point(lambda v: 255 - v // 3))
-    om = omega(int(h * 0.5))
-    oy = (h - om.height) // 2 - 6
-    base.alpha_composite(om, (24, max(0, oy)))
-    t = metal_text(title, int(h * 0.27))
-    tx = 24 + om.width + 8
-    base.alpha_composite(t, (tx, max(0, h // 2 - t.height + 10)))
-    st = metal_text(subtitle, max(12, int(h * 0.1)), kind='serif', spacing=0.3,
-                    stops=[(0, (236, 220, 190)), (1, (150, 130, 100))], shadow=True)
-    base.alpha_composite(st, (tx + 4, h // 2 + 8))
-    strip = meander(w, 20)
+    x = 40
+    over = plain_text('VITART', 12, GOLD_DIM, kind='bold', spacing=0.35, shadow=False)
+    base.alpha_composite(over, (x, int(h * 0.24)))
+    t = plain_text(title, int(h * 0.3), TEXT, kind='title', spacing=0.02)
+    base.alpha_composite(t, (x - 3, int(h * 0.24) + over.height + 2))
+    st = plain_text(subtitle, 13, DIM, kind='text', spacing=0.12, shadow=False)
+    base.alpha_composite(st, (x, int(h * 0.24) + over.height + t.height + 2))
+    strip = meander(w, 12)
+    strip.putalpha(strip.getchannel('A').point(lambda v: v * 45 // 100))
     base.alpha_composite(strip, (0, h - strip.height))
     return base
 
@@ -382,12 +436,13 @@ def style_ttk(root):
     st.configure('TLabel', background=BG, foreground=TEXT)
     st.configure('Title.TLabel', foreground=GOLD, font=TK_TITLE)
     st.configure('Dim.TLabel', foreground=DIM)
-    st.configure('TLabelframe', background=BG, bordercolor=GOLD_DIM)
-    st.configure('TLabelframe.Label', background=BG, foreground=GOLD, font=TK_TITLE)
-    st.configure('TButton', background='#2b2017', foreground=GOLD_HI, bordercolor=GOLD_DIM, lightcolor='#4a3826',
-                 darkcolor='#140e0a', padding=(12, 6), font=('Constantia', 10, 'bold'))
-    st.map('TButton', background=[('pressed', RED_DARK), ('active', '#4a3220'), ('disabled', '#1a1410')],
-           foreground=[('disabled', '#6b5e4c')], bordercolor=[('active', GOLD), ('focus', GOLD)])
+    st.configure('TLabelframe', background=BG, bordercolor=LINE)
+    st.configure('TLabelframe.Label', background=BG, foreground=GOLD_DIM, font=('Segoe UI Semibold', 9))
+    st.configure('TButton', background='#1d1713', foreground=TEXT, bordercolor=LINE, lightcolor='#1d1713',
+                 darkcolor='#1d1713', padding=(14, 7), font=('Segoe UI Semibold', 10))
+    st.map('TButton', background=[('pressed', RED_DARK), ('active', '#281f19'), ('disabled', '#15110e')],
+           foreground=[('disabled', '#6b5e4c'), ('active', GOLD_HI)],
+           bordercolor=[('active', GOLD_DIM), ('focus', GOLD_DIM)])
     st.configure('Accent.TButton', background='#6e140e', foreground=GOLD_HI, bordercolor=GOLD)
     st.map('Accent.TButton', background=[('pressed', '#3e0a07'), ('active', '#8e1c13')])
     st.configure('TCheckbutton', background=BG, foreground=TEXT, indicatorbackground='#120d0b',
@@ -401,15 +456,15 @@ def style_ttk(root):
     st.map('TCombobox', fieldbackground=[('readonly', '#120d0b')], foreground=[('readonly', TEXT)])
     st.configure('TSpinbox', fieldbackground='#120d0b', foreground=TEXT, arrowcolor=GOLD)
     st.configure('TNotebook', background=BG, bordercolor=GOLD_DIM, tabmargins=(10, 6, 10, 0))
-    st.configure('TNotebook.Tab', background='#1b1410', foreground=DIM, bordercolor=LINE, padding=(16, 7),
-                 font=('Constantia', 11, 'bold'))
-    st.map('TNotebook.Tab', background=[('selected', '#5e120c'), ('active', '#2e2118')],
-           foreground=[('selected', GOLD_HI), ('active', GOLD)], bordercolor=[('selected', GOLD)])
-    st.configure('Treeview', background='#120d0b', fieldbackground='#120d0b', foreground=TEXT, rowheight=26,
-                 bordercolor=GOLD_DIM)
+    st.configure('TNotebook.Tab', background=BG, foreground=DIM, bordercolor=LINE, lightcolor=BG, padding=(18, 8),
+                 font=('Segoe UI Semibold', 10))
+    st.map('TNotebook.Tab', background=[('selected', '#1d1713'), ('active', '#15110e')],
+           foreground=[('selected', TEXT), ('active', GOLD)], lightcolor=[('selected', RED_HI)])
+    st.configure('Treeview', background='#120d0b', fieldbackground='#120d0b', foreground=TEXT, rowheight=28,
+                 bordercolor=LINE)
     st.map('Treeview', background=[('selected', '#5e120c')], foreground=[('selected', GOLD_HI)])
-    st.configure('Treeview.Heading', background='#2b2017', foreground=GOLD, bordercolor=GOLD_DIM,
-                 font=('Constantia', 10, 'bold'), relief='flat')
+    st.configure('Treeview.Heading', background='#15110e', foreground=GOLD_DIM, bordercolor=LINE,
+                 font=('Segoe UI Semibold', 9), relief='flat')
     st.map('Treeview.Heading', background=[('active', '#3e2d1e')])
     st.configure('Vertical.TScrollbar', background='#2b2017', troughcolor='#0f0b09', bordercolor=LINE,
                  arrowcolor=GOLD, lightcolor='#3e2d1e', darkcolor='#140e0a')

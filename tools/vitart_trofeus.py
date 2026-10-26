@@ -21,16 +21,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vitart_modkit as K  # noqa: E402  (caminhos do jogo e do vitart-data)
 import vitart_tema as T  # noqa: E402
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps, ImageTk  # noqa: E402
+from PIL import Image, ImageDraw, ImageEnhance, ImageOps, ImageTk  # noqa: E402
 
 GAMES = [('NPWR05244_00', 'God of War'), ('NPWR05283_00', 'God of War II')]
 POINTS = {'B': 15, 'S': 30, 'G': 90, 'P': 180}
 TYPE_NAME = {'P': 'Platina', 'G': 'Ouro', 'S': 'Prata', 'B': 'Bronze'}
 GUIDE = T.resource('trofeus_guia.json')
 
-ROW_H = 84
+ROW_H = 76
 DETAIL_W = 450
-CARD_W, CARD_H = 400, 104
+CARD_W, CARD_H = 330, 92
+SURF, SURF_HI, SURF_SEL = (18, 14, 12), (26, 20, 17), (32, 20, 16)
 
 
 def read_trp(path):
@@ -96,15 +97,13 @@ def ellipsize(text, f, width):
 
 def framed_icon(img, size, got):
     """Ícone do troféu numa moldura de ouro (opaca se falta)."""
-    pic = (img or Image.new('RGBA', (size, size), (50, 40, 34, 255))).resize((size - 8, size - 8), Image.LANCZOS)
+    pic = (img or Image.new('RGBA', (size, size), (50, 40, 34, 255))).resize((size - 2, size - 2), Image.LANCZOS)
     if not got:
         pic = gray(pic)
     out = Image.new('RGBA', (size, size), (12, 8, 6, 255))
-    out.alpha_composite(pic, (4, 4))
+    out.alpha_composite(pic, (1, 1))
     d = ImageDraw.Draw(out)
-    gold = T.rgb(T.GOLD if got else T.GOLD_DIM)
-    d.rectangle([0, 0, size - 1, size - 1], outline=(8, 5, 3, 255), width=1)
-    d.rectangle([1, 1, size - 2, size - 2], outline=gold + (255,), width=2)
+    d.rectangle([0, 0, size - 1, size - 1], outline=T.rgb(T.GOLD_DIM if got else T.LINE) + (255,), width=1)
     return out
 
 
@@ -175,11 +174,12 @@ class App(tk.Tk):
             b.bind('<Enter>', lambda _e, v=val: self._paint_filters(hover=v))
             b.bind('<Leave>', lambda _e: self._paint_filters())
             self.fbtns[val] = (b, label)
-        sb = tk.Frame(right, bg=T.GOLD_DIM, padx=1, pady=1)
+        sb = tk.Frame(right, bg=T.LINE, padx=1, pady=1)
         sb.pack(side='top', anchor='e', fill='x', padx=4)
         inner = tk.Frame(sb, bg='#120d0b')
         inner.pack(fill='x')
-        tk.Label(inner, text='⌕', bg='#120d0b', fg=T.GOLD, font=('Segoe UI Symbol', 12)).pack(side='left', padx=(8, 2))
+        self._mag = ImageTk.PhotoImage(T.magnifier(16))
+        tk.Label(inner, image=self._mag, bg='#120d0b').pack(side='left', padx=(10, 2))
         ent = tk.Entry(inner, textvariable=self.search, bg='#120d0b', fg=T.TEXT, insertbackground=T.GOLD_HI,
                        relief='flat', font=('Segoe UI', 11), width=30, highlightthickness=0)
         ent.pack(side='left', fill='x', expand=True, ipady=6, padx=(2, 8))
@@ -192,7 +192,7 @@ class App(tk.Tk):
         body.pack(fill='both', expand=True, padx=18, pady=(0, 6))
         self.detail = tk.Label(body, bg=T.BG, bd=0)
         self.detail.pack(side='right', fill='y', padx=(14, 0))
-        holder = tk.Frame(body, bg=T.GOLD_DIM, padx=1, pady=1)
+        holder = tk.Frame(body, bg=T.LINE, padx=1, pady=1)
         holder.pack(side='left', fill='both', expand=True)
         self.list = tk.Canvas(holder, bg='#0f0b09', highlightthickness=0, bd=0)
         self.list.pack(side='left', fill='both', expand=True)
@@ -207,8 +207,6 @@ class App(tk.Tk):
         self.bind('<Up>', lambda _e: self._step(-1))
         self.bind('<Down>', lambda _e: self._step(1))
 
-        self.foot = tk.Label(self, bg=T.BG, bd=0)
-        self.foot.pack(fill='x', side='bottom')
         self.bind('<Configure>', lambda e: self._schedule_resize() if e.widget is self else None)
 
     def _schedule_resize(self):
@@ -221,8 +219,7 @@ class App(tk.Tk):
         w = max(800, self.winfo_width())
         if getattr(self, '_head_w', None) != w:
             self._head_w = w
-            self.head.config(image=self._photo('head', T.banner(w, 190, 'TROFÉUS', 'GOD OF WAR COLLECTION', self.art)))
-            self.foot.config(image=self._photo('foot', T.meander(w, 18)))
+            self.head.config(image=self._photo('head', T.banner(w, 170, 'Troféus', 'GOD OF WAR COLLECTION', self.art)))
         self._paint_rows()
         self.show()
 
@@ -283,82 +280,81 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------------ desenho
     def _card(self, comm):
+        """Cartão do jogo: superfície lisa, número grande em marfim, linha de progresso; o ativo ganha a barra
+        vermelha à esquerda."""
         tr, got = self.sets[comm], self.got[comm]
         pct = progress(tr, got)
         on = comm == self.game
-        img = T.panel(CARD_W, CARD_H, tint=(40, 14, 11) if on else (23, 17, 14), seed=5 if on else 7, framed=False)
-        img = T.frame(img, color=T.GOLD if on else T.GOLD_DIM, corners=on)
-        rg = T.ring(78, pct / 100)
-        img.alpha_composite(rg, (14, (CARD_H - 78) // 2))
-        p = T.metal_text('%d%%' % int(pct), 20 if pct < 99.5 else 16, spacing=0, shadow=False)
-        img.alpha_composite(p, (14 + (78 - p.width) // 2, (CARD_H - p.height) // 2))
-        name = dict(GAMES)[comm].upper()
-        t = T.metal_text(name, 22, spacing=0.1)
-        img.alpha_composite(t, (106, 12))
-        n = sum(1 for x in tr if x['id'] in got)
+        img = Image.new('RGBA', (CARD_W, CARD_H), (SURF_SEL if on else SURF) + (255,))
         d = ImageDraw.Draw(img)
-        d.text((110, 46), '%d de %d troféus' % (n, len(tr)), font=T.font(14, 'serif'), fill=T.rgb(T.TEXT))
-        x = 110
-        for ty in 'PGSB':
-            tot = [x_ for x_ in tr if x_['type'] == ty]
-            if not tot:
-                continue
-            img.alpha_composite(T.medal(18, ty), (x, 72))
-            s = '%d/%d' % (sum(1 for x_ in tot if x_['id'] in got), len(tot))
-            d.text((x + 22, 72), s, font=T.font(13, 'text'), fill=T.rgb(T.DIM))
-            x += 30 + int(T.font(13, 'text').getlength(s)) + 8
+        d.rectangle([0, 0, CARD_W - 1, CARD_H - 1], outline=T.rgb(T.LINE) + (255,))
+        if on:
+            d.rectangle([0, 0, 2, CARD_H - 1], fill=T.rgb(T.RED_HI) + (255,))
+        x = 22
+        name = T.plain_text(dict(GAMES)[comm].upper(), 12, T.GOLD if on else T.DIM, kind='bold', spacing=0.18,
+                            shadow=False)
+        img.alpha_composite(name, (x - 3, 12))
+        num = T.plain_text('%d%%' % int(pct), 32, T.TEXT, kind='title', shadow=False)
+        img.alpha_composite(num, (x - 3, 30))
+        n = sum(1 for t in tr if t['id'] in got)
+        d.text((x + num.width + 6, 50), '%d de %d troféus' % (n, len(tr)), font=T.font(13, 'text'),
+               fill=T.rgb(T.DIM) + (255,))
+        img.alpha_composite(T.line_bar(CARD_W - 2 * x, pct / 100), (x, CARD_H - 14))
         return img
 
     def _paint_filters(self, hover=None):
+        """Filtros como abas de texto: o ativo em marfim com sublinhado vermelho."""
         for val, (b, label) in self.fbtns.items():
-            st = 'active' if val == self.filter else 'hover' if val == hover else 'normal'
-            b.config(image=self._photo(('f', val), T.button(label, 128, 34, st)))
+            on, hv = val == self.filter, val == hover
+            w = 108
+            img = Image.new('RGBA', (w, 34), T.rgb(T.BG) + (255,))
+            t = T.plain_text(label.upper(), 12, T.TEXT if on else T.GOLD if hv else T.DIM, kind='bold',
+                             spacing=0.16, shadow=False)
+            img.alpha_composite(t, ((w - t.width) // 2, 6))
+            if on:
+                ImageDraw.Draw(img).rectangle([18, 30, w - 19, 31], fill=T.rgb(T.RED_HI) + (255,))
+            b.config(image=self._photo(('f', val), img))
 
     def _paint_summary(self):
         tr, got = self.sets[self.game], self.got[self.game]
         w = max(600, self.winfo_width() - 36)
-        img = Image.new('RGBA', (w, 30), T.rgb(T.BG) + (255,))
-        title = T.metal_text('%s  ·  %d troféus na lista' % (dict(GAMES)[self.game], len(self.rows)), 17,
-                             kind='serif', spacing=0.04,
-                             stops=[(0, (236, 220, 190)), (1, (160, 140, 110))], shadow=False)
-        img.alpha_composite(title, (0, (30 - title.height) // 2))
+        img = Image.new('RGBA', (w, 28), T.rgb(T.BG) + (255,))
+        d = ImageDraw.Draw(img)
+        x = 0
+        f = T.font(13, 'text')
+        for ty in 'PGSB':
+            tot = [t for t in tr if t['type'] == ty]
+            if not tot:
+                continue
+            img.alpha_composite(T.dot(10, ty), (x, 9))
+            txt = '%s  %d/%d' % (TYPE_NAME[ty], sum(1 for t in tot if t['id'] in got), len(tot))
+            d.text((x + 16, 5), txt, font=f, fill=T.rgb(T.DIM) + (255,))
+            x += 16 + int(f.getlength(txt)) + 26
+        tail = '%d na lista' % len(self.rows)
+        d.text((w - int(f.getlength(tail)) - 4, 5), tail, font=f, fill=T.rgb(T.DIM) + (255,))
         self.summary.config(image=self._photo('summary', img))
 
     def _row(self, t, idx, w):
         has = t['id'] in self.got[self.game]
         sel, hov = t['id'] == self.sel, idx == self.hover
-        base = T.stone(w, ROW_H, (22, 16, 13), seed=100 + idx % 7).convert('RGBA')
-        tint = (60, 12, 8, 150) if sel else (60, 44, 30, 60) if hov else (0, 0, 0, 90 if idx % 2 else 50)
-        base.alpha_composite(Image.new('RGBA', (w, ROW_H), tint))
-        if sel:  # brilho vermelho vindo da esquerda
-            glow = Image.linear_gradient('L').rotate(90).resize((w, ROW_H)).point(lambda v: 255 - v)
-            red = Image.new('RGBA', (w, ROW_H), (170, 26, 16, 0))
-            red.putalpha(glow.point(lambda v: v * 110 // 255))
-            base.alpha_composite(red)
+        base = Image.new('RGBA', (w, ROW_H), (SURF_SEL if sel else SURF_HI if hov else SURF) + (255,))
         d = ImageDraw.Draw(base)
-        d.line([(0, ROW_H - 1), (w, ROW_H - 1)], fill=T.rgb(T.LINE) + (255,))
+        d.line([(16, ROW_H - 1), (w - 16, ROW_H - 1)], fill=T.rgb(T.LINE) + (255,))
         if sel:
-            d.rectangle([0, 0, w - 1, ROW_H - 1], outline=T.rgb(T.GOLD) + (255,), width=1)
-            d.rectangle([0, 0, 3, ROW_H - 1], fill=T.rgb(T.RED_HI) + (255,))
-        ic = framed_icon(t['icon'], 64, has)
-        base.alpha_composite(ic, (14, (ROW_H - 64) // 2))
-        right = 150
-        fname = T.font(19, 'title')
-        name = ellipsize(t['name'], fname, w - 96 - right)
-        if has:
-            nm = T.metal_text(name, 19, spacing=0.02, shadow=True)
-            base.alpha_composite(nm, (92, 8))
-        else:
-            d.text((96, 14), name, font=fname, fill=(170, 156, 136, 255))
-        fdesc = T.font(13, 'text')
-        d.text((96, 46), ellipsize(t['desc'], fdesc, w - 96 - right), font=fdesc,
+            d.rectangle([0, 0, 2, ROW_H - 1], fill=T.rgb(T.RED_HI) + (255,))
+        base.alpha_composite(framed_icon(t['icon'], 52, has), (20, (ROW_H - 52) // 2))
+        right = 132
+        fname = T.font(17, 'title')
+        d.text((88, 14), ellipsize(t['name'], fname, w - 92 - right), font=fname,
                fill=T.rgb(T.TEXT if has else T.DIM) + (255,))
-        base.alpha_composite(T.medal(30, t['type']), (w - right + 8, (ROW_H - 30) // 2))
-        status = 'OBTIDO' if has else 'BLOQUEADO'
-        d.text((w - right + 46, ROW_H // 2 - 16), TYPE_NAME[t['type']].upper(), font=T.font(12, 'bold'),
-               fill=T.TYPE_RGB[t['type']] + (255,))
-        d.text((w - right + 46, ROW_H // 2 + 2), status, font=T.font(12, 'title'),
-               fill=(T.rgb(T.GOLD) if has else T.rgb(T.DIM)) + (255,))
+        fdesc = T.font(13, 'text')
+        d.text((88, 42), ellipsize(t['desc'], fdesc, w - 92 - right), font=fdesc,
+               fill=(T.rgb(T.DIM) if has else (120, 110, 98)) + (255,))
+        base.alpha_composite(T.dot(10, t['type']), (w - right, ROW_H // 2 - 13))
+        d.text((w - right + 16, ROW_H // 2 - 18), TYPE_NAME[t['type']].upper(), font=T.font(12, 'bold'),
+               fill=T.rgb(T.TEXT if has else T.DIM) + (255,))
+        d.text((w - right + 16, ROW_H // 2 + 2), 'OBTIDO' if has else 'BLOQUEADO', font=T.font(11, 'text'),
+               fill=(T.rgb(T.GOLD) if has else (110, 100, 90)) + (255,))
         return base
 
     def _paint_rows(self):
@@ -417,70 +413,56 @@ class App(tk.Tk):
                 self.list.yview_moveto(max(0, i * ROW_H - ROW_H) / max(1, len(self.rows) * ROW_H))
 
     def show(self):
+        """Painel de detalhe: ícone, tipo e estado ao lado, nome em serifa marfim, e as seções com rótulo pequeno
+        em caixa alta; texto corrido a 15 px com entrelinha 1,5."""
         h = max(420, self.list.winfo_height() + 2)
-        img = T.panel(DETAIL_W, h, seed=21)
+        img = Image.new('RGBA', (DETAIL_W, h), SURF + (255,))
+        d = ImageDraw.Draw(img)
+        d.rectangle([0, 0, DETAIL_W - 1, h - 1], outline=T.rgb(T.LINE) + (255,))
         t = next((x for x in self.sets.get(self.game, []) if x['id'] == self.sel), None) if self.game else None
         if t is None:
+            self.detail_img = img
             self.detail.config(image=self._photo('detail', img))
             return
         has = t['id'] in self.got[self.game]
-        d = ImageDraw.Draw(img)
-        # ícone grande com auréola vermelha quando obtido
-        size = 168
-        cx = DETAIL_W // 2
-        if has:
-            halo = Image.new('RGBA', (size + 80, size + 80), (0, 0, 0, 0))
-            ImageDraw.Draw(halo).ellipse([10, 10, size + 70, size + 70], fill=(190, 40, 20, 120))
-            halo = halo.filter(ImageFilter.GaussianBlur(22))
-            img.alpha_composite(halo, (cx - halo.width // 2, 28 - 40))
-        ic = framed_icon(t['icon'], size, has)
-        img.alpha_composite(ic, (cx - size // 2, 28))
-        y = 28 + size + 14
-        # nome em ouro, em quantas linhas couber
-        fname = T.font(25, 'title')
-        for line in T.wrap(t['name'], fname, DETAIL_W - 60)[:3]:
-            nm = T.metal_text(line, 25, spacing=0.03) if has else None
-            if nm is None:
-                tw = int(fname.getlength(line))
-                d.text((cx - tw // 2, y + 4), line, font=fname, fill=(196, 184, 164, 255))
-                y += 34
-            else:
-                img.alpha_composite(nm, (cx - nm.width // 2, y))
-                y += nm.height - 6
-        y += 6
-        md = T.medal(26, t['type'])
-        label = '%s  ·  %s' % (TYPE_NAME[t['type']].upper(), 'OBTIDO' if has else 'AINDA NÃO')
-        fl = T.font(14, 'title')
-        lw = int(fl.getlength(label))
-        x0 = cx - (lw + 34) // 2
-        img.alpha_composite(md, (x0, y))
-        d.text((x0 + 34, y + 4), label, font=fl, fill=(T.TYPE_RGB[t['type']] if has else T.rgb(T.DIM)) + (255,))
-        y += 40
-        img.alpha_composite(T.meander(DETAIL_W - 60, 14), (30, y))
-        y += 28
+        pad, size = 32, 132
+        img.alpha_composite(framed_icon(t['icon'], size, has), (pad, pad))
+        tx = pad + size + 20
+        img.alpha_composite(T.dot(10, t['type']), (tx, pad + 6))
+        d.text((tx + 16, pad + 1), TYPE_NAME[t['type']].upper(), font=T.font(12, 'bold'), fill=T.rgb(T.TEXT) + (255,))
+        d.text((tx, pad + 26), 'Obtido' if has else 'Ainda não obtido', font=T.font(13, 'text'),
+               fill=T.rgb(T.GOLD if has else T.DIM) + (255,))
+        if t['hidden']:
+            d.text((tx, pad + 48), 'Troféu oculto', font=T.font(12, 'italic'), fill=T.rgb(T.DIM) + (255,))
+        y = pad + size + 24
+        fname = T.font(26, 'title')
+        for line in T.wrap(t['name'], fname, DETAIL_W - 2 * pad)[:3]:
+            d.text((pad, y), line, font=fname, fill=T.rgb(T.TEXT) + (255,))
+            y += 34
+        y += 14
+        d.line([(pad, y), (DETAIL_W - pad, y)], fill=T.rgb(T.LINE) + (255,))
+        y += 20
         ftext, fen = T.font(15, 'serif'), T.font(13, 'italic')
 
-        def section(title, body, f, color, y):
-            hd = T.metal_text(title, 15, spacing=0.18, shadow=False)
-            img.alpha_composite(hd, (30, y))
-            y += hd.height + 2
-            for line in T.wrap(body, f, DETAIL_W - 64):
-                if y > h - 30:
+        def para(body, f, color, y):
+            for line in T.wrap(body, f, DETAIL_W - 2 * pad):
+                if y > h - 28:
                     break
-                d.text((32, y), line, font=f, fill=color)
-                y += int(f.size * 1.35)
-            return y + 10
+                d.text((pad, y), line, font=f, fill=color)
+                y += int(f.size * 1.5)
+            return y
 
-        y = section('O QUE PEDE', t['desc'], ftext, T.rgb(T.TEXT) + (255,), y)
-        if t['desc'] != t['detail'] and y < h - 60:
-            for line in T.wrap(t['detail'], fen, DETAIL_W - 64):
-                if y > h - 30:
-                    break
-                d.text((32, y), line, font=fen, fill=T.rgb(T.DIM) + (255,))
-                y += int(fen.size * 1.35)
-            y += 10
+        def label(text, y):
+            d.text((pad, y), text, font=T.font(11, 'bold'), fill=T.rgb(T.GOLD_DIM) + (255,))
+            return y + 22
+
+        y = label('O QUE PEDE', y)
+        y = para(t['desc'], ftext, T.rgb(T.TEXT) + (255,), y)
+        if t['desc'] != t['detail']:
+            y = para(t['detail'], fen, T.rgb(T.DIM) + (255,), y + 4)
         if t['tip'] and y < h - 60:
-            section('COMO PEGAR', t['tip'], ftext, T.rgb(T.TEXT) + (255,), y)
+            y = label('COMO PEGAR', y + 18)
+            para(t['tip'], ftext, T.rgb(T.TEXT) + (255,), y)
         self.detail_img = img
         self.detail.config(image=self._photo('detail', img))
 
