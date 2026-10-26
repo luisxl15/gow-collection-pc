@@ -1,4 +1,4 @@
-// Imagens desenhadas por cima do jogo (ver gxm_overlay.h).
+// coisinhas que a gente pinta por cima do jogo
 #include "gxm_overlay.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -21,13 +21,13 @@ void logf(const char *fmt, ...); // core.cpp
 namespace gvk::ovl {
 namespace {
 
-std::recursive_mutex g_lock; // o troféu chega da thread do jogo, a apresentação é da thread de vídeo
+std::recursive_mutex g_lock; // duas threads mexendo aqui, então tranca
 TrophyBanner g_trophy;
 BannerImage g_trophy_img;
-uint32_t g_trophy_for = 0; // altura de tela para a qual a imagem foi montada
+uint32_t g_trophy_for = 0;
 bool g_trophy_on = false;
 std::chrono::steady_clock::time_point g_trophy_t0;
-std::vector<TrophyBanner> g_trophy_queue; // um aviso por vez (o cheat desbloqueia todos de uma vez)
+std::vector<TrophyBanner> g_trophy_queue; // fila, um troféu de cada vez
 
 void trophy_start_next() {
     if (g_trophy_queue.empty()) return;
@@ -69,7 +69,7 @@ bool trophy_frame(int32_t area_x, int32_t area_y, int32_t area_w, int32_t area_h
     if (!g_trophy_on) return false;
     const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_trophy_t0).count();
     constexpr double kSlide = 0.25;
-    const double kStay = g_trophy_queue.empty() ? 4.2 : 2.0; // com fila (o cheat desbloqueia todos) passa mais rápido
+    const double kStay = g_trophy_queue.empty() ? 4.2 : 2.0; // se tem fila, anda logo
     if (t > kSlide * 2 + kStay) {
         g_trophy_on = false;
         trophy_start_next();
@@ -103,10 +103,10 @@ bool fps_frame(uint32_t screen_h, std::vector<uint32_t> &px, uint32_t &w, uint32
     char text[16];
     std::snprintf(text, sizeof text, "%d FPS", (int)(fps + 0.5));
     const uint32_t len = (uint32_t)std::strlen(text);
-    uint32_t k = (screen_h + 135) / 270; // 1080p -> 4
+    uint32_t k = (screen_h + 135) / 270;
     k = k < 2 ? 2 : k > 6 ? 6 : k;
     w = (len * 6 + 3) * k, h = 11 * k;
-    const uint32_t bg = 0xFF101010u, fg = 0xFF40FF40u; // BGRA: fundo quase preto, texto verde
+    const uint32_t bg = 0xFF101010u, fg = 0xFF40FF40u; // verdinho estilo contador antigo
     px.assign((size_t)w * h, bg);
     for (uint32_t n = 0; n < len; n++) {
         const uint8_t *g = glyph5x7(text[n]);
@@ -119,8 +119,7 @@ bool fps_frame(uint32_t screen_h, std::vector<uint32_t> &px, uint32_t &w, uint32
     return true;
 }
 
-// Barras de vida dos inimigos (enemy_hp.cpp), no estilo do GoW3: moldura escura, fundo vermelho-escuro e o
-// preenchimento vermelho em degradê com um brilho em cima.
+// barrinha de vida dos bichos, igual a do GoW3
 bool enemy_bar(uint32_t im_w, uint32_t im_h, const EnemyBar &bar, std::vector<uint32_t> &px, uint32_t &bw, uint32_t &bh,
                int32_t &x0, int32_t &y0) {
     bh = std::max(6u, (uint32_t)(im_h * 0.016f + 0.5f)), bw = std::max(36u, (uint32_t)(im_h * 0.11f + 0.5f));
@@ -134,13 +133,13 @@ bool enemy_bar(uint32_t im_w, uint32_t im_h, const EnemyBar &bar, std::vector<ui
         for (uint32_t x = 0; x < bw; x++) {
             uint32_t r, g, b;
             if (x < edge || y < edge || x >= bw - edge || y >= bh - edge) {
-                r = 26, g = 16, b = 10; // moldura (bronze escuro)
+                r = 26, g = 16, b = 10;
             } else if (x < fill) {
                 const float t = (float)(y - edge) / (float)std::max(1u, bh - 2 * edge - 1); // 0 em cima, 1 embaixo
                 r = (uint32_t)(235 - 110 * t), g = (uint32_t)(40 - 25 * t), b = (uint32_t)(28 - 18 * t);
-                if (y == edge) r = 255, g = 120, b = 90; // brilho
+                if (y == edge) r = 255, g = 120, b = 90; // um brilhinho
             } else {
-                r = 58, g = 10, b = 8; // vazio
+                r = 58, g = 10, b = 8; // parte que já apanhou
             }
             px[y * bw + x] = 0xFF000000u | b << 16 | g << 8 | r; // RGBA na memória
         }

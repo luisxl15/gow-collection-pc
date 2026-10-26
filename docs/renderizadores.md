@@ -20,6 +20,24 @@ O vitart desenha o GXM do Vita por um de dois renderizadores com a mesma interfa
 Vale ao abrir o jogo. O `vulkan-1.dll` é carregado por demanda (`/DELAYLOAD`), então o executável abre em
 máquina sem Vulkan.
 
+## Janela e avisos (gxm_window.cpp, gxm_overlay.cpp)
+
+- **Display Mode do menu de pausa.** O pedido vem da thread do jogo. Fica guardado (-1 = nenhum) e só é
+  aplicado em `pump()`, na thread da janela.
+- **F11 e Alt+Enter.** Alternam a tela cheia sem bordas no monitor da janela, e voltam ao lugar anterior. O
+  Alt+Enter é engolido para não tocar o bipe.
+- **Troca de módulo (menu -> jogo).** A janela nova nasce invisível no lugar da anterior. Ela só aparece no
+  2º quadro apresentado, porque o 1º já está na tela nesse ponto. Aí o processo anterior é avisado e fecha,
+  sem janela piscando.
+- **Avisos no título.** São atualizados a cada apresentação e saem ao fim do prazo. O título tem uma linha
+  só, então as quebras de linha viram espaço.
+- **Troféus.** Chegam da thread do jogo e são desenhados na thread de vídeo, por isso há uma trava. Aparecem
+  um de cada vez: 4,2 s sozinhos, 2 s com fila (o cheat de platina desbloqueia todos de uma vez). A imagem é
+  remontada quando a altura da tela muda.
+- **FPS.** A escala é (altura + 135) / 270, ou seja, 4 em 1080p. Texto verde sobre fundo quase preto, em BGRA.
+- **Barras de vida.** Moldura de bronze escuro, fundo vermelho-escuro, preenchimento em degradê com brilho
+  na 1ª linha, gravadas em RGBA na memória.
+
 ## Cache de shaders do Direct3D 11
 
 ```

@@ -1,4 +1,4 @@
-// Janela do jogo, comum aos renderizadores (ver gxm_window.h).
+// a janelinha onde o Kratos mora
 #include "gxm_window.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -21,11 +21,10 @@ bool g_closed = false;
 std::atomic<bool> g_resized{false};
 bool g_fullscreen = false;
 WINDOWPLACEMENT g_place{sizeof(WINDOWPLACEMENT)};
-// Opção "Display Mode" do menu de pausa: o pedido vem de outra thread e é aplicado em pump(), na thread
-// da janela (-1 = nenhum pedido).
+// pedido de tela cheia que chegou de outra thread, fica guardado até a hora certa
 std::atomic<int> g_want_borderless{-1};
 
-// F11 ou Alt+Enter: tela cheia sem bordas no monitor da janela (e volta ao lugar anterior).
+// F11 / Alt+Enter, vai e volta
 void toggle_fullscreen(HWND h) {
     const LONG style = GetWindowLongW(h, GWL_STYLE);
     if (!g_fullscreen) {
@@ -58,13 +57,13 @@ LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (w == VK_RETURN && (l & (1 << 29))) return toggle_fullscreen(h), 0; // Alt+Enter
         break;
     case WM_SYSCHAR:
-        if (w == VK_RETURN) return 0; // sem o bipe do Alt+Enter
+        if (w == VK_RETURN) return 0; // cala a boca do bipe
         break;
     }
     return DefWindowProcW(h, m, w, l);
 }
 
-bool g_show_pending = false; // janela criada invisível (troca de módulo), mostrar após o 1º quadro
+bool g_show_pending = false;
 uint32_t g_presented = 0;
 
 std::mutex g_notice_lock;
@@ -72,7 +71,6 @@ std::wstring g_notice;
 std::chrono::steady_clock::time_point g_notice_end;
 bool g_notice_shown = false;
 void notice_tick() {
-    // Chamado a cada apresentação: põe o aviso no título e devolve o título normal ao fim do prazo.
     const std::lock_guard<std::mutex> lock(g_notice_lock);
     if (!g_notice.empty() && !g_notice_shown) {
         SetWindowTextW(g_hwnd, g_notice.c_str());
@@ -97,8 +95,7 @@ bool create(const wchar_t *title) {
     RECT r{0, 0, 1440, 816}; // 2x o framebuffer de 720x408
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
     int x = CW_USEDEFAULT, y = CW_USEDEFAULT, w = r.right - r.left, h = r.bottom - r.top;
-    // Troca de módulo (menu -> jogo): a janela nasce invisível no lugar da anterior e só aparece depois
-    // do primeiro quadro; aí o processo anterior é avisado e fecha (sem janela nova piscando).
+    // truque pra não piscar quando troca do menu pro jogo
     const char *wr = getenv("VITART_WINRECT");
     const bool handoff = wr && std::sscanf(wr, "%d,%d,%d,%d", &x, &y, &w, &h) == 4;
     g_show_pending = handoff;
@@ -124,7 +121,7 @@ bool take_resized() { return g_resized.exchange(false); }
 void mark_resized() { g_resized = true; }
 
 void presented() {
-    if (!g_show_pending || ++g_presented < 2) return; // 2º quadro: o 1º já está na tela
+    if (!g_show_pending || ++g_presented < 2) return;
     g_show_pending = false;
     ShowWindow(g_hwnd, SW_SHOW);
     SetForegroundWindow(g_hwnd);
@@ -158,7 +155,7 @@ void notify(const std::string &text) {
     std::wstring w(n > 0 ? n - 1 : 0, L'\0');
     if (n > 1) MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, w.data(), n);
     for (wchar_t &c : w)
-        if (c == L'\n') c = L' '; // o título tem uma linha só
+        if (c == L'\n') c = L' ';
     const std::lock_guard<std::mutex> lock(g_notice_lock);
     g_notice = w;
     g_notice_end = std::chrono::steady_clock::now() + std::chrono::seconds(6);
