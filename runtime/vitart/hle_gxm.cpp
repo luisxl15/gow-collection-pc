@@ -228,13 +228,17 @@ static void dump_draw(Context &c, uint32_t prim, uint32_t itype, uint32_t idata,
 }
 
 
-// =============================================================== renderizador Vulkan (ao vivo)
-// VITART_VULKAN=1 liga. Os shaders vêm do cache gerado offline por tools/usse_build_cache.py
-// (VITART_SPV_DIR, padrão "spv"), pelo FNV-1a de 64 bits do binário do programa; programa sem cache
-// é gravado em <dir>/miss/<hash>.gxp para a próxima geração do cache, e o desenho fica de fora.
+// =============================================================== renderizador (ao vivo)
+// VITART_VULKAN=1 liga. O renderizador é o Vulkan ou o Direct3D 11 (gxm_backend.cpp): VITART_RENDERER ou
+// renderer= no vitart_options.ini ("auto", "vulkan", "d3d11"). Os shaders vêm do cache gerado offline por
+// tools/usse_build_cache.py (VITART_SPV_DIR, padrão "spv"; SPIR-V em .spv, DXBC em .dx11 com --d3d11), pelo
+// FNV-1a de 64 bits do binário do programa; programa sem cache é gravado em <dir>/miss/<hash>.gxp para a
+// próxima geração do cache, e o desenho fica de fora.
 static uint32_t gxp_param(uint32_t prog, uint32_t i);
 static int g_vk = -1; // -1 = ainda não decidido
 static std::string g_spv_dir;
+static std::string g_shader_ext = ".spv"; // ".dx11" no Direct3D 11
+std::string renderer_choice(); // game_options.cpp
 static std::mutex g_vk_mutex;
 static std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint32_t>>> g_spv; // programa -> SPIR-V
 // Texturas decodificadas por descritor. O conteúdo no guest é conferido (hash) uma vez por quadro
@@ -574,11 +578,14 @@ static bool vk_on() {
         if (g_vk) {
             const char *d = getenv("VITART_SPV_DIR");
             g_spv_dir = d ? d : "spv";
+            const char *r = getenv("VITART_RENDERER");
+            gvk::select_backend(r ? r : renderer_choice().c_str());
             if (!gvk::init(getenv("VITART_VK_VALIDATION") != nullptr, true)) {
-                logf("vitart: Vulkan indisponível: %s", gvk::last_error());
+                logf("vitart: renderizador indisponível: %s", gvk::last_error());
                 g_vk = 0;
             } else {
-                logf("vitart: renderizador Vulkan ligado (shaders em %s)", g_spv_dir.c_str());
+                g_shader_ext = gvk::backend() == gvk::Backend::d3d11 ? ".dx11" : ".spv";
+                logf("vitart: renderizador %s ligado (shaders em %s)", gvk::backend_name(), g_spv_dir.c_str());
             }
         }
     }
@@ -611,12 +618,14 @@ static std::shared_ptr<std::vector<uint32_t>> spv_of(uint32_t prog) {
     const uint32_t size = rd32(prog + 8);
     const uint8_t *b = ptr<uint8_t>(prog);
     const std::string name = spv_name(prog);
-    std::shared_ptr<std::vector<uint32_t>> code = spv_read(g_spv_dir + "/" + name + ".spv");
+    std::shared_ptr<std::vector<uint32_t>> code = spv_read(g_spv_dir + "/" + name + g_shader_ext);
     if (!code) {
         std::filesystem::create_directories(g_spv_dir + "/miss");
         std::ofstream o(g_spv_dir + "/miss/" + name + ".gxp", std::ios::binary);
         o.write(reinterpret_cast<const char *>(b), size);
-        logf("vitart: programa 0x%08x sem SPIR-V no cache (%s)", prog, name.c_str());
+        logf("vitart: programa 0x%08x sem %s no cache (%s)", prog, g_shader_ext.c_str() + 1, name.c_str());
+    } else if (getenv("VITART_D3D11_LOG")) {
+        logf("d3d11 dbg: programa %s -> %p", name.c_str(), (const void *)code->data()); // casa com o fs/vs do registro
     }
     return g_spv[prog] = code;
 }
@@ -634,7 +643,7 @@ static std::map<uint32_t, uint64_t> g_pbr_blends; // blends recusados (diagnóst
 static std::shared_ptr<std::vector<uint32_t>> spv_pbr_of(uint32_t prog) {
     auto it = g_spv_pbr.find(prog);
     if (it != g_spv_pbr.end()) return it->second;
-    auto code = spv_read(g_spv_dir + "/" + spv_name(prog) + ".pbr.spv");
+    auto code = spv_read(g_spv_dir + "/" + spv_name(prog) + ".pbr" + g_shader_ext);
     static int missing = 0;
     if (!code) {
         // o .spv normal pode ter vindo de uma captura que não existe mais: o programa vai para miss/ e a
@@ -647,7 +656,8 @@ static std::shared_ptr<std::vector<uint32_t>> spv_pbr_of(uint32_t prog) {
             o.write(reinterpret_cast<const char *>(ptr<uint8_t>(prog)), rd32(prog + 8));
         }
         if (missing++ < 3)
-            logf("vitart: PBR: sem %s.pbr.spv no cache (rode tools/usse_build_cache.py de novo)", spv_name(prog).c_str());
+            logf("vitart: PBR: sem %s.pbr%s no cache (rode tools/usse_build_cache.py de novo)", spv_name(prog).c_str(),
+                 g_shader_ext.c_str());
     }
     return g_spv_pbr[prog] = code;
 }

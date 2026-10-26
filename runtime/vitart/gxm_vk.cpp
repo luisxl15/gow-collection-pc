@@ -6,6 +6,8 @@
 // próprio fluxo (sem laço de realimentação e sem esperar a GPU). A espera só acontece ao apresentar, ao
 // ler um alvo ou quando o anel enche.
 #include "gxm_vk.h"
+#include "gxm_overlay.h"
+#include "gxm_window.h"
 #include "pbr.h"
 #include "trophy_banner.h"
 #include "post_shaders.h"
@@ -13,9 +15,6 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
-#pragma comment(lib, "user32.lib")
-#include <mmsystem.h>
-#pragma comment(lib, "winmm.lib")
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 
@@ -36,7 +35,7 @@ namespace vt {
 void logf(const char *fmt, ...); // core.cpp
 }
 
-namespace gvk {
+namespace gvk::vkb {
 namespace {
 
 std::string g_err;
@@ -59,9 +58,8 @@ VkSampler g_sampler = VK_NULL_HANDLE, g_sampler_nearest = VK_NULL_HANDLE;
 constexpr uint32_t kTexBindings = 16;
 std::recursive_mutex g_lock; // desenhos vêm da thread de render do jogo, a apresentação da de vídeo
 
-// Janela e swapchain (só com init(..., true)).
+// Swapchain na janela comum (gxm_window.cpp), só com init(..., true).
 HWND g_hwnd = nullptr;
-bool g_closed = false;
 VkSurfaceKHR g_surface = VK_NULL_HANDLE;
 VkSwapchainKHR g_swap = VK_NULL_HANDLE;
 std::vector<VkImage> g_swap_images;
@@ -794,62 +792,19 @@ bool vertex_format_ok(uint32_t fmt, uint32_t comps) {
     return c > 0;
 }
 
-static bool g_resized = false, g_fullscreen = false;
 static std::atomic<bool> g_vsync{true};
 static std::atomic<bool> g_fifo{false}; // VSync de verdade: a apresentação espera o vblank do monitor
-static WINDOWPLACEMENT g_place{sizeof(WINDOWPLACEMENT)};
-// F11 ou Alt+Enter: tela cheia sem bordas no monitor da janela (e volta ao lugar anterior).
-static void toggle_fullscreen(HWND h) {
-    const LONG style = GetWindowLongW(h, GWL_STYLE);
-    if (!g_fullscreen) {
-        MONITORINFO mi{sizeof mi};
-        if (!GetWindowPlacement(h, &g_place) || !GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY), &mi)) return;
-        SetWindowLongW(h, GWL_STYLE, (style & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
-        SetWindowPos(h, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
-                     mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-    } else {
-        SetWindowLongW(h, GWL_STYLE, (style & ~WS_POPUP) | WS_OVERLAPPEDWINDOW);
-        SetWindowPlacement(h, &g_place);
-        SetWindowPos(h, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-    }
-    g_fullscreen = !g_fullscreen;
-    g_resized = true;
-}
-
-// Opção "Display Mode" do menu de pausa: o pedido vem de outra thread e é aplicado em present(), na thread
-// da janela (-1 = nenhum pedido).
-static std::atomic<int> g_want_borderless{-1};
-void set_borderless(bool on) { g_want_borderless = on ? 1 : 0; }
+void set_borderless(bool on) { win::request_borderless(on); }
 // Desenhos que gravaram profundidade no último quadro apresentado: o menu principal é 2D (quase nenhum),
 // a jogatina e as cenas em tempo real têm centenas. O ritmo sem VSync usa isso (hle_sys.cpp).
 static std::atomic<uint32_t> g_dw_frame{0}, g_dw_last{0};
 uint32_t last_frame_depth_writes() { return g_dw_last; }
 void set_vsync(bool on, bool fifo) {
     const bool a = g_vsync.exchange(on) != on, b = g_fifo.exchange(fifo) != fifo;
-    if (a || b) g_resized = true; // a swapchain é refeita no próximo present
+    if (a || b) win::mark_resized(); // a swapchain é refeita no próximo present
 }
-bool is_borderless() { return g_fullscreen; }
+bool is_borderless() { return win::borderless(); }
 
-static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    switch (m) {
-    case WM_CLOSE:
-        g_closed = true;
-        return 0;
-    case WM_SIZE:
-        g_resized = true;
-        break;
-    case WM_KEYDOWN:
-        if (w == VK_F11) return toggle_fullscreen(h), 0;
-        break;
-    case WM_SYSKEYDOWN:
-        if (w == VK_RETURN && (l & (1 << 29))) return toggle_fullscreen(h), 0; // Alt+Enter
-        break;
-    case WM_SYSCHAR:
-        if (w == VK_RETURN) return 0; // sem o bipe do Alt+Enter
-        break;
-    }
-    return DefWindowProcW(h, m, w, l);
-}
 
 // Swapchain do tamanho atual da janela (recriada ao redimensionar, entrar/sair da tela cheia, restaurar).
 static bool create_swapchain() {
@@ -911,41 +866,15 @@ static bool create_swapchain() {
     return true;
 }
 
-static bool g_show_pending = false; // janela criada invisível (troca de módulo), mostrar após o 1º quadro
-static uint32_t g_presented = 0;
-static void handoff_show() {
-    if (!g_show_pending || ++g_presented < 2) return; // 2º quadro: o 1º já está na tela
-    g_show_pending = false;
-    ShowWindow(g_hwnd, SW_SHOW);
-    SetForegroundWindow(g_hwnd);
-    if (const char *ev = getenv("VITART_HANDOFF"))
-        if (HANDLE e = OpenEventA(EVENT_MODIFY_STATE, FALSE, ev)) SetEvent(e), CloseHandle(e);
-}
 
 static bool create_window() {
-    WNDCLASSW wc{};
-    wc.lpfnWndProc = wndproc;
-    wc.hInstance = GetModuleHandleW(nullptr);
-    wc.lpszClassName = L"vitart";
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    RegisterClassW(&wc);
-    RECT r{0, 0, 1440, 816}; // 2x o framebuffer de 720x408
-    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    int x = CW_USEDEFAULT, y = CW_USEDEFAULT, w = r.right - r.left, h = r.bottom - r.top;
-    // Troca de módulo (menu -> jogo): a janela nasce invisível no lugar da anterior e só aparece depois
-    // do primeiro quadro; aí o processo anterior é avisado e fecha (sem janela nova piscando).
-    const char *wr = getenv("VITART_WINRECT");
-    const bool handoff = wr && std::sscanf(wr, "%d,%d,%d,%d", &x, &y, &w, &h) == 4;
-    g_show_pending = handoff;
-    g_hwnd = CreateWindowExW(0, L"vitart", L"God of War (vitart, Vulkan)",
-                             WS_OVERLAPPEDWINDOW | (handoff ? 0 : WS_VISIBLE), x, y, w, h, nullptr,
-                             nullptr, wc.hInstance, nullptr);
-    if (!g_hwnd) {
+    if (!win::create(L"God of War (vitart, Vulkan)")) {
         g_err = "CreateWindowEx falhou";
         return false;
     }
+    g_hwnd = static_cast<HWND>(win::hwnd());
     VkWin32SurfaceCreateInfoKHR si{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
-    si.hinstance = wc.hInstance;
+    si.hinstance = GetModuleHandleW(nullptr);
     si.hwnd = g_hwnd;
     VKC(vkCreateWin32SurfaceKHR(g_inst, &si, nullptr, &g_surface));
     VkBool32 ok = VK_FALSE;
@@ -961,73 +890,17 @@ static bool create_window() {
     return true;
 }
 
-bool window_closed() { return g_closed; }
+bool window_closed() { return win::closed(); }
+bool window_rect(int &x, int &y, int &w, int &h) { return win::rect(x, y, w, h); }
 
-bool window_rect(int &x, int &y, int &w, int &h) {
-    RECT r;
-    if (!g_hwnd || !GetWindowRect(g_hwnd, &r)) return false;
-    x = r.left, y = r.top, w = r.right - r.left, h = r.bottom - r.top;
-    return true;
-}
-
-static std::wstring g_notice;
-static std::chrono::steady_clock::time_point g_notice_end;
-static bool g_notice_shown = false;
-static void notice_tick() {
-    // Chamado a cada apresentação: põe o aviso no título e devolve o título normal ao fim do prazo.
-    if (!g_hwnd) return;
-    if (!g_notice.empty() && !g_notice_shown) {
-        SetWindowTextW(g_hwnd, g_notice.c_str());
-        g_notice_shown = true;
-    } else if (g_notice_shown && std::chrono::steady_clock::now() > g_notice_end) {
-        SetWindowTextW(g_hwnd, L"God of War (vitart, Vulkan)");
-        g_notice.clear();
-        g_notice_shown = false;
-    }
-}
-// Aviso de troféu na própria imagem, igual ao do PS Vita (trophy_banner.cpp): entra deslizando pela
-// direita, fica ~4 s e sai. Em tela cheia ou sem bordas não há título de janela para mostrar nada.
-static TrophyBanner g_trophy;
-static BannerImage g_trophy_img;
-static uint32_t g_trophy_for = 0; // altura de tela para a qual a imagem foi montada
-static bool g_trophy_on = false;
-static std::chrono::steady_clock::time_point g_trophy_t0;
+// Aviso de troféu na própria imagem (fila e animação em gxm_overlay.cpp): copiado sobre a swapchain.
 static Buffer g_banner_buf;
-static std::vector<TrophyBanner> g_trophy_queue; // um aviso por vez (o troféu e a platina logo depois)
-static void trophy_start_next() {
-    if (g_trophy_queue.empty()) return;
-    g_trophy = g_trophy_queue.front();
-    g_trophy_queue.erase(g_trophy_queue.begin());
-    vt::logf("vitart: aviso de troféu na tela (%zu na fila)", g_trophy_queue.size());
-    g_trophy_for = 0, g_trophy_on = true;
-    g_trophy_t0 = std::chrono::steady_clock::now();
-    if (!g_trophy.sound.empty()) PlaySoundA(g_trophy.sound.c_str(), nullptr, SND_ASYNC | SND_FILENAME | SND_NODEFAULT);
-    else MessageBeep(MB_ICONASTERISK);
-}
-void notify_trophy(const TrophyBanner &t) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
-    g_trophy_queue.push_back(t);
-    if (!g_trophy_on) trophy_start_next();
-}
+void notify_trophy(const TrophyBanner &t) { ovl::trophy_push(t); }
 static void overlay_banner(VkImage img, int32_t area_x, int32_t area_y, int32_t area_w, int32_t area_h) {
-    if (!g_trophy_on) return;
-    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_trophy_t0).count();
-    constexpr double kSlide = 0.25;
-    const double kStay = g_trophy_queue.empty() ? 4.2 : 2.0; // com fila (o cheat desbloqueia todos) passa mais rápido
-    if (t > kSlide * 2 + kStay) {
-        g_trophy_on = false;
-        trophy_start_next();
-        return;
-    }
-    if (g_trophy_for != (uint32_t)area_h) {
-        if (!render_trophy_banner(g_trophy, (uint32_t)area_h, g_trophy_img)) return g_trophy_on = false, void();
-        g_trophy_for = (uint32_t)area_h;
-    }
-    const BannerImage &bi = g_trophy_img;
-    const double k = area_h / 544.0;
-    const int32_t margin = (int32_t)(12 * k), x_in = area_x + area_w - (int32_t)bi.w - margin, x_out = area_x + area_w + margin;
-    const double f = t < kSlide ? 1 - t / kSlide : t > kSlide + kStay ? (t - kSlide - kStay) / kSlide : 0; // 0 = no lugar
-    const int32_t x0 = x_in + (int32_t)((x_out - x_in) * f), y0 = area_y + (int32_t)(20 * k);
+    const BannerImage *bip = nullptr;
+    int32_t x0 = 0, y0 = 0;
+    if (!ovl::trophy_frame(area_x, area_y, area_w, area_h, bip, x0, y0)) return;
+    const BannerImage &bi = *bip;
     const int32_t sw = (int32_t)g_swap_extent.width;
     if (x0 >= sw || y0 + (int32_t)bi.h > (int32_t)g_swap_extent.height || x0 < 0) return;
     const VkDeviceSize bytes = (VkDeviceSize)bi.w * bi.h * 4;
@@ -1067,29 +940,9 @@ static void overlay_banner(VkImage img, int32_t area_x, int32_t area_y, int32_t 
     vkCmdCopyBufferToImage(g_pcmd, g_banner_buf.buf, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (uint32_t)regs.size(), regs.data());
 }
 
-void notify(const std::string &text) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
-    const int n = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
-    std::wstring w(n > 0 ? n - 1 : 0, L'\0');
-    if (n > 1) MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, w.data(), n);
-    for (wchar_t &c : w)
-        if (c == L'\n') c = L' '; // o título tem uma linha só
-    g_notice = w;
-    g_notice_end = std::chrono::steady_clock::now() + std::chrono::seconds(6);
-    g_notice_shown = false;
-}
-
-bool has_focus() { return g_hwnd && GetForegroundWindow() == g_hwnd; }
-
-bool pointer(float &nx, float &ny) {
-    if (!g_hwnd || GetForegroundWindow() != g_hwnd || !(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) return false;
-    POINT p;
-    RECT r;
-    if (!GetCursorPos(&p) || !ScreenToClient(g_hwnd, &p) || !GetClientRect(g_hwnd, &r)) return false;
-    if (p.x < 0 || p.y < 0 || p.x >= r.right || p.y >= r.bottom || r.right <= 0 || r.bottom <= 0) return false;
-    nx = (p.x + 0.5f) / (float)r.right, ny = (p.y + 0.5f) / (float)r.bottom;
-    return true;
-}
+void notify(const std::string &text) { win::notify(text); }
+bool has_focus() { return win::focused(); }
+bool pointer(float &nx, float &ny) { return win::pointer(nx, ny); }
 
 bool is_target(uint32_t addr) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
@@ -1126,34 +979,16 @@ void draw_enemy_bars(uint32_t color_addr, const EnemyBar *bars, uint32_t n) {
     auto it = g_targets.find(color_addr);
     if (!g_dev || !n || it == g_targets.end()) return;
     Image &im = it->second.color;
-    const uint32_t bh = std::max(6u, (uint32_t)(im.h * 0.016f + 0.5f)), bw = std::max(36u, (uint32_t)(im.h * 0.11f + 0.5f));
-    const uint32_t edge = std::max(1u, bh / 4);
-    const VkDeviceSize bytes = (VkDeviceSize)bw * bh * 4;
-    if (!frame_reserve(n * (bytes + 16))) return;
+    if (!frame_reserve(n * ((VkDeviceSize)im.h * im.h / 64 * 4 + 64 * 1024))) return;
     end_pass();
-    std::vector<uint32_t> px(bw * bh);
+    std::vector<uint32_t> px;
     std::vector<VkBufferImageCopy> regs;
     for (uint32_t i = 0; i < n; i++) {
-        const int32_t x0 = (int32_t)(bars[i].x * im.w) - (int32_t)bw / 2, y0 = (int32_t)(bars[i].y * im.h) - (int32_t)bh;
-        if (x0 < 0 || y0 < 0 || x0 + (int32_t)bw > (int32_t)im.w || y0 + (int32_t)bh > (int32_t)im.h) continue;
-        const float frac = bars[i].frac < 0.f ? 0.f : bars[i].frac > 1.f ? 1.f : bars[i].frac;
-        const uint32_t fill = edge + (uint32_t)((bw - 2 * edge) * frac + 0.5f);
-        for (uint32_t y = 0; y < bh; y++)
-            for (uint32_t x = 0; x < bw; x++) {
-                uint32_t r, g, b;
-                if (x < edge || y < edge || x >= bw - edge || y >= bh - edge) {
-                    r = 26, g = 16, b = 10; // moldura (bronze escuro)
-                } else if (x < fill) {
-                    const float t = (float)(y - edge) / (float)std::max(1u, bh - 2 * edge - 1); // 0 em cima, 1 embaixo
-                    r = (uint32_t)(235 - 110 * t), g = (uint32_t)(40 - 25 * t), b = (uint32_t)(28 - 18 * t);
-                    if (y == edge) r = 255, g = 120, b = 90; // brilho
-                } else {
-                    r = 58, g = 10, b = 8; // vazio
-                }
-                px[y * bw + x] = 0xFF000000u | b << 16 | g << 8 | r; // RGBA na memória
-            }
+        uint32_t bw, bh;
+        int32_t x0, y0;
+        if (!ovl::enemy_bar(im.w, im.h, bars[i], px, bw, bh, x0, y0)) continue;
         VkBufferImageCopy c{};
-        c.bufferOffset = ring_put(px.data(), bytes, 16);
+        c.bufferOffset = ring_put(px.data(), (VkDeviceSize)bw * bh * 4, 16);
         c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         c.imageOffset = {x0, y0, 0};
         c.imageExtent = {bw, bh, 1};
@@ -1169,54 +1004,19 @@ void draw_enemy_bars(uint32_t color_addr, const EnemyBar *bars, uint32_t n) {
 // Contador de FPS (opção "FPS Counter" do menu de pausa): quadros apresentados por segundo, medidos a cada
 // meio segundo, escritos no canto da imagem do jogo depois do blit para a swapchain. O texto é um bitmap
 // 5x7 ampliado (sem pipeline gráfico: cópia de buffer para a imagem, que já é destino de transferência).
-static std::atomic<bool> g_fps_counter{false};
-static std::atomic<uint32_t> g_fps_measured{0};
-void set_fps_counter(bool on) { g_fps_counter = on; }
-uint32_t measured_fps() { return g_fps_measured; }
+void set_fps_counter(bool on) { ovl::set_fps_counter(on); }
+uint32_t measured_fps() { return ovl::measured_fps(); }
 static Buffer g_ovl;
-static const uint8_t *glyph5x7(char c) {
-    static const uint8_t digits[10][7] = {
-        {14, 17, 19, 21, 25, 17, 14}, {4, 12, 4, 4, 4, 4, 14},    {14, 17, 1, 2, 4, 8, 31},
-        {31, 2, 4, 2, 1, 17, 14},     {2, 6, 10, 18, 31, 2, 2},   {31, 16, 30, 1, 1, 17, 14},
-        {6, 8, 16, 30, 17, 17, 14},   {31, 1, 2, 4, 8, 8, 8},     {14, 17, 17, 14, 17, 17, 14},
-        {14, 17, 17, 15, 1, 2, 12}};
-    static const uint8_t F[7] = {31, 16, 16, 30, 16, 16, 16}, P[7] = {30, 17, 17, 30, 16, 16, 16},
-                         S[7] = {15, 16, 16, 14, 1, 1, 30}, sp[7] = {};
-    if (c >= '0' && c <= '9') return digits[c - '0'];
-    return c == 'F' ? F : c == 'P' ? P : c == 'S' ? S : sp;
-}
 static void overlay_fps(VkImage img, int32_t x0, int32_t y0) {
-    using clk = std::chrono::steady_clock;
-    static clk::time_point t0 = clk::now();
-    static uint32_t frames = 0;
-    static double fps = 0;
-    frames++;
-    const double el = std::chrono::duration<double>(clk::now() - t0).count();
-    if (el >= 0.5) fps = frames / el, frames = 0, t0 = clk::now(), g_fps_measured = (uint32_t)(fps + 0.5);
-    if (!g_fps_counter) return;
-    char text[16];
-    std::snprintf(text, sizeof text, "%d FPS", (int)(fps + 0.5));
-    const uint32_t len = (uint32_t)std::strlen(text);
-    uint32_t k = (g_swap_extent.height + 135) / 270; // 1080p -> 4
-    k = k < 2 ? 2 : k > 6 ? 6 : k;
-    const uint32_t w = (len * 6 + 3) * k, h = 11 * k;
+    static std::vector<uint32_t> text;
+    uint32_t w, h;
+    if (!ovl::fps_frame(g_swap_extent.height, text, w, h)) return;
     if (x0 + (int32_t)w > (int32_t)g_swap_extent.width || y0 + (int32_t)h > (int32_t)g_swap_extent.height) return;
     if (!g_ovl.buf && !make_buffer(g_ovl, 512 * 1024, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, nullptr)) return;
     if ((VkDeviceSize)w * h * 4 > g_ovl.size) return;
     void *map = nullptr;
     if (vkMapMemory(g_dev, g_ovl.mem, 0, g_ovl.size, 0, &map) != VK_SUCCESS) return;
-    uint32_t *px = static_cast<uint32_t *>(map);
-    const uint32_t bg = 0xFF101010u, fg = 0xFF40FF40u; // BGRA: fundo quase preto, texto verde
-    for (uint32_t i = 0; i < w * h; i++) px[i] = bg;
-    for (uint32_t n = 0; n < len; n++) {
-        const uint8_t *g = glyph5x7(text[n]);
-        for (uint32_t r = 0; r < 7; r++)
-            for (uint32_t c = 0; c < 5; c++)
-                if (g[r] & (16 >> c))
-                    for (uint32_t yy = 0; yy < k; yy++)
-                        for (uint32_t xx = 0; xx < k; xx++)
-                            px[((2 + r) * k + yy) * w + (2 + n * 6 + c) * k + xx] = fg;
-    }
+    std::memcpy(map, text.data(), (size_t)w * h * 4);
     vkUnmapMemory(g_dev, g_ovl.mem);
     // o blit escreveu na mesma imagem: ordena as duas escritas de transferência
     VkImageMemoryBarrier mb{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -1252,18 +1052,10 @@ bool present(uint32_t addr) {
     if (!frame_flush(false)) return false;
     if (!g_swap && !g_hwnd && !create_window()) return false;
     if (!g_swap) return false;
-    MSG msg;
-    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
-    }
-    notice_tick();
-    if (const int want = g_want_borderless.exchange(-1); want >= 0 && g_hwnd && (want == 1) != g_fullscreen)
-        toggle_fullscreen(g_hwnd);
+    win::pump();
     auto it = g_targets.find(addr);
     if (it == g_targets.end()) return false;
-    if (g_resized) {
-        g_resized = false;
+    if (win::take_resized()) {
         vkDeviceWaitIdle(g_dev);
         if (!create_swapchain()) return false;
     }
@@ -1271,7 +1063,7 @@ bool present(uint32_t addr) {
     uint32_t idx = 0;
     VkResult r = vkAcquireNextImageKHR(g_dev, g_swap, UINT64_MAX, g_acquired, VK_NULL_HANDLE, &idx);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
-        g_resized = true;
+        win::mark_resized();
         return true;
     }
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return fail("vkAcquireNextImageKHR", r);
@@ -1352,8 +1144,8 @@ bool present(uint32_t addr) {
     pi.pSwapchains = &g_swap;
     pi.pImageIndices = &idx;
     const VkResult pr = vkQueuePresentKHR(g_queue, &pi);
-    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) g_resized = true;
-    handoff_show();
+    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) win::mark_resized();
+    win::presented();
     static uint32_t presents = 0;
     if (++presents % 300 == 0) save_pcache();
     return true;
@@ -2426,4 +2218,4 @@ void shutdown() {
     g_dev = VK_NULL_HANDLE;
 }
 
-} // namespace gvk
+} // namespace gvk::vkb

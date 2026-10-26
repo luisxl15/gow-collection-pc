@@ -114,6 +114,14 @@ void set_mod(const std::string &id, bool on) {
 
 std::string ini_path() { return data_path() + "/vitart_options.ini"; }
 std::string g_iso; // ISO do PS2 lembrada (o iniciador a passa em VITART_PS2_AUDIO)
+// Renderizador: "auto" (Vulkan, e Direct3D 11 se não houver Vulkan), "vulkan" ou "d3d11". Vale ao abrir o jogo
+// (renderer_choice, lido antes das outras opções, que só carregam no primeiro quadro).
+std::string g_renderer = "auto";
+std::string ini_value(const char *line, size_t skip) {
+    std::string v = line + skip;
+    while (!v.empty() && (unsigned char)v.back() <= 32) v.pop_back();
+    return v;
+}
 
 void save() {
     std::string iso = g_iso;
@@ -127,6 +135,7 @@ void save() {
         fprintf(f, "cheat_infinite_health=%u\ncheat_infinite_magic=%u\ncheat_infinite_rage=%u\n", g_opt.inf_health ? 1u : 0u,
                 g_opt.inf_magic ? 1u : 0u, g_opt.inf_rage ? 1u : 0u);
         fprintf(f, "enemy_health_bars=%u\n", g_opt.hp_bars ? 1u : 0u);
+        fprintf(f, "renderer=%s\n", g_renderer.c_str());
         for (auto &[id, on] : g_mods) fprintf(f, "mod_%s=%u\n", id.c_str(), on ? 1u : 0u); // carregador de mods
         if (!iso.empty()) fprintf(f, "ps2_iso=%s\n", iso.c_str());
         fclose(f);
@@ -153,10 +162,8 @@ void load() {
             if (sscanf(line, "enemy_health_bars=%u", &v) == 1) g_opt.hp_bars = v != 0;
             char mid[128];
             if (sscanf(line, "mod_%127[A-Za-z0-9_]=%u", mid, &v) == 2) set_mod(mid, v != 0);
-            if (!strncmp(line, "ps2_iso=", 8)) {
-                g_iso = line + 8;
-                while (!g_iso.empty() && (unsigned char)g_iso.back() < 32) g_iso.pop_back();
-            }
+            if (!strncmp(line, "ps2_iso=", 8)) g_iso = ini_value(line, 8);
+            if (!strncmp(line, "renderer=", 9)) g_renderer = ini_value(line, 9);
         }
         fclose(f);
     }
@@ -319,6 +326,16 @@ void hero_reload_tick() {
 } // namespace
 
 bool enemy_bars_enabled() { return g_opt.hp_bars; }
+
+std::string renderer_choice() {
+    if (FILE *f = fopen(ini_path().c_str(), "r")) {
+        char line[1024];
+        while (fgets(line, sizeof line, f))
+            if (!strncmp(line, "renderer=", 9)) g_renderer = ini_value(line, 9);
+        fclose(f);
+    }
+    return g_renderer;
+}
 
 // Antes do primeiro quadro: aplica as escolhas salvas (texturas, áudio e resolução valem também no GoW2).
 void game_options_init() {

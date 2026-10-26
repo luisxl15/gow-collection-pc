@@ -1,4 +1,4 @@
-// Renderizador Vulkan dos desenhos do GXM.
+// Renderizadores dos desenhos do GXM (Vulkan em gxm_vk.cpp, Direct3D 11 em gxm_d3d11.cpp).
 //
 // Recebe cada desenho já resolvido (SPIR-V traduzido pelo vitarecomp.usse, atributos em vec4 float,
 // índices de triângulos, uniforms, texturas RGBA8 ou referência a outro alvo) e desenha no alvo
@@ -50,9 +50,6 @@ struct VertexStream {
 struct VertexAttr {
     uint32_t location = 0, stream = 0, offset = 0, fmt = 9, comps = 4;
 };
-// O formato existe como entrada de vértice nesta GPU?
-bool vertex_format_ok(uint32_t fmt, uint32_t comps);
-
 struct Draw {
     uint32_t prim = 0, cull = 0;
     bool has_blend = false;
@@ -94,67 +91,11 @@ struct Draw {
 
 };
 
-// window: cria também a janela e o swapchain (apresentação ao vivo).
-bool init(bool validation, bool window = false);
-// Mostra o alvo de cor no endereço dado na janela (escala para o tamanho da janela).
-bool present(uint32_t addr);
-bool window_closed();
-// Retângulo externo da janela (para a troca de módulo sem janela nova); false se ainda não há janela.
-bool window_rect(int &x, int &y, int &w, int &h);
-// Mouse sobre a janela como toque: posição normalizada (0..1) na área cliente e botão esquerdo apertado.
-bool pointer(float &nx, float &ny);
-// A janela do jogo está em primeiro plano (teclado e mouse só valem com ela em foco).
-bool has_focus();
-// Aviso curto no título da janela (UTF-8), por alguns segundos, com o som de notificação do Windows.
-void notify(const std::string &text);
-bool is_target(uint32_t addr);
-bool is_depth(uint32_t addr);
-// Início de cena do GXM: a profundidade do alvo volta ao valor de fundo (1,0), a não ser que a
-// superfície peça "force load". Sem isso a profundidade de uma cena vaza para a seguinte.
-void begin_scene(uint32_t color_addr, uint8_t stencil = 0);
-void shutdown();
-// Resolução interna (múltiplo de 960x544): automática pelo monitor ou escolhida no menu do jogo.
-uint32_t render_scale();
-uint32_t auto_render_scale();
-bool set_render_scale(uint32_t s);
-// Contador de FPS no canto da imagem (opção do menu de pausa).
-void set_fps_counter(bool on);
 // Barras de vida dos inimigos: centro (x) e base (y) em 0..1 da imagem do jogo, fração da vida.
 struct EnemyBar {
     float x, y, frac;
 };
-void draw_enemy_bars(uint32_t color_addr, const EnemyBar *bars, uint32_t n);
-// Quadros apresentados por segundo (medidos a cada meio segundo).
-uint32_t measured_fps();
-// Janela sem bordas ocupando o monitor (o mesmo modo do F11 / Alt+Enter).
-void set_borderless(bool on);
-// VSync do menu de pausa: desligado, a apresentação não espera o vblank (modo imediato).
-void set_vsync(bool on, bool fifo = false); // fifo: esperar o vblank do monitor (VSync com FPS máximo)
-// Desenhos que gravaram profundidade no último quadro apresentado (0 em telas 2D, como o menu principal).
-uint32_t last_frame_depth_writes();
-// Teste: desliga o pós-processamento (iluminação de tela) enquanto ligado.
-void set_post_bypass(bool on);
-// Contadores do pós-processamento desde a última chamada: aplicados, sem matriz, sem ponto do HUD,
-// alvo da tela, último desenho 3D, índice do HUD.
-void post_stats(uint32_t out[6]);
-void post_focus_values(float out[4]); // foco, alvo, distância e profundidade no centro (diagnóstico)
-// Próximo present mostra esta imagem RGBA (cena remasterizada) no lugar do alvo do jogo. O ponteiro tem
-// de valer até o present.
-void set_video_frame(const uint8_t *rgba, uint32_t w, uint32_t h);
-// Aviso de troféu igual ao do PS Vita (ícone, nível, nome), desenhado sobre o quadro.
-struct TrophyBanner;
-void notify_trophy(const TrophyBanner &t);
-bool is_borderless();
-// Grava o desenho no quadro atual (os desenhos são executados em ordem em end_frame).
-bool draw(const Draw &d);
-// Executa o quadro e espera a GPU.
-void end_frame();
-// Lê um alvo em RGBA8 (para PNG ou para apresentar).
-bool read_target(uint32_t addr, std::vector<uint8_t> &rgba, uint32_t &w, uint32_t &h);
-std::vector<uint32_t> targets();
-const char *last_error();
-// Saída OUTPUT 0..3 por vértice do último desenho com debug_vs (vec4 por vértice).
-const std::vector<float> &debug_vs_output();
+struct TrophyBanner; // trophy_banner.h
 
 // Onde o tempo vai, acumulado desde a última chamada (que zera): CPU em ns, GPU por timestamps.
 struct Stats {
@@ -166,7 +107,16 @@ struct Stats {
     uint64_t desc_ns = 0;   // alocação e escrita de descritores
     uint32_t submits = 0, snapshots = 0, uploads = 0, pipes = 0, draws = 0;
 };
-Stats take_stats();
-Stats peek_stats(); // sem zerar (diagnóstico de travadas)
+
+// Renderizadores: Vulkan (gxm_vk.cpp) e Direct3D 11 (gxm_d3d11.cpp); o vitart chama a fachada gvk::, que repassa
+// ao escolhido (gxm_backend.cpp).
+enum class Backend { vulkan, d3d11 };
+// "vulkan", "d3d11" ou "auto" (Vulkan se houver driver e GPU; senão Direct3D 11, com o WARP do Windows como
+// último recurso). Antes do init.
+void select_backend(const char *name);
+Backend backend();
+const char *backend_name();
+
+#include "gxm_api.inc"
 
 } // namespace gvk

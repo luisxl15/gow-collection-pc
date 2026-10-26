@@ -23,9 +23,23 @@ class Unsupported(Exception):
     pass
 
 
+# Variante para o Direct3D 11 (d3d=True; vira HLSL pelo spirv-cross e DXBC no tools/usse_build_cache.py).
+# Os registradores do HLSL são por classe: texturas e samplers do fragmento ficam em t/s = recurso (0..15),
+# os mapas do PBR em t/s 14 e 15 (o D3D11 tem 16 samplers; o jogo só usa as unidades 0 e 1), os uniforms (ByteAddressBuffer) em t20 (float) e t21 (palavras do vldst,
+# o mesmo buffer), os parâmetros do PBR em t22. O renderizador põe os dados de todos os desenhos num buffer
+# só; o cbuffer b0 diz onde começam os deste desenho (em palavras): x = vértice, y = fragmento, z = PBR, e w é o
+# sinal (float) que multiplica o y da posição: o viewport do D3D11 não aceita altura negativa.
+# O D3D11 liga as saídas do vértice às entradas do fragmento por registrador, não por nome: os dois lados
+# declaram sempre as 13 locations (1 = cor0 .. 13 = texcoord9), na mesma ordem, e o vértice zera as que não tem.
+D3D_TEX_PBR, D3D_UNIFORMS, D3D_MEMORY, D3D_PBR_PARAMS = 14, 20, 21, 22
+D3D_VARYINGS = [(1, "color0"), (2, "color1"), (3, "fog")] + [(4 + i, "texcoord%d" % i) for i in range(10)]
+
+
 class Translator:
-    def __init__(self, prog, pbr=False):
+    def __init__(self, prog, pbr=False, d3d=False):
         self.p = prog
+        self.d3d = d3d
+        self.dbase = {}  # d3d: base (i32) de cada buffer no corpo do main
         # Variante PBR (pbr.py): só fragmentos com a textura difusa lida pela UV, sem projeção.
         self.pbr_res = PBR.diffuse_resource(prog) if pbr else None
         if pbr and self.pbr_res is None:
@@ -52,7 +66,7 @@ class Translator:
         if res not in self.samplers:
             b = self.b
             sv = b.variable(b.sampled_image(), S.SCUniformConstant, "tex%d" % res)
-            b.decorate(sv, S.DecDescriptorSet, 1)
+            b.decorate(sv, S.DecDescriptorSet, 0 if self.d3d else 1)
             b.decorate(sv, S.DecBinding, res)
             self.samplers[res] = sv
         return self.samplers[res]
@@ -360,8 +374,8 @@ class Translator:
             b.decorate(st, S.DecBlock)
             b.member_decorate(st, 0, S.DecOffset, 0)
             self._mem = b.variable(st, S.SCStorageBuffer, "memory")
-            b.decorate(self._mem, S.DecDescriptorSet, 2 if self.p.fragment else 0)
-            b.decorate(self._mem, S.DecBinding, 1)
+            b.decorate(self._mem, S.DecDescriptorSet, 0 if self.d3d else 2 if self.p.fragment else 0)
+            b.decorate(self._mem, S.DecBinding, D3D_MEMORY if self.d3d else 1)
             b.decorate(self._mem, S.DecNonWritable)
         return self._mem
 
@@ -501,6 +515,8 @@ class Translator:
             vals = []
             for k in range(m):
                 i = b.emit(S.OpIAdd, u32, idx, b.const(u32, k))
+                if self.d3d:
+                    i = b.emit(S.OpIAdd, u32, i, b.emit(S.OpBitcast, u32, self.dbase["u"]))
                 w = b.load(u32, b.chain(S.SCStorageBuffer, u32, self.memory(), b.const(self.i32, 0), i))
                 vals.append(b.emit(S.OpBitcast, self.f32, w))
             for k, v in enumerate(vals):
@@ -685,6 +701,9 @@ class Translator:
                 locs[loc] = v
             return locs[loc]
 
+        if self.d3d:
+            for loc, name in D3D_VARYINGS:
+                input_var(loc, name)
         for inp in p.frag_inputs or []:
             if inp["kind"] == "iter":
                 if inp["loc"] < -1:
@@ -745,11 +764,20 @@ class Translator:
         b.decorate(ub_t, S.DecBlock)
         b.member_decorate(ub_t, 0, S.DecOffset, 0)
         ub = b.variable(ub_t, S.SCStorageBuffer, "uniforms")
-        b.decorate(ub, S.DecDescriptorSet, 2 if p.fragment else 0)
-        b.decorate(ub, S.DecBinding, 0)
+        b.decorate(ub, S.DecDescriptorSet, 0 if self.d3d else 2 if p.fragment else 0)
+        b.decorate(ub, S.DecBinding, D3D_UNIFORMS if self.d3d else 0)
+        dc = None
+        if self.d3d:
+            u32 = b.u32()
+            dc_t = b.struct("draw", b.vec(u32, 4))
+            b.decorate(dc_t, S.DecBlock)
+            b.member_decorate(dc_t, 0, S.DecOffset, 0)
+            dc = b.variable(dc_t, S.SCUniform, "draw")
+            b.decorate(dc, S.DecDescriptorSet, 0)
+            b.decorate(dc, S.DecBinding, 0)
         # Depuração (USSE_DEBUG_VSOUT=1): o vértice grava OUTPUT 0..3 no próprio buffer de uniforms, logo
         # depois do default uniform buffer, em [palavras + 4 * gl_VertexIndex], para comparar com o interp.
-        debug_out = bool(os.environ.get("USSE_DEBUG_VSOUT")) and not p.fragment
+        debug_out = bool(os.environ.get("USSE_DEBUG_VSOUT")) and not p.fragment and not self.d3d
         if not debug_out:
             b.decorate(ub, S.DecNonWritable)
         vid = None
@@ -768,9 +796,12 @@ class Translator:
             b.member_decorate(pv_t, 0, S.DecBuiltIn, S.BuiltInPosition)
             outv = b.variable(pv_t, S.SCOutput, "gl_PerVertex")
             ifaces.append(outv)
-            for name, loc, n, reg in p.vertex_outputs or [("position", -1, 4, 0)]:
-                if loc < 0:
-                    continue  # posição vai no gl_PerVertex; psize fica de fora (pontos não usados)
+            vouts = [o for o in (p.vertex_outputs or [("position", -1, 4, 0)]) if o[1] >= 0]
+            if self.d3d:  # todas as locations, em ordem; as que o programa não tem saem zeradas (n = 0)
+                have = {o[1]: o for o in vouts}
+                vouts = [have.get(loc, (name, loc, 0, 0)) for loc, name in D3D_VARYINGS]
+            for name, loc, n, reg in vouts:
+                # posição vai no gl_PerVertex; psize fica de fora (pontos não usados)
                 v = b.variable(self.v4, S.SCOutput, name)
                 b.decorate(v, S.DecLocation, loc)
                 ifaces.append(v)
@@ -778,6 +809,13 @@ class Translator:
         main = b.id()
         b.body += b.inst(S.OpFunction, b.void(), main, 0, b.fn(b.void()))
         b.body += b.inst(S.OpLabel, b.id())
+        if dc is not None:
+            u32 = b.u32()
+            v4u = b.load(b.vec(u32, 4), b.chain(S.SCUniform, b.vec(u32, 4), dc, b.const(self.i32, 0)))
+            for key, comp in (("u", 1 if p.fragment else 0), ("p", 2)):
+                self.dbase[key] = b.emit(S.OpBitcast, self.i32, b.emit(S.OpCompositeExtract, u32, v4u, comp))
+            # sinal de y da posição (float em w): o viewport do D3D11 não tem altura negativa
+            self.dbase["flip"] = b.emit(S.OpBitcast, self.f32, b.emit(S.OpCompositeExtract, u32, v4u, 3))
         for v, res in avars:
             val = b.load(self.v4, v)
             for c in range(4):
@@ -798,7 +836,10 @@ class Translator:
         if 14 in cont:
             base, size = cont[14]
             for w in range(min(size, 512 - base)):
-                ptr = b.chain(S.SCStorageBuffer, self.f32, ub, b.const(self.i32, 0), b.const(self.i32, w))
+                at = b.const(self.i32, w)
+                if self.d3d:
+                    at = b.emit(S.OpIAdd, self.i32, at, self.dbase["u"])
+                ptr = b.chain(S.SCStorageBuffer, self.f32, ub, b.const(self.i32, 0), at)
                 self.regs.write("sa", base + w, b.load(self.f32, ptr))
         data_base = cont.get(19, (0, 0))[0]
         for reside, ldst_off, ldst_val in (p.uniform_buffers or []):
@@ -816,7 +857,10 @@ class Translator:
             color = self._frag_color()
             b.store(outv, pbr.epilogue(color) if pbr else color)
         else:
-            res = b.emit(S.OpCompositeConstruct, self.v4, *[self.regs.read("out", c) for c in range(4)])
+            pos = [self.regs.read("out", c) for c in range(4)]
+            if self.d3d:
+                pos[1] = b.emit(S.OpFMul, self.f32, pos[1], self.dbase["flip"])
+            res = b.emit(S.OpCompositeConstruct, self.v4, *pos)
             b.store(b.chain(S.SCOutput, self.v4, outv, b.const(self.i32, 0)), res)
             if vid is not None:
                 v = b.load(self.i32, vid)
@@ -833,6 +877,7 @@ class Translator:
         return b.finish(S.ExecFragment if p.fragment else S.ExecVertex, main, ifaces, frag=p.fragment)
 
 
-def translate(prog, pbr=False):
-    """SPIR-V do programa; pbr=True gera a variante PBR do fragmento (Unsupported se não couber)."""
-    return Translator(prog, pbr).build()
+def translate(prog, pbr=False, d3d=False):
+    """SPIR-V do programa; pbr=True gera a variante PBR do fragmento (Unsupported se não couber); d3d=True,
+    a variante para o Direct3D 11 (recursos no layout do HLSL, ver D3D_*)."""
+    return Translator(prog, pbr, d3d).build()

@@ -191,19 +191,20 @@ class PbrEmitter:
         self.texel, self.coord = texel, coord
         self.fragcoord = fragcoord_var
         simg = b.sampled_image()
+        d3d = tr.d3d  # Direct3D 11: registradores t/s 14 e 15, parâmetros em t22 (translate.py, D3D_*)
         self.normal_map = b.variable(simg, S.SCUniformConstant, "pbr_normal")
-        b.decorate(self.normal_map, S.DecDescriptorSet, PBR_SETS[0])
-        b.decorate(self.normal_map, S.DecBinding, 0)
+        b.decorate(self.normal_map, S.DecDescriptorSet, 0 if d3d else PBR_SETS[0])
+        b.decorate(self.normal_map, S.DecBinding, 14 if d3d else 0)
         self.orm_map = b.variable(simg, S.SCUniformConstant, "pbr_orm")
-        b.decorate(self.orm_map, S.DecDescriptorSet, PBR_SETS[0])
-        b.decorate(self.orm_map, S.DecBinding, 1)
+        b.decorate(self.orm_map, S.DecDescriptorSet, 0 if d3d else PBR_SETS[0])
+        b.decorate(self.orm_map, S.DecBinding, 15 if d3d else 1)
         rta = b.runtime_array(tr.f32, 4)
         st = b.struct("pbr_params", rta)
         b.decorate(st, S.DecBlock)
         b.member_decorate(st, 0, S.DecOffset, 0)
         self.params = b.variable(st, S.SCStorageBuffer, "pbr_params")
-        b.decorate(self.params, S.DecDescriptorSet, PBR_SETS[1])
-        b.decorate(self.params, S.DecBinding, 0)
+        b.decorate(self.params, S.DecDescriptorSet, 0 if d3d else PBR_SETS[1])
+        b.decorate(self.params, S.DecBinding, 22 if d3d else 0)
         b.decorate(self.params, S.DecNonWritable)
 
     def param(self, name, n=1, k=0):
@@ -211,7 +212,10 @@ class PbrEmitter:
         base = PARAMS[name] + k
         ids = []
         for i in range(n):
-            ptr = b.chain(S.SCStorageBuffer, tr.f32, self.params, b.const(tr.i32, 0), b.const(tr.i32, base + i))
+            at = b.const(tr.i32, base + i)
+            if tr.d3d:
+                at = b.emit(S.OpIAdd, tr.i32, at, tr.dbase["p"])
+            ptr = b.chain(S.SCStorageBuffer, tr.f32, self.params, b.const(tr.i32, 0), at)
             ids.append(b.load(tr.f32, ptr))
         return V(self.m, ids)
 
