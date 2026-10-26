@@ -8,6 +8,7 @@ A interface gráfica é o tools/vitart_modstudio.py.
     python tools/vitart_modkit.py textures <gow1|gow2> <wad/..wad_psp2>                 # lista as texturas
     python tools/vitart_modkit.py export-tex <jogo> <wad> <registro ~...> <saída.png>
     python tools/vitart_modkit.py texture-mod <jogo> <id> "<nome>" <wad>=<registro>=<png> [...]
+    python tools/vitart_modkit.py text-mod <jogo> <id> "<nome>" <textos.txt> [--wad wad/_VitaTV/r_perma.wad_psp2]
 
 Um mod é uma pasta em <vitart-data>/mods/<id>/:
     mod.ini        name, game (gow1/gow2), author, version, description
@@ -15,8 +16,11 @@ Um mod é uma pasta em <vitart-data>/mods/<id>/:
     src/<caminho no psarc>     arquivos que o patch do vitart também muda (r_perma, r_shella): o rebuild aplica por
                                cima deles o menu e os ícones do vitart e grava o resultado em files/
     entries.tsv    gerado pelo rebuild: "<psarc>\\t<entrada da TOC>\\tfiles/<caminho>" (o que o vitart lê)
+    records.tsv    troca de registros dentro de um WAD (ex.: os textos MSGS_TXT de uma tradução):
+                   "<psarc>\\t<entrada>\\t<tag>\\t<registro>\\t<ocorrência>\\t<arquivo ou =valor>"
 <vitart-data>/mods/modlist.tsv dá a ordem (e o índice na página Mods do menu de pausa); ligar = mod_<id>=1 no
-vitart_options.ini. O vitart aplica os mods ligados ao abrir o jogo (Options > Mods > Apply & Restart).
+vitart_options.ini. No jogo, Options > Mods > Apply liga/desliga na hora os mods de arquivo inteiro (com o herói, o
+jogo volta ao último checkpoint); registros (records.tsv) e o r_perma/r_shella valem ao abrir o jogo de novo.
 """
 import configparser
 import io
@@ -247,6 +251,7 @@ def install_mod(cfg, mid, name, game, files, author='', version='1.0', descripti
     d = os.path.join(mods_dir(cfg), mid)
     if os.path.isdir(d):
         shutil.rmtree(d)
+    os.makedirs(d)
     for name_in_psarc, body in files.items():
         sub = 'src' if name_in_psarc in BASE_FILES else 'files'
         dst = os.path.join(d, sub, *name_in_psarc.split('/'))
@@ -396,6 +401,74 @@ def make_texture_mod(cfg, mid, name, game, changes, author='', description='', l
     return mid
 
 
+# ------------------------------------------------------------------ mods de texto (tradução)
+TEXT_WAD = 'wad/_VitaTV/r_perma.wad_psp2'  # os textos que o vitart mostra (o modo PS TV)
+# A fonte do GoW2 (a única do FLP_HUDA/FLP_ShellA, 132 glifos) usa os códigos das maiúsculas acentuadas para os
+# ícones dos botões (medido: Á Â Ä Ç É Ê Ó Ô Ú saem como ícones; Í e as minúsculas saem certas) e não tem ã/õ/Ã/Õ.
+FONT_FIX = {'gow2': str.maketrans({'Á': 'A', 'Â': 'A', 'Ä': 'A', 'Ã': 'A', 'À': 'A', 'Ç': 'C', 'É': 'E', 'Ê': 'E',
+                                   'Ó': 'O', 'Ô': 'O', 'Õ': 'O', 'Ö': 'O', 'Ú': 'U', 'ã': 'ä', 'õ': 'ö'})}
+
+
+def msgs_need(text):
+    """(mensagens, linhas) que o jogo conta ao ler MSGS_TXT (0x81019f7e no GoW2): strtok por CR/LF, pula linhas
+    vazias e '//', '*N*' (ou '*N*H'/'*N*T') abre uma mensagem; MSGS_COUNT e MSGS_LINES dimensionam as tabelas."""
+    text = text.split(b'\0')[0]
+    if text[:3] == b'\xef\xbb\xbf':
+        text = text[3:]
+    count = lines = 0
+    pending = False
+    for t in re.split(rb'[\r\n]+', text):
+        if not t or t.startswith(b'//'):
+            continue
+        if t.startswith(b'*') and (t.endswith(b'*') or (len(t) > 2 and t[-2:-1] == b'*' and t[-1:] in b'HT')):
+            pending = True
+            continue
+        if pending:
+            count, pending = count + 1, False
+        lines += 1
+    return count, lines
+
+
+def make_text_mod(cfg, mid, name, game, txt_path, wad=TEXT_WAD, author='', description='', log=print):
+    """Mod de textos: o .txt (formato do MSGS_TXT: '*N*' e as linhas da mensagem, UTF-8) troca o registro MSGS_TXT
+    do WAD, e MSGS_COUNT/MSGS_LINES crescem se a tradução precisar. Vale ao abrir o jogo (o r_perma só é lido aí)."""
+    ps = psarc_path(cfg, game)
+    names = manifest(ps)
+    if wad not in names:
+        raise ValueError('%s não existe no %s' % (wad, PSARC[game]))
+    raw = open(txt_path, 'rb').read()
+    if raw[:3] == b'\xef\xbb\xbf':
+        raw = raw[3:]
+    text = raw.decode('utf-8')  # o jogo lê UTF-8: falha cedo se o arquivo for outra codificação
+    if game in FONT_FIX:
+        fixed = text.translate(FONT_FIX[game])
+        if fixed != text:
+            log('%d letras trocadas por outras que a fonte do jogo tem (maiúsculas acentuadas, ã/õ)'
+                % sum(a != b for a, b in zip(text, fixed)))
+        raw = fixed.encode('utf-8')
+    body =re.sub(rb'\r?\n', b'\r\n', raw.rstrip(b'\0'))
+    if not body.endswith(b'\r\n'):
+        body += b'\r\n'
+    body += b'\0\0'  # o jogo percorre o texto com strtok: precisa do zero no fim
+    recs = {r[2]: r for r in wad_records(read_psarc_file(ps, wad), game) if r[2].startswith('MSGS_')}
+    if 'MSGS_TXT' not in recs:
+        raise ValueError('%s não tem MSGS_TXT' % wad)
+    count, lines = msgs_need(body)
+    count, lines = max(count, recs['MSGS_COUNT'][5]), max(lines, recs['MSGS_LINES'][5])
+    mid = install_mod(cfg, mid, name, game, {}, author=author, description=description, log=log)
+    d = os.path.join(mods_dir(cfg), mid)
+    os.makedirs(os.path.join(d, 'records'), exist_ok=True)
+    open(os.path.join(d, 'records', 'MSGS_TXT.txt'), 'wb').write(body)
+    idx = names.index(wad) + 1
+    rows = ['%s\t%d\t%d\tMSGS_TXT\t0\trecords/MSGS_TXT.txt' % (PSARC[game], idx, recs['MSGS_TXT'][0]),
+            '%s\t%d\t%d\tMSGS_COUNT\t0\t=%d' % (PSARC[game], idx, recs['MSGS_COUNT'][0], count),
+            '%s\t%d\t%d\tMSGS_LINES\t0\t=%d' % (PSARC[game], idx, recs['MSGS_LINES'][0], lines)]
+    open(os.path.join(d, 'records.tsv'), 'w', encoding='utf-8', newline='\n').write('\n'.join(rows) + '\n')
+    log('%s: %d mensagens, %d linhas em %s' % (mid, count, lines, wad))
+    rebuild(cfg, log)
+    return mid
+
+
 # ------------------------------------------------------------------ linha de comando
 def main():
     if hasattr(sys.stdout, 'reconfigure'):
@@ -428,6 +501,9 @@ def main():
             wad, rec, png = spec.split('=', 2)
             changes.append((wad, rec, np.array(Image.open(png).convert('RGBA'))))
         make_texture_mod(cfg, mid, name, game, changes)
+    elif a[0] == 'text-mod':
+        wad = a[a.index('--wad') + 1] if '--wad' in a else TEXT_WAD
+        make_text_mod(cfg, a[2], a[3], a[1], a[4], wad=wad)
     else:
         print(__doc__)
 

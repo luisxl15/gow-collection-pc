@@ -40,6 +40,7 @@ int game_id(); // abaixo: 1 = GoW1, 2 = GoW2
 int trophy_unlock_all(); // hle_sys.cpp: cheat "Unlock All Trophies"
 void enemy_hp_tick(int game); // enemy_hp.cpp: barras de vida dos inimigos
 std::string mods_dir_for(const std::string &psarc_name); // hle_io.cpp: pasta dos mods
+std::vector<std::string> mods_hot_apply();               // hle_io.cpp: liga/desliga os mods com o jogo rodando
 
 void texpack_set_enabled(bool on);
 bool texpack_available();
@@ -286,21 +287,33 @@ void cheats_tick(int game) {
 }
 const bool g_watch = (watch_import(on_import), true);
 
-// "Apply & Restart" (menu Mods): abre o mesmo executável com a mesma linha de comando e sai. Os mods trocam arquivos
-// dentro do psarc (a TOC que o jogo lê no começo), então só valem num processo novo.
-void restart_process() {
-    wchar_t exe[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    std::wstring cmd = GetCommandLineW();
-    STARTUPINFOW si{};
-    si.cb = sizeof si;
-    PROCESS_INFORMATION pi{};
-    logf("vitart: reiniciando para aplicar os mods");
-    if (CreateProcessW(exe, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
-        CloseHandle(pi.hThread), CloseHandle(pi.hProcess);
-        ExitProcess(0);
-    }
-    logf("vitart: não deu para reiniciar (CreateProcess %lu)", GetLastError());
+// Recarga do herói (GoW2) depois de "Apply". Trocar o herói no meio da partida deixa o Kratos novo sem posição nem
+// câmera (o jogo só faz isso ao carregar um checkpoint), então o "Apply" volta ao último checkpoint pelo caminho do
+// próprio jogo: na fila de comandos de carregamento (0x812eabb4, 32 entradas de 32 bytes {u16 comando, u16 arg,
+// u32 valor, char nome[...] em +8}; o despachante 0x8101f2c8 consome da cabeça 0x812eafb8, se acrescenta no fim
+// 0x812eafbc; contagem em 0x812eafb4) entra o comando 19, o mesmo de "Restart from last checkpoint" (0x810219c2).
+// O carregamento do checkpoint (0x8107c0e2) só troca o herói se o salvo for diferente do atual ([0x812eb030]+4), e a
+// troca (0x810221e8) só se ele for diferente do último pedido (0x812cb9a4): com os dois em -1 ele descarrega o
+// herói e carrega o R_Hero do checkpoint de novo, agora do mod. Só com a partida rodando e a fila parada.
+bool g_hero_reload = false;
+void hero_reload_tick() {
+    if (!g_hero_reload || game_id() != 2) return;
+    if (rd32(0x812ec498u) != 0xcu || rd32(0x812eafc8u) != 0 || rd32(0x812eafb4u) != 0) return;
+    const uint32_t st = rd32(0x812eb030u);
+    if (!st) return;
+    const uint32_t hero = rd32(st + 4);
+    wr32(st + 4, 0xffffffffu);
+    wr32(0x812cb9a4u, 0xffffffffu);
+    int32_t i = (int32_t)rd32(0x812eafbcu);
+    if (i < 0 || i >= 0x20) i = 0;
+    const uint32_t e = 0x812eabb4u + (uint32_t)i * 32;
+    std::memset(ptr<uint8_t>(e), 0, 32);
+    const uint16_t cmd = 19;
+    std::memcpy(ptr<uint8_t>(e), &cmd, 2);
+    wr32(0x812eafbcu, i + 1 >= 0x20 ? 0 : (uint32_t)(i + 1));
+    wr32(0x812eafb4u, rd32(0x812eafb4u) + 1);
+    g_hero_reload = false;
+    logf("vitart: mods: voltando ao último checkpoint para recarregar o herói (R_Hero%02u)", hero);
 }
 
 } // namespace
@@ -500,18 +513,46 @@ void game_options_tick() {
             logf("vitart: cheat %s %s", what, *opt ? "ligado" : "desligado");
         }
     if (g_req_trophy.exchange(0) == 2) trophy_unlock_all();
+    // VITART_TEST_HOTMOD=<s>[,<s>...] (teste): nesses segundos inverte o mod 0 e aplica, como o menu Mods faria
+    if (static const char *hm = getenv("VITART_TEST_HOTMOD"); hm && game_id()) {
+        static const auto t0 = std::chrono::steady_clock::now();
+        static const char *next = hm;
+        if (*next && std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() >= atof(next)) {
+            next = strchr(next, ',') ? strchr(next, ',') + 1 : "";
+            const auto ids = menu_mods(game_id());
+            if (!ids.empty()) g_req_mod[0] = mod_on(ids[0]) ? 1 : 2, g_req_restart = 2;
+        }
+    }
+    // VITART_TEST_TROPHIES=<s> (teste): nesse segundo faz o cheat "Unlock All Trophies"
+    if (static const char *tt = getenv("VITART_TEST_TROPHIES"); tt && game_id()) {
+        static const auto t0 = std::chrono::steady_clock::now();
+        static bool done = false;
+        if (!done && std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() >= atof(tt))
+            done = true, g_req_trophy = 2;
+    }
     for (int i = 0; i < 16; i++)
         if (const uint32_t v = g_req_mod[i].exchange(0); v == 1 || v == 2) {
             const auto ids = menu_mods(game_id());
             if ((size_t)i < ids.size() && !ids[i].empty()) {
                 set_mod(ids[i], v == 2), changed = true;
-                logf("vitart: mod %s %s (vale ao reiniciar)", ids[i].c_str(), v == 2 ? "ligado" : "desligado");
+                logf("vitart: mod %s %s", ids[i].c_str(), v == 2 ? "ligado" : "desligado");
             }
         }
     if (g_req_restart.exchange(0) == 2) {
         save();
-        restart_process(); // aplica os mods: o psarc é aberto (e remendado) de novo do começo
+        // "Apply" (menu Mods): a TOC do psarc muda na hora; o que o jogo carrega depois já vem do mod novo. O WAD do
+        // herói é recarregado quando a partida voltar (hero_reload_tick); o r_perma/r_shella (HUD, menus, textos) só
+        // são lidos ao abrir o jogo.
+        bool hero = false, boot = false;
+        for (const std::string &n : mods_hot_apply()) {
+            if (n.find("r_hero") != std::string::npos) hero = true;
+            if (n.find("r_perma") != std::string::npos || n.find("r_shella") != std::string::npos) boot = true;
+        }
+        if (hero) g_hero_reload = true;
+        logf("vitart: mods aplicados%s%s", hero ? "; o jogo volta ao último checkpoint com o herói novo" : "",
+             boot ? "; HUD/menus do mod valem ao abrir o jogo de novo" : "");
     }
+    hero_reload_tick();
     cheats_tick(game_id());
     enemy_hp_tick(game_id());
     if (changed) save();

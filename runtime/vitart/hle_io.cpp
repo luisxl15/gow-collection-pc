@@ -28,6 +28,9 @@
 
 namespace fs = std::filesystem;
 
+// stb_image (hle_gxm.cpp): o zlib dos blocos do psarc (registros de mods sobre a versão base de um WAD)
+extern "C" char *stbi_zlib_decode_malloc_guesssize_headerflag(const char *buffer, int len, int initial_size, int *outlen, int parse_header);
+
 namespace vt {
 
 constexpr uint32_t SCE_ERROR_ERRNO_ENOENT = 0x80010002u;
@@ -63,21 +66,36 @@ static bool skipped_video(const std::string &path) {
 // arquivos novos, que ficam "depois do fim" do psarc. O jogo (FIOS2) lê o psarc como sempre; o vitart
 // junta as três fontes na leitura. O psarc original não é tocado. Formato: "VTPP", u64 tamanho do psarc
 // original, u32 tamanho da TOC, u32 tamanho dos dados extras, TOC, extras (gerado por tools/psarc_patch.py).
+// Um arquivo de um mod instalado: fica sempre nos extras (ligado ou não) para o mod poder ser ligado com o jogo
+// rodando; ligar/desligar só muda a entrada da TOC (mods_hot_apply).
+struct ModFile {
+    std::string mod;
+    uint32_t idx = 0;       // entrada da TOC
+    uint64_t first = 0;     // primeiro bloco reservado na tabela
+    uint64_t size = 0, off = 0;
+};
 struct PsarcPatch {
     uint64_t orig = 0;
     std::vector<uint8_t> toc, extra;
+    std::vector<uint8_t> tmpl;          // TOC sem os mods de arquivo inteiro (patch base + registros + reserva)
+    std::vector<ModFile> files;         // arquivos de todos os mods instalados, na ordem de modlist.tsv
+    std::vector<std::string> names;     // manifesto (nomes das entradas 1..n)
+    uint32_t guest_buf = 0, guest_off = 0, guest_len = 0; // onde o jogo (FIOS) guardou a TOC lida
 };
-// Carregador de mods (docs/modding/README.md). Por cima do patch do vitart, cada mod ligado (mod_<id>=1 no
-// vitart_options.ini; menu de pausa: Options > Mods, aplicado ao reiniciar) troca arquivos inteiros do psarc:
-// <mods>/<id>/entries.tsv lista "<psarc>\t<entrada da TOC>\t<arquivo no mod>". Vários mods juntos: vale a ordem de
-// mods/modlist.tsv (o último ganha). Os arquivos entram crus (blocos sem compressão) no fim dos extras.
+// Carregador de mods (docs/modding/README.md). Por cima do patch do vitart:
+//  - mods de arquivo inteiro (<mods>/<id>/entries.tsv: "<psarc>\t<entrada da TOC>\t<arquivo no mod>"): os arquivos de
+//    todos os mods instalados ficam nos extras desde o começo, e ligar/desligar só troca a entrada da TOC -- inclusive
+//    com o jogo rodando (mods_hot_apply: a TOC que o FIOS guardou na memória do jogo é reescrita);
+//  - mods de registro (<mods>/<id>/records.tsv: "<psarc>\t<entrada>\t<tag>\t<nome>\t<ocorrência>\t<arquivo|=valor>"):
+//    trocam registros de um WAD (textos, por exemplo) e se combinam com o patch do vitart e com outros mods no mesmo
+//    WAD; entram ao abrir o jogo (os WADs que eles mudam, r_perma e r_shella, só são lidos no boot).
+// Ligado = mod_<id>=1 no vitart_options.ini; a ordem (o último ganha) é a de mods/modlist.tsv.
 std::string mods_dir_for(const std::string &) {
     const char *md = getenv("VITART_MODS_DIR"); // testes: outra pasta de patches, sem mexer nos instalados
     return md && *md ? std::string(md) : data_path() + "/mods";
 }
-// Mods ligados, na ordem de modlist.tsv ("<jogo>\t<índice no menu>\t<id>\t<nome>").
-std::vector<std::string> enabled_mods() {
-    std::vector<std::string> on, out;
+static std::vector<std::string> ini_mods_on() {
+    std::vector<std::string> on;
     if (FILE *f = fopen((data_path() + "/vitart_options.ini").c_str(), "r")) {
         char line[512];
         while (fgets(line, sizeof line, f)) {
@@ -87,16 +105,27 @@ std::vector<std::string> enabled_mods() {
         }
         fclose(f);
     }
+    return on;
+}
+// Mods instalados, na ordem de modlist.tsv ("<jogo>\t<índice no menu>\t<id>\t<nome>").
+static std::vector<std::string> modlist_ids() {
+    std::vector<std::string> out;
     if (FILE *f = fopen((mods_dir_for("") + "/modlist.tsv").c_str(), "r")) {
         char line[1024];
         while (fgets(line, sizeof line, f)) {
             char game[16], id[128];
             unsigned idx = 0;
-            if (sscanf(line, "%15s %u %127s", game, &idx, id) == 3 && std::find(on.begin(), on.end(), id) != on.end())
-                out.push_back(id);
+            if (sscanf(line, "%15s %u %127s", game, &idx, id) == 3) out.push_back(id);
         }
         fclose(f);
     }
+    return out;
+}
+std::vector<std::string> enabled_mods() {
+    const auto on = ini_mods_on();
+    std::vector<std::string> out;
+    for (const std::string &id : modlist_ids())
+        if (std::find(on.begin(), on.end(), id) != on.end()) out.push_back(id);
     return out;
 }
 static uint64_t be(const uint8_t *p, int n) {
@@ -107,40 +136,52 @@ static uint64_t be(const uint8_t *p, int n) {
 static void put_be(uint8_t *p, int n, uint64_t v) {
     for (int i = n - 1; i >= 0; i--, v >>= 8) p[i] = (uint8_t)v;
 }
-// Troca a entrada idx da TOC (já remendada) por data: entradas novas no fim da tabela de blocos (0 = bloco cheio cru)
-// e os dados, completados até o bloco, no fim dos extras.
-static void overlay_file(std::vector<uint8_t> &toc, std::vector<uint8_t> &extra, uint64_t orig, uint32_t idx,
-                         const std::vector<uint8_t> &data) {
-    const uint32_t ent = (uint32_t)be(&toc[16], 4), n = (uint32_t)be(&toc[20], 4), block = (uint32_t)be(&toc[24], 4);
-    const int w = block <= 0x10000 ? 2 : block <= 0x1000000 ? 3 : 4;
-    const size_t tab_at = 32 + (size_t)n * ent;
-    if (idx == 0 || idx >= n) return;
-    const uint64_t nb = (data.size() + block - 1) / block;
-    const uint64_t first = (toc.size() - tab_at) / w;
-    toc.resize(toc.size() + nb * w, 0);
-    uint8_t *e = &toc[32 + (size_t)idx * ent];
-    put_be(e + 16, 4, first);
-    put_be(e + 20, 5, data.size());
-    put_be(e + 25, 5, orig + extra.size());
+struct TocShape {
+    uint32_t ent, n, block;
+    int w;
+    size_t tab_at;
+};
+static TocShape shape(const std::vector<uint8_t> &toc) {
+    TocShape s;
+    s.ent = (uint32_t)be(&toc[16], 4), s.n = (uint32_t)be(&toc[20], 4), s.block = (uint32_t)be(&toc[24], 4);
+    s.w = s.block <= 0x10000 ? 2 : s.block <= 0x1000000 ? 3 : 4;
+    s.tab_at = 32 + (size_t)s.n * s.ent;
+    return s;
+}
+// Reserva os blocos de data na tabela (0 = bloco cheio cru) e põe os dados no fim dos extras; devolve o arquivo.
+static ModFile reserve_file(std::vector<uint8_t> &toc, std::vector<uint8_t> &extra, uint64_t orig, uint32_t idx,
+                            const std::vector<uint8_t> &data) {
+    const TocShape s = shape(toc);
+    const uint64_t nb = (data.size() + s.block - 1) / s.block;
+    ModFile mf;
+    mf.idx = idx, mf.size = data.size(), mf.off = orig + extra.size();
+    mf.first = (toc.size() - s.tab_at) / s.w;
+    toc.resize(toc.size() + nb * s.w, 0);
     extra.insert(extra.end(), data.begin(), data.end());
-    extra.resize(extra.size() + (nb * block - data.size()), 0);
+    extra.resize(extra.size() + (nb * s.block - data.size()), 0);
+    return mf;
+}
+static void point_entry(std::vector<uint8_t> &toc, const ModFile &mf) {
+    const TocShape s = shape(toc);
+    uint8_t *e = &toc[32 + (size_t)mf.idx * s.ent];
+    put_be(e + 16, 4, mf.first);
+    put_be(e + 20, 5, mf.size);
+    put_be(e + 25, 5, mf.off);
 }
 // A TOC cresceu: o que o psarc tinha logo depois dela (o manifesto, entrada 0, e o que mais estiver no trecho
 // coberto) ficaria escondido pela TOC nova; esses dados são copiados crus para os extras.
 static void relocate_shadowed(std::vector<uint8_t> &toc, std::vector<uint8_t> &extra, uint64_t orig, FILE *ps,
                               uint64_t orig_toc_len) {
-    const uint32_t ent = (uint32_t)be(&toc[16], 4), n = (uint32_t)be(&toc[20], 4), block = (uint32_t)be(&toc[24], 4);
-    const int w = block <= 0x10000 ? 2 : block <= 0x1000000 ? 3 : 4;
-    const size_t tab_at = 32 + (size_t)n * ent;
-    for (uint32_t i = 0; i < n; i++) {
-        uint8_t *e = &toc[32 + (size_t)i * ent];
+    const TocShape s = shape(toc);
+    for (uint32_t i = 0; i < s.n; i++) {
+        uint8_t *e = &toc[32 + (size_t)i * s.ent];
         const uint64_t bi = be(e + 16, 4), size = be(e + 20, 5), off = be(e + 25, 5);
         if (off >= orig || off >= toc.size() || !size) continue;
         uint64_t raw = 0;
-        for (uint64_t k = 0; k * block < size; k++) {
-            const size_t at = tab_at + (size_t)(bi + k) * w;
-            const uint64_t z = at + w <= toc.size() ? be(&toc[at], w) : 0;
-            raw += z ? z : block;
+        for (uint64_t k = 0; k * s.block < size; k++) {
+            const size_t at = s.tab_at + (size_t)(bi + k) * s.w;
+            const uint64_t z = at + s.w <= toc.size() ? be(&toc[at], s.w) : 0;
+            raw += z ? z : s.block;
         }
         if (off + raw <= orig_toc_len) continue;
         std::vector<uint8_t> buf(raw);
@@ -150,15 +191,99 @@ static void relocate_shadowed(std::vector<uint8_t> &toc, std::vector<uint8_t> &e
         extra.insert(extra.end(), buf.begin(), buf.end());
     }
 }
+// Conteúdo da entrada idx pela TOC dada (blocos zlib ou crus, no psarc ou nos extras).
+static std::vector<uint8_t> read_entry(const std::vector<uint8_t> &toc, const std::vector<uint8_t> &extra, uint64_t orig,
+                                       FILE *ps, uint32_t idx) {
+    const TocShape s = shape(toc);
+    std::vector<uint8_t> out;
+    if (idx >= s.n) return out;
+    const uint8_t *e = &toc[32 + (size_t)idx * s.ent];
+    uint64_t bi = be(e + 16, 4), size = be(e + 20, 5), off = be(e + 25, 5);
+    std::vector<uint8_t> raw;
+    while (out.size() < size) {
+        const size_t at = s.tab_at + (size_t)bi * s.w;
+        const uint64_t z = at + s.w <= toc.size() ? be(&toc[at], s.w) : 0;
+        const uint64_t want = std::min<uint64_t>(s.block, size - out.size()), take = z ? z : s.block;
+        raw.resize(take);
+        if (off >= orig) {
+            const uint64_t o = off - orig;
+            if (o + take > extra.size()) break;
+            memcpy(raw.data(), extra.data() + o, take);
+        } else {
+            _fseeki64(ps, (int64_t)off, SEEK_SET);
+            if (fread(raw.data(), 1, take, ps) != take) break;
+        }
+        if (z && z != want && raw[0] == 0x78) {
+            int got = 0;
+            char *d = stbi_zlib_decode_malloc_guesssize_headerflag((const char *)raw.data(), (int)z, (int)want, &got, 1);
+            if (!d) break;
+            out.insert(out.end(), (uint8_t *)d, (uint8_t *)d + std::min<int>(got, (int)want));
+            free(d);
+        } else {
+            out.insert(out.end(), raw.begin(), raw.begin() + want);
+        }
+        off += take, bi++;
+    }
+    return out;
+}
+// WAD (GoW1: sem corpo a tag 24; GoW2: 0, 2, 3 e 24 -- nelas o "tamanho" é um valor).
+struct WadRec {
+    uint16_t tag, flags;
+    uint32_t size;
+    char name[24];
+    std::vector<uint8_t> body;
+    bool has_body;
+};
+static std::vector<WadRec> wad_parse(const std::vector<uint8_t> &d, bool gow2) {
+    std::vector<WadRec> out;
+    size_t o = 0;
+    while (o + 32 <= d.size()) {
+        WadRec r;
+        memcpy(&r.tag, &d[o], 2), memcpy(&r.flags, &d[o + 2], 2), memcpy(&r.size, &d[o + 4], 4), memcpy(r.name, &d[o + 8], 24);
+        r.has_body = !(r.tag == 24 || (gow2 && (r.tag == 0 || r.tag == 2 || r.tag == 3)));
+        const size_t len = r.has_body ? std::min<size_t>(r.size, d.size() - o - 32) : 0;
+        r.body.assign(d.begin() + o + 32, d.begin() + o + 32 + len);
+        out.push_back(std::move(r));
+        o = (o + 32 + len + 15) & ~(size_t)15;
+    }
+    return out;
+}
+static std::vector<uint8_t> wad_write(const std::vector<WadRec> &recs) {
+    std::vector<uint8_t> w;
+    for (const WadRec &r : recs) {
+        const uint32_t size = r.has_body ? (uint32_t)r.body.size() : r.size;
+        const size_t at = w.size();
+        w.resize(at + 32);
+        memcpy(&w[at], &r.tag, 2), memcpy(&w[at + 2], &r.flags, 2), memcpy(&w[at + 4], &size, 4), memcpy(&w[at + 8], r.name, 24);
+        if (r.has_body) {
+            w.insert(w.end(), r.body.begin(), r.body.end());
+            w.resize((w.size() + 15) & ~(size_t)15, 0);
+        }
+    }
+    return w;
+}
+static std::vector<uint8_t> read_file_bytes(const std::string &p) {
+    std::ifstream in(fs::u8path(p), std::ios::binary);
+    return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+static std::shared_ptr<PsarcPatch> psarc_patch(const std::string &hp);
+static std::mutex g_patch_mutex;
+static std::unordered_map<std::string, std::shared_ptr<PsarcPatch>> g_patch_cache; // carregado uma vez por psarc
+static std::vector<uint8_t> build_toc(const PsarcPatch &pt, const std::vector<std::string> &on) {
+    std::vector<uint8_t> toc = pt.tmpl;
+    for (const ModFile &mf : pt.files)
+        if (mf.mod == "*" || std::find(on.begin(), on.end(), mf.mod) != on.end()) point_entry(toc, mf);
+    return toc;
+}
 static std::shared_ptr<PsarcPatch> psarc_patch(const std::string &hp) {
     if (hp.size() < 6 || _stricmp(hp.c_str() + hp.size() - 6, ".psarc") != 0) return nullptr;
     static const bool off = getenv("VITART_NO_MODS") != nullptr;
     if (off) return nullptr;
-    static std::mutex m;
-    static std::unordered_map<std::string, std::shared_ptr<PsarcPatch>> cache; // carregado uma vez por psarc
-    const std::lock_guard<std::mutex> lock(m);
-    if (auto it = cache.find(hp); it != cache.end()) return it->second;
-    auto &slot = cache[hp];
+    const std::lock_guard<std::mutex> lock(g_patch_mutex);
+    // "exec//x.psarc" e "exec/x.psarc" são o mesmo arquivo: uma entrada só (o "Apply" mexe nela uma vez)
+    const std::string key = fs::path(hp).lexically_normal().generic_string();
+    if (auto it = g_patch_cache.find(key); it != g_patch_cache.end()) return it->second;
+    auto &slot = g_patch_cache[key];
     const std::string name = fs::path(hp).filename().string();
     const std::string dir = mods_dir_for(name);
     const std::string pp = dir + "/" + name + ".vtpatch";
@@ -183,7 +308,6 @@ static std::shared_ptr<PsarcPatch> psarc_patch(const std::string &hp) {
             logf("vitart: mods em %s: TOC remendada, %u bytes de arquivos trocados", name.c_str(), el);
         }
     }
-    // mods do carregador: arquivos inteiros por cima (docs/modding/README.md)
     FILE *ps = fopen(hp.c_str(), "rb");
     if (!ps) return have ? slot = pt : nullptr;
     uint8_t hdr[32] = {};
@@ -195,37 +319,154 @@ static std::shared_ptr<PsarcPatch> psarc_patch(const std::string &hp) {
         _fseeki64(ps, 0, SEEK_SET);
         if (fread(pt->toc.data(), 1, orig_toc_len, ps) != orig_toc_len) pt->toc.clear();
     }
-    int nmods = 0, nfiles = 0;
-    if (hdr_ok && !pt->toc.empty())
-        for (const std::string &id : enabled_mods()) {
-            FILE *t = fopen((dir + "/" + id + "/entries.tsv").c_str(), "r");
-            if (!t) continue;
-            char line[1024];
-            int got = 0;
-            while (fgets(line, sizeof line, t)) {
-                char pn[256], rel[700];
-                unsigned idx = 0;
-                if (sscanf(line, "%255[^\t]\t%u\t%699[^\t\r\n]", pn, &idx, rel) != 3 || _stricmp(pn, name.c_str()) != 0)
-                    continue;
-                std::ifstream in(fs::u8path(dir + "/" + id + "/" + rel), std::ios::binary);
-                std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-                if (data.empty()) {
-                    logf("vitart: mod %s: %s não encontrado", id.c_str(), rel);
-                    continue;
-                }
-                overlay_file(pt->toc, pt->extra, pt->orig, idx, data);
-                got++;
-            }
-            fclose(t);
-            if (got) nmods++, nfiles += got, logf("vitart: mod %s: %d arquivos em %s", id.c_str(), got, name.c_str());
+    if (!hdr_ok || pt->toc.empty()) {
+        fclose(ps);
+        return have ? slot = pt : nullptr;
+    }
+    const bool gow2 = name.find("gow2") != std::string::npos;
+    {
+        const std::vector<uint8_t> man = read_entry(pt->toc, pt->extra, pt->orig, ps, 0);
+        std::string cur;
+        for (uint8_t c : man) {
+            if (c == '\n') pt->names.push_back(cur), cur.clear();
+            else cur += (char)c;
         }
+        pt->names.push_back(cur);
+    }
+    const auto ids = modlist_ids();
+    const auto on = enabled_mods();
+    int nrec = 0, nfiles = 0;
+    // 1) arquivos inteiros de todos os mods instalados (reservados; a TOC aponta só os dos ligados)
+    for (const std::string &id : ids) {
+        FILE *t = fopen((dir + "/" + id + "/entries.tsv").c_str(), "r");
+        if (!t) continue;
+        char line[1024];
+        while (fgets(line, sizeof line, t)) {
+            char pn[256], rel[700];
+            unsigned idx = 0;
+            if (sscanf(line, "%255[^\t]\t%u\t%699[^\t\r\n]", pn, &idx, rel) != 3 || _stricmp(pn, name.c_str()) != 0) continue;
+            const std::vector<uint8_t> data = read_file_bytes(dir + "/" + id + "/" + rel);
+            if (data.empty() || idx == 0 || idx >= shape(pt->toc).n) {
+                logf("vitart: mod %s: %s não encontrado", id.c_str(), rel);
+                continue;
+            }
+            ModFile mf = reserve_file(pt->toc, pt->extra, pt->orig, idx, data);
+            mf.mod = id;
+            pt->files.push_back(mf);
+            nfiles++;
+        }
+        fclose(t);
+    }
+    // 2) registros (records.tsv) dos mods ligados, por cima da versão de cada WAD que vale ao abrir o jogo (a base ou
+    // a de um mod de arquivo inteiro ligado): o resultado fica sempre apontado (mod "*", depois dos outros), até
+    // reiniciar. Ex.: uma tradução (MSGS_TXT) junto com um mod que também troca o r_perma.
+    std::unordered_map<uint32_t, std::vector<WadRec>> wads;
+    std::vector<uint8_t> boot_toc = pt->toc;
+    for (const ModFile &mf : pt->files)
+        if (std::find(on.begin(), on.end(), mf.mod) != on.end()) point_entry(boot_toc, mf);
+    for (const std::string &id : on) {
+        FILE *t = fopen((dir + "/" + id + "/records.tsv").c_str(), "r");
+        if (!t) continue;
+        char line[2048];
+        while (fgets(line, sizeof line, t)) {
+            char pn[256], rname[64], src[1024];
+            unsigned idx = 0, tag = 0, occ = 0;
+            if (sscanf(line, "%255[^\t]\t%u\t%u\t%63[^\t]\t%u\t%1023[^\t\r\n]", pn, &idx, &tag, rname, &occ, src) != 6 ||
+                _stricmp(pn, name.c_str()) != 0)
+                continue;
+            auto it = wads.find(idx);
+            if (it == wads.end()) it = wads.emplace(idx, wad_parse(read_entry(boot_toc, pt->extra, pt->orig, ps, idx), gow2)).first;
+            unsigned seen = 0;
+            bool done = false;
+            for (WadRec &r : it->second) {
+                if (r.tag != tag || strncmp(r.name, rname, 24) != 0 || seen++ != occ) continue;
+                if (src[0] == '=') r.size = (uint32_t)strtoul(src + 1, nullptr, 0); // parâmetro: o "tamanho" é o valor
+                else r.body = read_file_bytes(dir + "/" + id + "/" + src);
+                done = true, nrec++;
+                break;
+            }
+            if (!done) logf("vitart: mod %s: registro %s (tag %u) não achado na entrada %u", id.c_str(), rname, tag, idx);
+        }
+        fclose(t);
+    }
+    for (auto &[idx, recs] : wads) {
+        ModFile mf = reserve_file(pt->toc, pt->extra, pt->orig, idx, wad_write(recs));
+        mf.mod = "*";
+        pt->files.push_back(mf);
+    }
+    // Entradas sem nome (MD5 que nenhum caminho dá) apontando para os blocos de cada arquivo reservado e para os do
+    // arquivo original que ele troca: o FIOS só prepara, ao montar, os blocos que alguma entrada usa; assim os dois
+    // lados ficam prontos e ligar/desligar depois (mods_hot_apply) só troca a entrada de verdade.
     if (nfiles) {
+        const TocShape s0 = shape(pt->toc);
+        std::vector<uint8_t> ents;
+        auto slot = [&](const uint8_t *fields) {
+            const size_t at = ents.size();
+            ents.resize(at + s0.ent, 0);
+            snprintf((char *)&ents[at], 16, "vitart-slot%04zu", at / s0.ent);
+            memcpy(&ents[at + 16], fields, 14);
+        };
+        std::vector<uint32_t> seen;
+        for (const ModFile &mf : pt->files) {
+            uint8_t f[14];
+            put_be(f, 4, mf.first), put_be(f + 4, 5, mf.size), put_be(f + 9, 5, mf.off);
+            slot(f);
+            if (std::find(seen.begin(), seen.end(), mf.idx) != seen.end()) continue;
+            seen.push_back(mf.idx);
+            slot(&pt->toc[32 + (size_t)mf.idx * s0.ent + 16]);
+        }
+        pt->toc.insert(pt->toc.begin() + s0.tab_at, ents.begin(), ents.end());
+        put_be(&pt->toc[20], 4, s0.n + ents.size() / s0.ent);
+    }
+    if (nrec || nfiles) {
         if (pt->toc.size() > orig_toc_len) relocate_shadowed(pt->toc, pt->extra, pt->orig, ps, orig_toc_len);
         put_be(&pt->toc[12], 4, pt->toc.size());
     }
     fclose(ps);
-    if (!have && !nfiles) return nullptr;
+    pt->tmpl = pt->toc;
+    pt->toc = build_toc(*pt, on);
+    logf("vitart: mods em %s: %d registros, %zu arquivos instalados (%zu mods ligados)", name.c_str(), nrec, pt->files.size(),
+         on.size());
+    if (!have && !nrec && !nfiles) return nullptr;
     return slot = pt;
+}
+// Liga/desliga os mods de arquivo inteiro com o jogo rodando: a TOC nova (mesmo tamanho) vai para o vitart e para a
+// cópia que o FIOS do jogo guardou. Devolve os nomes (do manifesto) dos arquivos que mudaram.
+std::vector<std::string> mods_hot_apply() {
+    std::vector<std::string> changed;
+    const auto on = enabled_mods();
+    const std::lock_guard<std::mutex> lock(g_patch_mutex);
+    for (auto &[hp, pt] : g_patch_cache) {
+        if (!pt || pt->tmpl.empty()) continue;
+        std::vector<uint8_t> toc = build_toc(*pt, on);
+        if (toc.size() != pt->toc.size()) continue;
+        const TocShape s = shape(toc);
+        for (uint32_t i = 1; i < s.n; i++)
+            if (memcmp(&toc[32 + (size_t)i * s.ent + 16], &pt->toc[32 + (size_t)i * s.ent + 16], 14) != 0 && i - 1 < pt->names.size())
+                changed.push_back(pt->names[i - 1]);
+        const std::vector<uint8_t> old = std::move(pt->toc);
+        pt->toc = toc;
+        // O FIOS ordena as entradas pelo MD5 do nome depois de ler (a 0, o manifesto, fica na frente; os campos
+        // continuam big-endian): cada entrada que mudou é achada pelo MD5 na cópia do jogo e só os 14 bytes de
+        // bloco/tamanho/offset são trocados. O resto (cabeçalho, tabela de blocos) é igual nas duas.
+        if (pt->guest_buf && pt->guest_off <= 32) {
+            uint8_t *g = ptr<uint8_t>(pt->guest_buf) + (32 - pt->guest_off);
+            const size_t room = pt->guest_len - (32 - pt->guest_off);
+            size_t wrote = 0;
+            for (uint32_t i = 1; i < s.n; i++) {
+                const uint8_t *e = &toc[32 + (size_t)i * s.ent];
+                if (memcmp(e + 16, &old[32 + (size_t)i * s.ent + 16], 14) == 0) continue;
+                for (uint32_t k = 1; k < s.n && (size_t)(k + 1) * s.ent <= room; k++)
+                    if (memcmp(g + (size_t)k * s.ent, e, 16) == 0) {
+                        memcpy(g + (size_t)k * s.ent + 16, e + 16, 14);
+                        wrote++;
+                        break;
+                    }
+            }
+            logf("vitart: mods: TOC do jogo (0x%08x): %zu de %zu entradas trocadas", pt->guest_buf, wrote, changed.size());
+        }
+    }
+    return changed;
 }
 
 struct File {
@@ -452,8 +693,44 @@ static int pio(int fd, uint32_t buf, uint32_t n, int64_t off, bool write) {
     return (int)done;
 }
 
+// VITART_PSARCLOG=1 (diagnóstico do carregador de mods): cada leitura do psarc com o instante, o offset, o tamanho, o
+// buffer do jogo e a entrada da TOC que contém o offset, em psarc_reads.txt.
+static void psarc_log(const PsarcPatch &pt, uint32_t buf, uint32_t n, int64_t off) {
+    static FILE *f = getenv("VITART_PSARCLOG") ? fopen("psarc_reads.txt", "w") : nullptr;
+    if (!f || pt.toc.size() < 32) return;
+    static const auto t0 = std::chrono::steady_clock::now();
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const uint32_t ent = (uint32_t)be(&pt.toc[16], 4), cnt = (uint32_t)be(&pt.toc[20], 4), block = (uint32_t)be(&pt.toc[24], 4);
+    const int w = block <= 0x10000 ? 2 : block <= 0x1000000 ? 3 : 4;
+    const size_t tab_at = 32 + (size_t)cnt * ent;
+    int hit = -1;
+    for (uint32_t i = 0; i < cnt && 32 + (size_t)(i + 1) * ent <= pt.toc.size(); i++) {
+        const uint8_t *e = &pt.toc[32 + (size_t)i * ent];
+        const uint64_t o = be(e + 25, 5), sz = be(e + 20, 5), bi = be(e + 16, 4);
+        if ((uint64_t)off < o) continue;
+        uint64_t raw = 0; // tamanho no psarc: a soma dos blocos (0 = bloco cheio)
+        for (uint64_t k = 0; k * block < sz; k++) {
+            const size_t at = tab_at + (size_t)(bi + k) * w;
+            const uint64_t z = at + w <= pt.toc.size() ? be(&pt.toc[at], w) : 0;
+            raw += z ? z : block;
+        }
+        if ((uint64_t)off < o + raw) {
+            hit = (int)i;
+            break;
+        }
+    }
+    fprintf(f, "%9.3f off=%010llx n=%8u buf=%08x %s entrada=%d\n", t, (long long)off, n, buf,
+            off < (int64_t)pt.toc.size() ? "TOC" : off >= (int64_t)pt.orig ? "extra" : "psarc", hit);
+    fflush(f);
+}
+
 // Leitura de um psarc com trocas: TOC remendada, psarc original e arquivos extras no fim.
 static int patched_read(int fd, const PsarcPatch &pt, uint32_t buf, uint32_t n, int64_t off) {
+    psarc_log(pt, buf, n, off);
+    if (off < (int64_t)pt.toc.size() && n > pt.guest_len && off + n <= (int64_t)pt.toc.size()) {
+        auto &w = const_cast<PsarcPatch &>(pt); // a cópia da TOC no jogo: mods_hot_apply a reescreve
+        w.guest_buf = buf, w.guest_off = (uint32_t)off, w.guest_len = n;
+    }
     commit_range(buf, n);
     uint8_t *dst = ptr<uint8_t>(buf);
     const int64_t total = (int64_t)(pt.orig + pt.extra.size());

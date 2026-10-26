@@ -61,10 +61,10 @@ LINES = {
     'cat_cheat': ('VtCatCheats', 'Cheats', '_level0/:VtCatC', '_level0/:VtCatCText', 'submenu', 3),
     'back': ('VtBack', 'Back', '_level0/:VtBackV', '_level0/:VtBackText', 'back', None),
     # carregador de mods (runtime/vitart/hle_io.cpp, docs/modding/README.md): a página Mods ganha uma linha por mod
-    # instalado (moda..modp, criadas em configure a partir de mods/modlist.tsv) e o "Apply & Restart"
+    # instalado (moda..modp, criadas em configure a partir de mods/modlist.tsv) e o "Apply"
     'cat_mods': ('VtCatMods', 'Mods', '_level0/:VtCatM', '_level0/:VtCatMText', 'submenu', 4),
-    'restart': ('VtRestart', 'Apply & Restart', '_level0/:VtRestart', '_level0/:VtRestartText', 'action',
-                {1: 'Press X', 2: 'Restarting'}),
+    'restart': ('VtRestart', 'Apply', '_level0/:VtRestart', '_level0/:VtRestartText', 'action',
+                {1: 'Press X', 2: 'Done'}),
 }
 MODS = []  # nomes dos mods da página Mods (configure)
 PAGE = '_level0/:VtPage'
@@ -94,7 +94,7 @@ GAMES = {
 def configure(game, mods=()):
     """Põe nas variáveis do módulo a configuração do jogo (as funções abaixo as usam). mods: nomes dos mods
     instalados para este jogo, na ordem de mods/modlist.tsv (até 16): página Mods com uma linha liga/desliga
-    por mod e o Apply & Restart."""
+    por mod e o Apply."""
     global GAME, CFG, STATE, ROWS, PATH, ORDER, PAGES, Y, FIRST_NEW, LAST_NEW, KEY, LO, MODS
     GAME = game
     CFG = dict(GAMES[game], new=list(GAMES[game]['new']), pages={k: list(v) for k, v in GAMES[game]['pages'].items()})

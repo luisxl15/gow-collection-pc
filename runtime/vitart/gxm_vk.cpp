@@ -32,6 +32,10 @@
 #include <tuple>
 #include <unordered_map>
 
+namespace vt {
+void logf(const char *fmt, ...); // core.cpp
+}
+
 namespace gvk {
 namespace {
 
@@ -994,6 +998,7 @@ static void trophy_start_next() {
     if (g_trophy_queue.empty()) return;
     g_trophy = g_trophy_queue.front();
     g_trophy_queue.erase(g_trophy_queue.begin());
+    vt::logf("vitart: aviso de troféu na tela (%zu na fila)", g_trophy_queue.size());
     g_trophy_for = 0, g_trophy_on = true;
     g_trophy_t0 = std::chrono::steady_clock::now();
     if (!g_trophy.sound.empty()) PlaySoundA(g_trophy.sound.c_str(), nullptr, SND_ASYNC | SND_FILENAME | SND_NODEFAULT);
@@ -1007,7 +1012,8 @@ void notify_trophy(const TrophyBanner &t) {
 static void overlay_banner(VkImage img, int32_t area_x, int32_t area_y, int32_t area_w, int32_t area_h) {
     if (!g_trophy_on) return;
     const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_trophy_t0).count();
-    constexpr double kSlide = 0.25, kStay = 4.2;
+    constexpr double kSlide = 0.25;
+    const double kStay = g_trophy_queue.empty() ? 4.2 : 2.0; // com fila (o cheat desbloqueia todos) passa mais rápido
     if (t > kSlide * 2 + kStay) {
         g_trophy_on = false;
         trophy_start_next();

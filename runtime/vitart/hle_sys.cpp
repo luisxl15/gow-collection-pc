@@ -853,7 +853,8 @@ VT_HLE(sceNpTrophyUnlockTrophy) {
 }
 
 // Cheat "Unlock All Trophies" (menu de pausa, game_options.cpp): desbloqueia todos os troféus dos conjuntos abertos.
-// O aviso aparece só para a platina (se ainda não tinha), não um por troféu. Devolve quantos foram desbloqueados agora.
+// Cada troféu desbloqueado agora ganha o aviso, um depois do outro (a fila do aviso, gxm_vk.cpp), e a platina por
+// último. Devolve quantos foram desbloqueados agora.
 int trophy_unlock_all() {
     const std::lock_guard<std::mutex> lock(g_trophy_mutex);
     int n = 0;
@@ -861,7 +862,7 @@ int trophy_unlock_all() {
         int plat = -1;
         for (const Trophy &t : ts.list) {
             if (t.type == 'P') plat = t.id;
-            else n += ts.unlocked.insert(t.id).second;
+            else if (ts.unlocked.insert(t.id).second) n++, trophy_announce(ts, t.id);
         }
         if (plat >= 0 && ts.unlocked.insert(plat).second) n++, trophy_announce(ts, plat);
         trophy_save(ts);

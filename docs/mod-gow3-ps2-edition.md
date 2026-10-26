@@ -86,8 +86,8 @@ este com uns 236 KB): a conversão é registro a registro, com o MDL como trabal
 - As versões wad/_VitaTV/ (a que o vitart carrega) são convertidas contra elas mesmas (r_shella, r_perma e os
   r_hero têm conteúdo próprio do PS TV).
 - Carregador de mods: `vitart-data/mods/gow3_kratos/` (patch completo + kbm.tsv + mod.ini), ligado por
-  `mod_gow3_kratos=1` no vitart_options.ini (menu de pausa: Options > Mods > GoW3 Kratos, Apply & Restart:
-  o vitart reinicia sozinho). `hle_io.cpp: mods_dir_for` escolhe a pasta.
+  `mod_gow3_kratos=1` no vitart_options.ini (menu de pausa: Options > Mods > GoW3 Kratos, Apply:
+  o jogo volta ao último checkpoint com o Kratos trocado, sem reiniciar). `hle_io.cpp: mods_dir_for` escolhe a pasta.
 - O mod não troca o rosto 3D do Kratos do menu principal (nem no PS2): no R_SHELLA ele muda só o logo e as imagens
   dos trajes bônus. A cena com armadura do começo é modelo de cutscene, também fora do mod.
 Gerar de novo: `python tools/ps2_xdelta_wads.py <xdelta3> <zip do mod> <ISO> gow-dump/gow3mod_ps2`, extrair os originais

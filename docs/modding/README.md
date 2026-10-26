@@ -10,10 +10,11 @@ por dentro estão em [formatos.md](formatos.md).
 3. [Usar mods](#3-usar-mods)
 4. [Converter um mod do PS2](#4-converter-um-mod-do-ps2)
 5. [Criar um mod de texturas](#5-criar-um-mod-de-texturas)
-6. [Estrutura de um mod](#6-estrutura-de-um-mod)
-7. [Linha de comando](#7-linha-de-comando)
-8. [Como o carregador funciona](#8-como-o-carregador-funciona)
-9. [Problemas comuns](#9-problemas-comuns)
+6. [Criar uma tradução](#6-criar-uma-tradução)
+7. [Estrutura de um mod](#7-estrutura-de-um-mod)
+8. [Linha de comando](#8-linha-de-comando)
+9. [Como o carregador funciona](#9-como-o-carregador-funciona)
+10. [Problemas comuns](#10-problemas-comuns)
 
 ## 1. Visão geral
 
@@ -25,10 +26,13 @@ O vitart nunca altera o psarc. Ele monta as trocas na hora de ler:
 
 - **Patch do vitart** (`vitart-data/mods/<psarc>.vtpatch`): o menu de pausa com as opções do PC, os cheats, os ícones de
   teclado e controle e a página Mods. É gerado pelo próprio kit (Reconstruir).
-- **Mods** (`vitart-data/mods/<id>/`): cada mod troca arquivos inteiros do psarc (WADs, normalmente). Vários mods podem
-  ficar ligados ao mesmo tempo; se dois trocarem o mesmo arquivo, vale o que estiver mais abaixo na lista.
+- **Mods** (`vitart-data/mods/<id>/`): cada mod troca arquivos inteiros do psarc (WADs, normalmente) ou registros dentro
+  de um WAD (uma tradução troca só os textos). Vários mods podem ficar ligados ao mesmo tempo; se dois trocarem o mesmo
+  arquivo, vale o que estiver mais abaixo na lista.
 
-Os mods são aplicados quando o jogo abre: ligar ou desligar pede reiniciar (o menu de pausa faz isso sozinho).
+Mods de arquivo inteiro ligam e desligam **com o jogo rodando** (menu de pausa > Options > Mods > Apply). O que o jogo só
+lê ao abrir (o `r_perma` com o HUD, o menu de pausa e os textos; o `r_shella` com o menu principal) e os mods de
+registros (traduções) valem na próxima vez que o jogo abrir.
 
 **Versão PS TV.** Cada WAD do jogo existe duas vezes: `wad/` (Vita portátil) e `wad/_VitaTV/` (PS TV, com os textos e ícones
 para controle). O vitart roda no modo PS TV, então é o `_VitaTV/` que conta. As ferramentas sempre geram as duas
@@ -48,6 +52,7 @@ Ou o atalho `vitart Mod Studio.cmd` na pasta do vitart. Precisa de Python 3 com 
 | **Mods** | Lista dos mods instalados: ligar/desligar (duplo clique), ordem, abrir a pasta, remover, reconstruir |
 | **Converter mod do PS2** | Patch XDelta de um mod do PS2 + ISO original -> mod do vitart, instalado |
 | **Texturas** | Ver as texturas de qualquer WAD, exportar PNG, trocar por PNG e salvar as trocas como mod |
+| **Textos / Tradução** | Exportar os textos do jogo para traduzir e instalar o `.txt` traduzido como mod |
 | **Configurações** | Pastas do jogo e do vitart-data, xdelta3, 7-Zip |
 | **Ajuda** | Este guia |
 
@@ -62,7 +67,12 @@ Na primeira vez, confira a aba Configurações:
 ## 3. Usar mods
 
 **No jogo:** menu de pausa > **Options > Mods**. Cada mod instalado tem uma linha **On/Off**. Depois de escolher, use
-**Apply & Restart**: o vitart salva, fecha e abre de novo na tela de título (continue do último save).
+**Apply**: a troca vale na hora, sem fechar o jogo.
+
+- Os arquivos de fase, inimigos e efeitos mudam na próxima vez que o jogo os carregar.
+- Se o mod troca o **Kratos** (`r_hero*`), o jogo volta ao **último checkpoint** com o Kratos novo. É o mesmo caminho de
+  "Restart from last checkpoint": o progresso desde o checkpoint se perde.
+- HUD, menus (`r_perma`, `r_shella`) e traduções valem ao abrir o jogo de novo.
 
 **No Mod Studio:** aba Mods, duplo clique para ligar/desligar. Vale na próxima vez que o jogo abrir.
 
@@ -119,11 +129,41 @@ Dicas:
 - Lados em **potência de 2** (64, 128, 256, 512, 1024...). Outros tamanhos são ajustados.
 - Pode aumentar a resolução (uma textura 256x256 pode virar 1024x1024): o modelo usa coordenadas de 0 a 1.
 - A transparência (alfa) do PNG vale. Atenção: partes transparentes num material que grava profundidade podem esconder
-  o que fica atrás (veja [Problemas comuns](#9-problemas-comuns)).
+  o que fica atrás (veja [Problemas comuns](#10-problemas-comuns)).
 - O **pack de texturas HD** do vitart troca as texturas originais pelo conteúdo. Uma textura trocada por um mod tem
   conteúdo novo, então o pack não a substitui e vale a do mod.
 
-## 6. Estrutura de um mod
+## 6. Criar uma tradução
+
+Os textos do jogo (menus, dicas, tutoriais, legendas da interface) ficam no registro `MSGS_TXT` do
+`wad/_VitaTV/r_perma.wad_psp2`. Uma tradução é um mod que troca só esse registro.
+
+1. Aba **Textos / Tradução** > **Exportar os textos originais...**: salva o `MSGS_TXT` em `.txt` (UTF-8).
+2. Traduza o arquivo:
+   - Cada mensagem começa numa linha `*N*` (o número não muda) e pode ter várias linhas.
+   - Mantenha as marcas entre colchetes (`[XButton]`, `[JoystickL]`, `[PS2_CyclopsEye_Count]`...): viram ícones ou
+     números no jogo.
+   - Linhas que começam com `//` são comentários.
+3. Escolha o `.txt` traduzido, dê um nome e **Instalar tradução**. Ligue o mod e abra o jogo de novo.
+
+A **fonte do jogo** tem as letras acentuadas minúsculas (á à â ä ç é ê í ó ô ö ú) e o Í. Ela usa os códigos das outras
+maiúsculas acentuadas (Á Â Ä Ç É Ê Ó Ô Ú) para os **ícones dos botões**, e não tem ã, õ, Ã nem Õ. O kit troca
+sozinho as maiúsculas acentuadas pela letra sem acento e ã/õ por ä/ö. O registro mostra quantas letras trocou.
+
+O jogo dimensiona as tabelas de mensagens por dois parâmetros do WAD, `MSGS_COUNT` e `MSGS_LINES`. O kit conta as
+mensagens e as linhas do texto novo do mesmo jeito que o jogo (`0x81019f7e` no GoW2): pula linhas vazias e `//`,
+e `*N*` abre uma mensagem. Os dois parâmetros só crescem.
+
+Pela linha de comando:
+
+```bash
+python tools/vitart_modkit.py text-mod gow2 traducao_ptbr "Tradução PT-BR" portugues_MSGS_TXT.txt
+```
+
+Um mod de tradução é aplicado por cima da versão do `r_perma` que vale ao abrir o jogo. Ele funciona junto com um mod
+que também troca o `r_perma`, como o GoW3 Kratos.
+
+## 7. Estrutura de um mod
 
 ```
 vitart-data/mods/
@@ -135,6 +175,8 @@ vitart-data/mods/
     files/wad/_VitaTV/r_hero01.wad_psp2
     src/wad/r_perma.wad_psp2             (só se o mod troca r_perma/r_shella; veja abaixo)
     entries.tsv                          gerado pelo Reconstruir
+    records.tsv                          (opcional) troca de registros dentro de um WAD
+    records/MSGS_TXT.txt                 (o corpo de um registro trocado)
 ```
 
 **mod.ini**
@@ -157,12 +199,22 @@ grava o resultado em `files/`.
 **entries.tsv**: o que o vitart lê. Uma linha por arquivo: `<psarc>\t<número da entrada na TOC>\tfiles/<caminho>`.
 Gerado pelo Reconstruir a partir de `files/`.
 
+**records.tsv**: troca registros dentro de um WAD em vez do arquivo inteiro. Uma linha por registro:
+`<psarc>\t<entrada>\t<tag>\t<registro>\t<ocorrência>\t<arquivo>` ou `...\t=<valor>` para parâmetros (tag 0, em que o
+"tamanho" do registro é o valor). Exemplo da tradução:
+
+```
+gow2_psp2_SCEA.psarc	12	8	MSGS_TXT	0	records/MSGS_TXT.txt
+gow2_psp2_SCEA.psarc	12	0	MSGS_COUNT	0	=802
+gow2_psp2_SCEA.psarc	12	0	MSGS_LINES	0	=2009
+```
+
 **Distribuir um mod:** compacte a pasta do mod (sem precisar do entries.tsv). Quem recebe copia para
 `vitart-data/mods/` e clica em Reconstruir. Distribua só o que você fez: o mod contém os WADs inteiros, então inclui
 dados do jogo. Para mods públicos, prefira distribuir as ferramentas e as imagens, ou a fonte do mod (como os mods do
 PS2 fazem com XDelta).
 
-## 7. Linha de comando
+## 8. Linha de comando
 
 ```bash
 python tools/vitart_modkit.py list
@@ -173,6 +225,7 @@ python tools/vitart_modkit.py convert-ps2 gow2 "mod.zip" "God of War II (USA).is
 python tools/vitart_modkit.py textures gow2 wad/_VitaTV/r_hero01.wad_psp2
 python tools/vitart_modkit.py export-tex gow2 wad/_VitaTV/r_hero01.wad_psp2 "~000kratos01_1~pal_krat" kratos.png
 python tools/vitart_modkit.py texture-mod gow2 kratos_azul "Kratos Azul" "wad/r_hero01.wad_psp2=~000kratos01_1~pal_krat=kratos.png"
+python tools/vitart_modkit.py text-mod gow2 traducao_ptbr "Tradução PT-BR" portugues_MSGS_TXT.txt
 ```
 
 Ferramentas de baixo nível (usadas pelo kit):
@@ -186,28 +239,44 @@ Ferramentas de baixo nível (usadas pelo kit):
 | `tools/gow_menu_mod.py` | gera o patch do vitart (menu de pausa, opções, cheats, página Mods, ícones) |
 | `tools/texpack_ps2.py`, `tools/psarc_gxp.py` | ISO/TOC do PS2, psarc do Vita |
 
-## 8. Como o carregador funciona
+## 9. Como o carregador funciona
 
 No runtime (`runtime/vitart/hle_io.cpp`, `psarc_patch`), quando o jogo abre o psarc:
 
 1. Carrega o patch do vitart (`<psarc>.vtpatch`): a TOC remendada e os dados novos que ficam "depois do fim" do psarc.
-2. Para cada mod ligado (`mod_<id>=1` no `vitart_options.ini`), na ordem do `modlist.tsv`, lê o `entries.tsv` e troca cada
-   entrada da TOC: entradas novas no fim da tabela de blocos (blocos sem compressão) e os dados no fim dos extras.
-3. Se a TOC cresceu por cima de dados do psarc (o manifesto vem logo depois dela), esses dados são copiados para os extras.
+2. Reserva os arquivos de **todos os mods instalados**, ligados ou não, na ordem do `modlist.tsv` (`entries.tsv`):
+   blocos novos no fim da tabela de blocos (sem compressão) e os dados no fim dos extras. A TOC aponta só os dos mods
+   ligados (`mod_<id>=1` no `vitart_options.ini`).
+3. Aplica os `records.tsv` dos mods ligados por cima da versão de cada WAD que vale agora (a base ou a de um mod
+   ligado). O WAD montado fica sempre apontado.
+4. Acrescenta entradas sem nome (MD5 que nenhum caminho dá) apontando para cada arquivo reservado e para o original que
+   ele troca. Ao montar o psarc, o FIOS do jogo só prepara os blocos que alguma entrada usa; com essas entradas, os dois
+   lados ficam prontos para a troca a quente.
+5. Se a TOC cresceu por cima de dados do psarc (o manifesto vem logo depois dela), esses dados são copiados para os extras.
 
 O jogo continua lendo o psarc normalmente; o vitart junta TOC remendada, psarc original e extras na leitura.
+
+**Troca a quente** (`mods_hot_apply`). O FIOS lê a TOC uma vez, guarda na memória do jogo e **ordena as entradas pelo
+MD5 do nome** (a do manifesto fica na frente; os campos continuam big-endian). O Apply recalcula a TOC com os mods
+ligados e, para cada entrada que mudou, acha a cópia do jogo pelo MD5 e troca os 14 bytes de bloco, tamanho e
+offset. Se o Kratos mudou, o vitart põe na fila de carregamento do jogo o comando 19, o mesmo de "Restart from last
+checkpoint" (`0x810219c2`). Antes, marca o herói atual (`[0x812eb030]+4`) e o último pedido (`0x812cb9a4`) como -1,
+para o carregamento do checkpoint descarregar e carregar o `R_Hero` de novo (`game_options.cpp: hero_reload_tick`).
+Trocar só o herói (comandos 12/13/25) recria o Kratos sem posição nem câmera. O jogo só faz isso ao carregar um
+checkpoint.
 
 A página **Mods** do menu de pausa é gerada pelo `gow_menu_mod.py --modlist` com uma linha por mod. Para mostrar o estado de
 cada mod, o script do menu faz uma consulta síncrona ao vitart (`fscommand VT_modq_1`): o vitart põe no campo do estado um bit
 por mod ligado, o script lê na hora e devolve (`VT_modq_2`). Ligar um mod manda `VT_moda_2` (a..p = mods 0 a 15), e
-**Apply & Restart** manda `VT_restart_2`, que salva as opções e reabre o vitart (`game_options.cpp: restart_process`).
+**Apply** manda `VT_restart_2`, que salva as opções e faz a troca a quente.
 
-## 9. Problemas comuns
+## 10. Problemas comuns
 
 | Sintoma | Causa e solução |
 |---|---|
 | O mod não aparece no menu de pausa | Faltou **Reconstruir** depois de instalar ou copiar o mod |
-| Ligado mas nada muda | Ligar só vale ao abrir o jogo: use **Apply & Restart** ou reabra |
+| Ligado mas nada muda | Use **Apply** no menu. HUD, menus e traduções só valem ao abrir o jogo de novo |
+| Letra acentuada vira ícone de botão | A fonte do jogo usa as maiúsculas acentuadas para os ícones. Instale a tradução pelo kit, que troca essas letras |
 | "não existe no psarc" no Reconstruir | O caminho em `files/` está errado (é o caminho dentro do psarc, ex.: `wad/_VitaTV/r_hero01.wad_psp2`) |
 | Peças transparentes escondem o que está atrás (ex.: uma saia que some com a perna) | Ordem de desenho: o conversor desenha por último os objetos com textura transparente (`gow2_mod_wad.py: gmdl_record`). Em mods de textura, evite alfa em materiais opacos |
 | A conversão falha com "xdelta3 falhou" | ISO diferente da que o mod pede (região/versão) ou xdelta3 errado |

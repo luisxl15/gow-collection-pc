@@ -6,6 +6,7 @@ Abas:
   Mods            os mods instalados: ligar/desligar, ordem, remover (vai para mods_removidos), reconstruir
   Converter PS2   mod de PS2 em xdelta (ou .zip com o xdelta) + ISO original -> mod do vitart, instalado
   Texturas        texturas dos WADs do jogo: ver, exportar PNG, trocar por PNG e salvar como mod novo
+  Textos          tradução: exporta os textos do jogo (MSGS_TXT) e instala um .txt traduzido como mod
   Configurações   pastas do jogo, do vitart-data, xdelta3 e 7-Zip
   Ajuda           o guia de modding
 As operações demoradas rodam numa thread; o registro mostra a saída das ferramentas.
@@ -70,14 +71,17 @@ class Studio(tk.Tk):
         self.tab_mods = ttk.Frame(nb)
         self.tab_conv = ttk.Frame(nb)
         self.tab_tex = ttk.Frame(nb)
+        self.tab_txt = ttk.Frame(nb)
         self.tab_cfg = ttk.Frame(nb)
         self.tab_help = ttk.Frame(nb)
         for t, label in ((self.tab_mods, 'Mods'), (self.tab_conv, 'Converter mod do PS2'), (self.tab_tex, 'Texturas'),
+                         (self.tab_txt, 'Textos / Tradução'),
                          (self.tab_cfg, 'Configurações'), (self.tab_help, 'Ajuda')):
             nb.add(t, text=label)
         self.build_mods()
         self.build_conv()
         self.build_tex()
+        self.build_txt()
         self.build_cfg()
         self.build_help()
         self.refresh_mods()
@@ -123,7 +127,7 @@ class Studio(tk.Tk):
                            ('Remover', self.remove_mod), ('Reconstruir menu e patches', self.rebuild),
                            ('Atualizar lista', self.refresh_mods)):
             ttk.Button(btns, text=label, command=cmd, width=26).pack(pady=3)
-        ttk.Label(btns, text='Ligar/desligar vale ao abrir o\njogo (ou no menu de pausa:\nOptions > Mods > Apply & Restart).',
+        ttk.Label(btns, text='Ligar/desligar aqui vale ao abrir\no jogo. No menu de pausa\n(Options > Mods > Apply) vale na hora.',
                   foreground='#555').pack(pady=10)
         self.mod_info = tk.Text(f, height=5, wrap='word', state='disabled')
         self.mod_info.pack(fill='x', padx=8)
@@ -251,6 +255,67 @@ class Studio(tk.Tk):
                   lambda ok: (self.conv_bar.stop(), self.refresh_mods(),
                               ok and messagebox.showinfo('Converter', 'Mod "%s" instalado. Ligue na aba Mods ou no menu '
                                                                       'de pausa (Options > Mods).' % c['name'])))
+
+    # -------------------------------------------------------------- aba Textos
+    def build_txt(self):
+        f = self.tab_txt
+        ttk.Label(f, text='Tradução como mod: exporte os textos do jogo (MSGS_TXT, os do modo PS TV que o vitart mostra), '
+                          'traduza o .txt mantendo as linhas *N* e as marcas [XButton] etc., e instale.\n'
+                          'O arquivo é UTF-8. A fonte do jogo não tem maiúsculas acentuadas (Á, É, Ú... viram ícones de '
+                          'botão) nem ã/õ: o kit troca por A, E, U e ä/ö. Vale ao abrir o jogo.',
+                  justify='left').pack(anchor='w', padx=10, pady=8)
+        g = ttk.Frame(f)
+        g.pack(fill='x', padx=10)
+        self.txt = {k: tk.StringVar() for k in ('game', 'file', 'id', 'name', 'author')}
+        self.txt['game'].set('gow2')
+        self.txt['name'].set('Tradução')
+        rows = [('Jogo', 'game'), ('Arquivo .txt traduzido', 'file'), ('Id do mod (pasta)', 'id'),
+                ('Nome (aparece no menu)', 'name'), ('Autor(es)', 'author')]
+        for r, (label, key) in enumerate(rows):
+            ttk.Label(g, text=label).grid(row=r, column=0, sticky='w', pady=3)
+            if key == 'game':
+                ttk.Combobox(g, textvariable=self.txt[key], values=['gow2', 'gow1'], state='readonly', width=10).grid(
+                    row=r, column=1, sticky='w')
+                continue
+            ttk.Entry(g, textvariable=self.txt[key], width=80).grid(row=r, column=1, sticky='we', padx=4)
+            if key == 'file':
+                ttk.Button(g, text='Escolher...', command=lambda: self.pick(self.txt['file'], ('Texto', '*.txt'))).grid(
+                    row=r, column=2, sticky='w')
+        g.columnconfigure(1, weight=1)
+        b = ttk.Frame(f)
+        b.pack(anchor='w', padx=10, pady=6)
+        ttk.Button(b, text='Exportar os textos originais...', command=self.export_txt).pack(side='left')
+        ttk.Button(b, text='Instalar tradução', command=self.install_txt).pack(side='left', padx=6)
+        self.txt_log = Log(f, height=18)
+        self.txt_log.pack(fill='both', expand=True, padx=10, pady=8)
+
+    def export_txt(self):
+        game = self.txt['game'].get()
+        out = filedialog.asksaveasfilename(defaultextension='.txt', initialfile='%s_MSGS_TXT.txt' % game,
+                                           filetypes=[('Texto', '*.txt')])
+        if not out:
+            return
+
+        def go():
+            recs = K.wad_records(K.read_psarc_file(K.psarc_path(self.cfg, game), K.TEXT_WAD), game)
+            body = next(r[3] for r in recs if r[2] == 'MSGS_TXT').split(b'\0')[0]
+            open(out, 'wb').write(body)
+            self.txt_log.write('textos de %s (%s) salvos em %s' % (game, K.TEXT_WAD, out))
+        self.work(self.txt_log, go)
+
+    def install_txt(self):
+        c = {k: v.get().strip() for k, v in self.txt.items()}
+        if not (c['file'] and c['name']):
+            messagebox.showwarning('Textos', 'Escolha o .txt traduzido e dê um nome ao mod.')
+            return
+        mid = c['id'] or K.safe_id(c['name'])
+        self.work(self.txt_log,
+                  lambda: K.make_text_mod(self.cfg, mid, c['name'], c['game'], c['file'], author=c['author'],
+                                          log=self.txt_log.write),
+                  lambda ok: (self.refresh_mods(),
+                              ok and messagebox.showinfo('Textos', 'Mod "%s" instalado. Ligue na aba Mods ou no menu de '
+                                                                   'pausa (Options > Mods) e abra o jogo de novo.'
+                                                         % c['name'])))
 
     # -------------------------------------------------------------- aba Texturas
     def build_tex(self):
