@@ -1,7 +1,4 @@
-// Fachada dos renderizadores (gxm_vk.h): o vitart chama gvk::, que repassa ao Vulkan (gxm_vk.cpp) ou ao
-// Direct3D 11 (gxm_d3d11.cpp). A escolha é feita no init: "auto" usa o Vulkan se o driver existe e inicia, e
-// cai para o Direct3D 11 (que por sua vez cai para o WARP). O vulkan-1.dll é carregado sob demanda
-// (/DELAYLOAD na linkedição), então o vitart abre também em PCs sem Vulkan.
+// aqui é só o porteiro: manda tudo pro Vulkan ou pro DX11 (detalhes em docs/renderizadores.md)
 #include "gxm_vk.h"
 #include "trophy_banner.h"
 
@@ -33,6 +30,7 @@ void select_backend(const char *name) { g_want = name && *name ? name : "auto"; 
 Backend backend() { return g_backend; }
 const char *backend_name() { return g_backend == Backend::d3d11 ? "Direct3D 11" : "Vulkan"; }
 
+// tenta o Vulkan primeiro; se o PC torcer o nariz, vai de DX11 mesmo
 bool init(bool validation, bool window) {
     if (g_want != "d3d11") {
         if (LoadLibraryA("vulkan-1.dll")) {
@@ -49,6 +47,7 @@ bool init(bool validation, bool window) {
     return dx11::init(validation, window);
 }
 
+// daqui pra baixo é tudo repasse, nada de emocionante
 #define TO(f, ...) (g_backend == Backend::d3d11 ? dx11::f(__VA_ARGS__) : vkb::f(__VA_ARGS__))
 
 bool vertex_format_ok(uint32_t fmt, uint32_t comps) { return TO(vertex_format_ok, fmt, comps); }
