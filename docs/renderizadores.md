@@ -34,6 +34,11 @@ máquina sem Vulkan.
 - **Troféus.** Chegam da thread do jogo e são desenhados na thread de vídeo, por isso há uma trava. Aparecem
   um de cada vez: 4,2 s sozinhos, 2 s com fila (o cheat de platina desbloqueia todos de uma vez). A imagem é
   remontada quando a altura da tela muda.
+- **Aviso de troféu (trophy_banner.cpp).** Copia o do PS Vita pelas medidas do Vita3K, numa tela de 960x544:
+  - faixa de 400x60, a 20 px do topo e 12 px da direita, cantos de raio 15;
+  - fundo cinza-claro (0,76; 0,75; 0,76, o GUI_SMOOTH_GRAY), ícone de 48 px com filtragem bilinear e alfa;
+  - "(Bronze) Nome" em cima e "Você conquistou um troféu!" menor embaixo, em cinza-escuro (0,24);
+  - nos cantos arredondados, só o trecho de cada linha dentro da faixa vai para a tela.
 - **FPS.** A escala é (altura + 135) / 270, ou seja, 4 em 1080p. Texto verde sobre fundo quase preto, em BGRA.
 - **Barras de vida.** Moldura de bronze escuro, fundo vermelho-escuro, preenchimento em degradê com brilho
   na 1ª linha, gravadas em RGBA na memória.

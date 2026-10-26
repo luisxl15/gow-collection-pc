@@ -1,7 +1,4 @@
-// Aviso de troféu igual ao do PS Vita (ver trophy_banner.h). Medidas do Vita3K, que reproduz o do console,
-// numa tela de 960x544: faixa de 400x60 a 20 px do topo e 12 px da direita, cantos de raio 15, cinza
-// claro (0,76; 0,75; 0,76), ícone de 48 px; "(Bronze) Nome" em cima e "Você conquistou um troféu!" menor
-// embaixo, em cinza escuro (0,24).
+// aquele plim de troféu do Vita, desenhado na mão
 #include "trophy_banner.h"
 
 #include <algorithm>
@@ -44,11 +41,10 @@ bool render_trophy_banner(const TrophyBanner &t, uint32_t screen_h, BannerImage 
     if (!bmp) return DeleteDC(dc), false;
     HGDIOBJ oldbmp = SelectObject(dc, bmp);
     uint32_t *px = static_cast<uint32_t *>(bits);
-    const uint8_t bgr = 194, bgg = 191, bgb = 194; // GUI_SMOOTH_GRAY do Vita3K
+    const uint8_t bgr = 194, bgg = 191, bgb = 194; // cinzinha do Vita
     const uint32_t bg = (uint32_t)bgb | (uint32_t)bgg << 8 | (uint32_t)bgr << 16;
     std::fill(px, px + (size_t)W * H, bg);
 
-    // ícone do troféu (bilinear, alfa sobre o fundo)
     int iw = 0, ih = 0, ic = 0;
     stbi_uc *img = t.icon_png.empty() ? nullptr
                                       : stbi_load_from_memory(t.icon_png.data(), (int)t.icon_png.size(), &iw, &ih, &ic, 4);
@@ -72,7 +68,7 @@ bool render_trophy_banner(const TrophyBanner &t, uint32_t screen_h, BannerImage 
         stbi_image_free(img);
     }
 
-    // "(Bronze) Nome" e "Você conquistou um troféu!"
+    // o textinho que todo mundo gosta de ver
     const char *tier = t.tier == 'P' ? "Platina" : t.tier == 'G' ? "Ouro" : t.tier == 'S' ? "Prata" : "Bronze";
     const std::wstring line1 = widen(std::string("(") + tier + ") " + t.name);
     const int tx = icon + margin * 2, f1px = (int)(15 * k), f2px = (int)(12 * k);
@@ -92,7 +88,7 @@ bool render_trophy_banner(const TrophyBanner &t, uint32_t screen_h, BannerImage 
     out.w = (uint32_t)W, out.h = (uint32_t)H, out.radius = (uint32_t)r;
     out.px.assign(px, px + (size_t)W * H);
     for (uint32_t &p : out.px) p |= 0xFF000000u;
-    // cantos arredondados: só o trecho de cada linha dentro da faixa é copiado para a tela
+    // arredonda as pontas
     out.row_from.assign(H, 0), out.row_to.assign(H, (uint32_t)W);
     for (int y = 0; y < r && y < H / 2; y++) {
         const double dy = r - y - 0.5;
