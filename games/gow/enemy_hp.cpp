@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 #include <windows.h>
 
 namespace vt {
@@ -34,7 +35,9 @@ float rdf(uint32_t a) {
 
 // Procura a matriz da câmera: rotação ortonormal (+ translação) que põe o Kratos à frente, a uma distância de câmera.
 // Dois arranjos: 3x4 por linhas (t na 4a coluna) e 4x4 por colunas (t em m[12..14]).
+std::vector<uint32_t> g_cams; // matrizes achadas na última varredura
 void scan_camera(FILE *log, uint32_t kratos, const uint32_t *enemies, int ne) {
+    g_cams.clear();
     const float P[3] = {rdf(kratos + 0x80), rdf(kratos + 0x84), rdf(kratos + 0x88)};
     int found = 0;
     for (uint32_t a = 0x81000000u; a < 0x90000000u && found < 400;) {
@@ -77,6 +80,7 @@ void scan_camera(FILE *log, uint32_t kratos, const uint32_t *enemies, int ne) {
                     reps = 0, last[0] = v[0], last[1] = v[1], last[2] = v[2];
                     found++;
                     fprintf(log, "  cam? %08x lay%d kratos_v=(%.0f %.0f %.0f)", q, lay, v[0], v[1], v[2]);
+                    if (g_cams.size() < 12) g_cams.push_back(q);
                     for (int e = 0; e < ne && e < 6; e++) {
                         const float X[3] = {rdf(enemies[e] + 0x80), rdf(enemies[e] + 0x84), rdf(enemies[e] + 0x88)};
                         float w[3];
@@ -160,6 +164,44 @@ void diag_gow2(uint32_t frame) {
     fflush(log);
 }
 
+// GoW1: tabela 0x812a6f48, Kratos [[0x812a6fa4]+4], estado 0x812c2e04 (casados com o GoW2 pelo código). Lista as
+// criaturas, procura a câmera e quem no segmento de dados aponta pra perto dela
+void diag_gow1(uint32_t frame) {
+    static FILE *log = fopen("enemy_log_gow1.txt", "w");
+    if (!log) return;
+    const uint32_t table = rd32(0x812a6f48u), kp = rd32(0x812a6fa4u);
+    const uint32_t kratos = kp && readable(kp + 4, 4) ? rd32(kp + 4) : 0;
+    fprintf(log, "q%u tabela=%08x kratos=%08x estado=%08x\n", frame, table, kratos, rd32(0x812c2e04u));
+    if (kratos && readable(kratos, 0x180))
+        fprintf(log, "  kratos vt=%08x hp=%g/%g pos=(%.0f %.0f %.0f)\n", rd32(kratos), rdf(kratos + 0x170),
+                rdf(kratos + 0x174), rdf(kratos + 0x80), rdf(kratos + 0x84), rdf(kratos + 0x88));
+    uint32_t enemies[64];
+    int ne = 0;
+    if (table && readable(table, 8) && kratos)
+        for (uint32_t k = 0; k < 1024; k++) {
+            const uint32_t e = table + 8 + 12 * k;
+            if (!readable(e, 12)) break;
+            const uint32_t h = rd32(e), obj = rd32(e + 8);
+            if (!obj || (h >> 23) != k || !readable(obj, 0x400) || rd32(obj) != rd32(kratos)) continue;
+            fprintf(log, "  k%-4u obj=%08x hp=%g/%g pos=(%.0f %.0f %.0f)%s\n", k, obj, rdf(obj + 0x170), rdf(obj + 0x174),
+                    rdf(obj + 0x80), rdf(obj + 0x84), rdf(obj + 0x88), obj == kratos ? " KRATOS" : "");
+            if (obj != kratos && ne < 64) enemies[ne++] = obj;
+        }
+    if (kratos && frame % 600 == 0) {
+        scan_camera(log, kratos, enemies, ne);
+        for (uint32_t cam : g_cams)
+            for (uint32_t a = 0x81200000u; a < 0x81800000u; a += 4) { // dados do gow1
+                if ((a & 0xFFFF) == 0 && !readable(a, 0x10000)) {
+                    a += 0xFFFC;
+                    continue;
+                }
+                const uint32_t v = rd32(a);
+                if (v <= cam && cam - v < 0x1000) fprintf(log, "  ref %08x -> %08x (cam %08x, +%x)\n", a, v, cam, cam - v);
+            }
+    }
+    fflush(log);
+}
+
 } // namespace
 
 void enemy_hp_tick(int game) {
@@ -167,6 +209,7 @@ void enemy_hp_tick(int game) {
     static uint32_t frame = 0;
     frame++;
     if (diag && game == 2 && frame % 60 == 0) diag_gow2(frame);
+    if (diag && game == 1 && frame % 60 == 0) diag_gow1(frame);
 }
 
 int game_id();
