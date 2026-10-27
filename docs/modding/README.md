@@ -70,9 +70,8 @@ Na primeira vez, confira a aba Configurações:
 **Apply**: a troca vale na hora, sem fechar o jogo.
 
 - Os arquivos de fase, inimigos e efeitos mudam na próxima vez que o jogo os carregar.
-- Se o mod troca o **Kratos** (`r_hero*`), o jogo volta ao **último checkpoint** com o Kratos novo. É o mesmo caminho de
-  "Restart from last checkpoint": o progresso desde o checkpoint se perde.
-- HUD, menus (`r_perma`, `r_shella`) e traduções valem ao abrir o jogo de novo.
+- Se o mod troca o **Kratos** (`r_hero*`), o HUD ou os menus (`r_perma`, `r_shella`), o jogo **reinicia sozinho** com
+  tudo aplicado de uma vez. Salve antes: o progresso desde o último save se perde.
 
 **No Mod Studio:** aba Mods, duplo clique para ligar/desligar. Vale na próxima vez que o jogo abrir.
 
@@ -259,11 +258,13 @@ O jogo continua lendo o psarc normalmente; o vitart junta TOC remendada, psarc o
 **Troca a quente** (`mods_hot_apply`). O FIOS lê a TOC uma vez, guarda na memória do jogo e **ordena as entradas pelo
 MD5 do nome** (a do manifesto fica na frente; os campos continuam big-endian). O Apply recalcula a TOC com os mods
 ligados e, para cada entrada que mudou, acha a cópia do jogo pelo MD5 e troca os 14 bytes de bloco, tamanho e
-offset. Se o Kratos mudou, o vitart põe na fila de carregamento do jogo o comando 19, o mesmo de "Restart from last
-checkpoint" (`0x810219c2`). Antes, marca o herói atual (`[0x812eb030]+4`) e o último pedido (`0x812cb9a4`) como -1,
-para o carregamento do checkpoint descarregar e carregar o `R_Hero` de novo (`game_options.cpp: hero_reload_tick`).
-Trocar só o herói (comandos 12/13/25) recria o Kratos sem posição nem câmera. O jogo só faz isso ao carregar um
-checkpoint.
+offset. Se o Kratos, o HUD ou os menus mudaram, o vitart relança o próprio processo com a mesma linha de comando
+(`games/gow/game_options.cpp: restart_process`).
+
+Já foram testados dois caminhos sem reiniciar, e os dois foram abandonados:
+- **Só os comandos de herói (12/13/25).** Recriam o Kratos sem posição nem câmera.
+- **Comando 19 ("Restart from last checkpoint", `0x810219c2`)**, com o herói atual (`[0x812eb030]+4`) e o último
+  pedido (`0x812cb9a4`) marcados como -1. Recarrega o `R_Hero`, mas volta ao checkpoint, às vezes o começo da fase.
 
 A página **Mods** do menu de pausa é gerada pelo `gow_menu_mod.py --modlist` com uma linha por mod. Para mostrar o estado de
 cada mod, o script do menu faz uma consulta síncrona ao vitart (`fscommand VT_modq_1`): o vitart põe no campo do estado um bit

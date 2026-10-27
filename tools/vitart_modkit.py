@@ -19,8 +19,8 @@ Um mod é uma pasta em <vitart-data>/mods/<id>/:
     records.tsv    troca de registros dentro de um WAD (ex.: os textos MSGS_TXT de uma tradução):
                    "<psarc>\\t<entrada>\\t<tag>\\t<registro>\\t<ocorrência>\\t<arquivo ou =valor>"
 <vitart-data>/mods/modlist.tsv dá a ordem (e o índice na página Mods do menu de pausa); ligar = mod_<id>=1 no
-vitart_options.ini. No jogo, Options > Mods > Apply liga/desliga na hora os mods de arquivo inteiro (com o herói, o
-jogo volta ao último checkpoint); registros (records.tsv) e o r_perma/r_shella valem ao abrir o jogo de novo.
+vitart_options.ini. No jogo, Options > Mods > Apply liga/desliga na hora os mods de arquivo inteiro; se o herói, o
+HUD ou os menus mudaram, o jogo reinicia sozinho com tudo aplicado.
 """
 import configparser
 import io

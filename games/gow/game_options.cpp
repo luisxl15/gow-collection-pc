@@ -302,25 +302,20 @@ const bool g_watch = (watch_import(on_import), true);
 // O carregamento do checkpoint (0x8107c0e2) só troca o herói se o salvo for diferente do atual ([0x812eb030]+4), e a
 // troca (0x810221e8) só se ele for diferente do último pedido (0x812cb9a4): com os dois em -1 ele descarrega o
 // herói e carrega o R_Hero do checkpoint de novo, agora do mod. Só com a partida rodando e a fila parada.
-bool g_hero_reload = false;
-void hero_reload_tick() {
-    if (!g_hero_reload || game_id() != 2) return;
-    if (rd32(0x812ec498u) != 0xcu || rd32(0x812eafc8u) != 0 || rd32(0x812eafb4u) != 0) return;
-    const uint32_t st = rd32(0x812eb030u);
-    if (!st) return;
-    const uint32_t hero = rd32(st + 4);
-    wr32(st + 4, 0xffffffffu);
-    wr32(0x812cb9a4u, 0xffffffffu);
-    int32_t i = (int32_t)rd32(0x812eafbcu);
-    if (i < 0 || i >= 0x20) i = 0;
-    const uint32_t e = 0x812eabb4u + (uint32_t)i * 32;
-    std::memset(ptr<uint8_t>(e), 0, 32);
-    const uint16_t cmd = 19;
-    std::memcpy(ptr<uint8_t>(e), &cmd, 2);
-    wr32(0x812eafbcu, i + 1 >= 0x20 ? 0 : (uint32_t)(i + 1));
-    wr32(0x812eafb4u, rd32(0x812eafb4u) + 1);
-    g_hero_reload = false;
-    logf("vitart: mods: voltando ao último checkpoint para recarregar o herói (R_Hero%02u)", hero);
+// abre o jogo de novo com a mesma linha de comando: herói, HUD e menus só são lidos na abertura
+void restart_process() {
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring cmd = GetCommandLineW();
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    logf("vitart: reiniciando para aplicar os mods");
+    if (CreateProcessW(exe, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(pi.hThread), CloseHandle(pi.hProcess);
+        ExitProcess(0);
+    }
+    logf("vitart: não deu para reiniciar (CreateProcess %lu)", GetLastError());
 }
 
 } // namespace
@@ -557,19 +552,15 @@ void game_options_tick() {
         }
     if (g_req_restart.exchange(0) == 2) {
         save();
-        // "Apply" (menu Mods): a TOC do psarc muda na hora; o que o jogo carrega depois já vem do mod novo. O WAD do
-        // herói é recarregado quando a partida voltar (hero_reload_tick); o r_perma/r_shella (HUD, menus, textos) só
-        // são lidos ao abrir o jogo.
+        // Apply: texturas e o resto trocam na hora; herói, HUD e menus pedem o jogo aberto de novo
         bool hero = false, boot = false;
         for (const std::string &n : mods_hot_apply()) {
             if (n.find("r_hero") != std::string::npos) hero = true;
             if (n.find("r_perma") != std::string::npos || n.find("r_shella") != std::string::npos) boot = true;
         }
-        if (hero) g_hero_reload = true;
-        logf("vitart: mods aplicados%s%s", hero ? "; o jogo volta ao último checkpoint com o herói novo" : "",
-             boot ? "; HUD/menus do mod valem ao abrir o jogo de novo" : "");
+        logf("vitart: mods aplicados%s", hero || boot ? "; herói/HUD/menus mudaram, reiniciando" : "");
+        if (hero || boot) restart_process();
     }
-    hero_reload_tick();
     cheats_tick(game_id());
     enemy_hp_tick(game_id());
     if (changed) save();
