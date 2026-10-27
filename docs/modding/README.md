@@ -111,8 +111,6 @@ Limitações:
 - Se o mod mudar arquivos que o Vita também mudou (o `r_perma` e o `r_shella` têm registros só do Vita), entra só o que
   o mod alterou em relação ao PS2 original.
 
-Exemplo: o **GoW3 Kratos (PS2 Edition)** (Nexus Mods, godofwar2/mods/11) foi convertido assim:
-[mod-gow3-ps2-edition.md](../mod-gow3-ps2-edition.md).
 
 ## 5. Criar um mod de texturas
 
@@ -160,7 +158,7 @@ python tools/vitart_modkit.py text-mod gow2 traducao_ptbr "Tradução PT-BR" por
 ```
 
 Um mod de tradução é aplicado por cima da versão do `r_perma` que vale ao abrir o jogo. Ele funciona junto com um mod
-que também troca o `r_perma`, como o GoW3 Kratos.
+que também troca o `r_perma`, como um mod de personagem.
 
 ## 7. Estrutura de um mod
 

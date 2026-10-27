@@ -44,7 +44,7 @@ o mesmo nome (o modelo lista os materiais assim). O primeiro u32 do corpo diz o 
 
 ### O WAD do Vita é o do PS2 com três diferenças
 
-Medido no GoW2: dos 40 WADs que o mod GoW3 muda, 36 são reproduzidos byte a byte a partir do PS2 original por
+Medido no GoW2: dos 40 WADs que um mod de personagem testado muda, 36 são reproduzidos byte a byte a partir do PS2 original por
 `tools/gow2_mod_wad.py` (os outros dois têm registros a mais só do Vita):
 
 1. `GFX_*` e `PAL_*` viram tocos: só os 32 primeiros bytes do corpo (o cabeçalho e 8 bytes de pixels/cores), tamanho 32.
@@ -110,7 +110,7 @@ desenhado depois. O conversor mede isso por objeto e reordena.
 ## ISO do PS2 (GoW2)
 
 `GODOFWAR.TOC`: u32 n, n entradas {nome[24], tamanho, cópias, índice} e uma tabela de setores; setor < 10.000.000 =
-`PART1.PAK`, senão `PART2.PAK` (na segunda camada do DVD). Uma ISO de camada única (como a do mod GoW3) tem o PART2.PAK
+`PART1.PAK`, senão `PART2.PAK` (na segunda camada do DVD). Uma ISO de camada única (como a de alguns mods) tem o PART2.PAK
 no mesmo volume. Leitura: `tools/texpack_ps2.py: toc_any`, `tools/ps2_xdelta_wads.py: toc_new`.
 
 ## Menu de pausa (FLP) e opções

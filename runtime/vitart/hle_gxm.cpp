@@ -706,6 +706,13 @@ static const PbrProgInfo &pbr_prog(uint32_t prog) {
         const uint32_t cat = *ptr<uint8_t>(p + 4) & 15, cont = *ptr<uint8_t>(p + 5) >> 4;
         const int res = (int)rd32(p + 12);
         if (cat == 2 && !std::strcmp(name, "sTextureSampler")) info.diffuse = res;
+        if (cat == 1 && cont != 14 && !std::strcmp(name, "g_Transforms")) {
+            // fora do contêiner 14: o buffer do contêiner começa no byte ldst_val do bloco (tabela em +0x78/+0x7C)
+            const uint32_t nb = rd32(prog + 0x78), tb = prog + 0x7C + rd32(prog + 0x7C);
+            for (uint32_t b = 0; b < nb && b < 16; b++)
+                if ((rd32(tb + 8 * b) & 0xFFFF) == cont) info.vi.transforms = (int)(rd32(tb + 8 * b + 4) / 4) + res;
+            continue;
+        }
         if (cat != 1 || cont != 14) continue;
         if (!std::strcmp(name, "g_Projection")) info.vi.proj = res;
         else if (!std::strcmp(name, "g_ViewProjection")) info.vi.view_proj = res;
@@ -1012,7 +1019,8 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
         d.textures.push_back(t);
     }
     if (c.vuniform) { // a última projeção de perspectiva, pro jogo projetar coisas na tela (last_projection)
-        if (const int ti = pbr_prog(vp->program).vi.transforms; ti >= 0 && (uint32_t)ti + 16 <= vsize / 4) {
+        static const bool tf_diag = getenv("VITART_ENEMYLOG") != nullptr; // só no diagnóstico: custa por desenho
+        if (const int ti = pbr_prog(vp->program).vi.transforms; tf_diag && ti >= 0 && (uint32_t)ti + 16 <= vsize / 4) {
             // g_Transforms[0] de cada desenho, contados por quadro (o mais repetido tende a ser a vista)
             std::lock_guard<std::mutex> lk(g_proj_lock);
             const uint32_t fr = g_present_frame.load();

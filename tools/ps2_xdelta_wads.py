@@ -6,7 +6,7 @@ GODOFWAR.TOC que o patch muda (WADs do Kratos, armas, efeitos...).
 O patch pode estar dentro de um .zip (lido em fluxo, sem extrair). Duas passadas pelo xdelta3 (-d, saída no stdout):
   1. guarda os primeiros 64 MB de cada camada do DVD (descritores ISO9660, diretórios e o GODOFWAR.TOC);
   2. com o TOC novo, recolhe cada arquivo, compara com o da ISO original pelo nome e grava os diferentes.
-Espaço em disco: só os arquivos mudados. Ver docs/mod-gow3-ps2-edition.md.
+Espaço em disco: só os arquivos mudados. Ver docs/modding/README.md.
 """
 import hashlib
 import os
