@@ -653,12 +653,15 @@ void draw_enemy_bars(uint32_t color_addr, const EnemyBar *bars, uint32_t n) {
     if (!g_dev || !n || it == g_targets.end()) return;
     Tex &im = it->second.color;
     std::vector<uint32_t> px;
+    std::vector<Span> spans;
     for (uint32_t i = 0; i < n; i++) {
         uint32_t bw, bh;
         int32_t x0, y0;
-        if (!ovl::enemy_bar(im.w, im.h, bars[i], px, bw, bh, x0, y0)) continue;
-        const D3D11_BOX box{(UINT)x0, (UINT)y0, 0, (UINT)x0 + bw, (UINT)y0 + bh, 1};
-        g_ctx->UpdateSubresource(im.tex.Get(), 0, &box, px.data(), bw * 4, 0);
+        if (!ovl::enemy_bar(im.w, im.h, bars[i], px, bw, bh, x0, y0, spans)) continue;
+        for (const Span &s : spans) { // só os pedaços opacos
+            const D3D11_BOX box{(UINT)x0 + s.x, (UINT)y0 + s.y, 0, (UINT)x0 + s.x + s.w, (UINT)y0 + s.y + 1, 1};
+            g_ctx->UpdateSubresource(im.tex.Get(), 0, &box, px.data() + (size_t)s.y * bw + s.x, bw * 4, 0);
+        }
     }
     it->second.cver++;
 }

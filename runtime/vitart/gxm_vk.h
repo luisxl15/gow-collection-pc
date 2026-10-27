@@ -94,6 +94,11 @@ struct Draw {
 // Barras de vida dos inimigos: centro (x) e base (y) em 0..1 da imagem do jogo, fração da vida.
 struct EnemyBar {
     float x, y, frac;
+    int num = -1; // número ao lado da barra (-1 = sem)
+};
+// trecho opaco de uma linha do desenho (o resto é transparente e não é copiado)
+struct Span {
+    uint32_t x, y, w;
 };
 struct TrophyBanner; // trophy_banner.h
 

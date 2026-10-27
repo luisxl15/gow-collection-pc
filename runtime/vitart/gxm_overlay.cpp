@@ -119,29 +119,89 @@ bool fps_frame(uint32_t screen_h, std::vector<uint32_t> &px, uint32_t &w, uint32
     return true;
 }
 
-// barrinha de vida dos bichos, igual a do GoW3
+// barra de vida dos bichos: número, < filete dourado >, no jeito dos GoW novos
 bool enemy_bar(uint32_t im_w, uint32_t im_h, const EnemyBar &bar, std::vector<uint32_t> &px, uint32_t &bw, uint32_t &bh,
-               int32_t &x0, int32_t &y0) {
-    bh = std::max(6u, (uint32_t)(im_h * 0.016f + 0.5f)), bw = std::max(36u, (uint32_t)(im_h * 0.11f + 0.5f));
-    const uint32_t edge = std::max(1u, bh / 4);
+               int32_t &x0, int32_t &y0, std::vector<Span> &spans) {
+    const uint32_t th = std::max(3u, (uint32_t)(im_h * 0.0062f + 0.5f));  // espessura do filete
+    const uint32_t len = th * 22;                                         // comprimento do filete
+    const uint32_t ch = th * 3 | 1, cw = ch / 2 + 1;                      // seta: altura ímpar, meia largura
+    const uint32_t st = std::max(1u, th * 2 / 3);                         // traço da seta
+    const uint32_t k = std::max(1u, (ch + 3) / 7);                        // escala do número 5x7
+    const uint32_t gap = th;
+    char num[8] = {};
+    if (bar.num >= 0) std::snprintf(num, sizeof num, "%d", bar.num > 9999 ? 9999 : bar.num);
+    const uint32_t nd = (uint32_t)std::strlen(num);
+    const uint32_t numw = nd ? nd * 6 * k - k : 0;
+    const uint32_t pad = 1; // contorno escuro
+    bw = pad * 2 + (nd ? numw + gap : 0) + cw + gap + len + gap + cw;
+    bh = pad * 2 + std::max(ch, 7 * k);
     x0 = (int32_t)(bar.x * im_w) - (int32_t)bw / 2, y0 = (int32_t)(bar.y * im_h) - (int32_t)bh;
     if (x0 < 0 || y0 < 0 || x0 + (int32_t)bw > (int32_t)im_w || y0 + (int32_t)bh > (int32_t)im_h) return false;
+    px.assign((size_t)bw * bh, 0);
+    auto put = [&](uint32_t x, uint32_t y, uint32_t r, uint32_t g, uint32_t b) {
+        if (x < bw && y < bh) px[(size_t)y * bw + x] = 0xFF000000u | b << 16 | g << 8 | r; // RGBA na memória
+    };
+    const uint32_t mid = bh / 2;
+    uint32_t x = pad;
+    // número
+    for (uint32_t n = 0; n < nd; n++) {
+        const uint8_t *gl = glyph5x7(num[n]);
+        const uint32_t top = mid - 7 * k / 2;
+        for (uint32_t r = 0; r < 7; r++)
+            for (uint32_t c = 0; c < 5; c++)
+                if (gl[r] & (16 >> c))
+                    for (uint32_t yy = 0; yy < k; yy++)
+                        for (uint32_t xx = 0; xx < k; xx++) put(x + n * 6 * k + c * k + xx, top + r * k + yy, 238, 234, 222);
+    }
+    if (nd) x += numw + gap;
+    // setas: < na esquerda, > na direita
+    auto chevron = [&](uint32_t left, bool open_right) {
+        const uint32_t top = mid - ch / 2, half = ch / 2;
+        for (uint32_t r = 0; r < ch; r++) {
+            const uint32_t dy = r > half ? r - half : half - r;
+            const uint32_t off = dy * (cw - st) / std::max(1u, half);
+            for (uint32_t t = 0; t < st; t++) put(open_right ? left + off + t : left + cw - 1 - off - t, top + r, 236, 232, 220);
+        }
+    };
+    chevron(x, true);
+    x += cw + gap;
+    // filete: ouro claro em cima, mais escuro embaixo; a parte perdida fica escura
     const float frac = bar.frac < 0.f ? 0.f : bar.frac > 1.f ? 1.f : bar.frac;
-    const uint32_t fill = edge + (uint32_t)((bw - 2 * edge) * frac + 0.5f);
-    px.resize((size_t)bw * bh);
+    const uint32_t fill = (uint32_t)(len * frac + 0.5f), top = mid - th / 2;
+    for (uint32_t r = 0; r < th; r++) {
+        const float t = th > 1 ? (float)r / (float)(th - 1) : 0.f;
+        for (uint32_t c = 0; c < len; c++) {
+            if (c < fill) put(x + c, top + r, (uint32_t)(246 - 70 * t), (uint32_t)(226 - 86 * t), (uint32_t)(160 - 100 * t));
+            else put(x + c, top + r, 46, 38, 28);
+        }
+    }
+    x += len + gap;
+    chevron(x, false);
+    // contorno de 1 px em volta do que foi desenhado, pra ler em cima de qualquer fundo
+    std::vector<uint32_t> out = px;
     for (uint32_t y = 0; y < bh; y++)
-        for (uint32_t x = 0; x < bw; x++) {
-            uint32_t r, g, b;
-            if (x < edge || y < edge || x >= bw - edge || y >= bh - edge) {
-                r = 26, g = 16, b = 10;
-            } else if (x < fill) {
-                const float t = (float)(y - edge) / (float)std::max(1u, bh - 2 * edge - 1); // 0 em cima, 1 embaixo
-                r = (uint32_t)(235 - 110 * t), g = (uint32_t)(40 - 25 * t), b = (uint32_t)(28 - 18 * t);
-                if (y == edge) r = 255, g = 120, b = 90; // um brilhinho
-            } else {
-                r = 58, g = 10, b = 8; // parte que já apanhou
+        for (uint32_t xx = 0; xx < bw; xx++) {
+            if (px[(size_t)y * bw + xx]) continue;
+            bool touch = false;
+            for (int dy = -1; dy <= 1 && !touch; dy++)
+                for (int dx = -1; dx <= 1 && !touch; dx++) {
+                    const int yy = (int)y + dy, xq = (int)xx + dx;
+                    touch = yy >= 0 && xq >= 0 && yy < (int)bh && xq < (int)bw && px[(size_t)yy * bw + xq];
+                }
+            if (touch) out[(size_t)y * bw + xx] = 0xFF060a10u;
+        }
+    px.swap(out);
+    spans.clear();
+    for (uint32_t y = 0; y < bh; y++)
+        for (uint32_t xx = 0; xx < bw;) {
+            if (!px[(size_t)y * bw + xx]) {
+                xx++;
+                continue;
             }
-            px[y * bw + x] = 0xFF000000u | b << 16 | g << 8 | r; // RGBA na memória
+            uint32_t e = xx;
+            while (e < bw && px[(size_t)y * bw + e]) e++;
+            spans.push_back({xx, y, e - xx});
+            xx = e;
         }
     return true;
 }

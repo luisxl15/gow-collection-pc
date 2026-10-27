@@ -25,6 +25,6 @@ bool fps_frame(uint32_t screen_h, std::vector<uint32_t> &px, uint32_t &w, uint32
 
 // Barra de vida de um inimigo num alvo de im_w x im_h (RGBA na memória); false se cai fora da imagem.
 bool enemy_bar(uint32_t im_w, uint32_t im_h, const EnemyBar &bar, std::vector<uint32_t> &px, uint32_t &bw, uint32_t &bh,
-               int32_t &x0, int32_t &y0);
+               int32_t &x0, int32_t &y0, std::vector<Span> &spans);
 
 } // namespace gvk::ovl

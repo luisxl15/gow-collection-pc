@@ -219,7 +219,7 @@ void enemy_hp_draw(uint32_t fb) {
         const float cy = M[1] * X + M[5] * Y + M[9] * Z + M[13];
         const float cw = M[3] * X + M[7] * Y + M[11] * Z + M[15];
         if (!(cw > 1.f && cw < 4000.f)) continue;
-        bars[n++] = {0.5f + 0.5f * cx / cw, 0.5f + 0.5f * cy / cw, hp / mx};
+        bars[n++] = {0.5f + 0.5f * cx / cw, 0.5f + 0.5f * cy / cw, hp / mx, (int)std::ceil(hp)};
     }
     if (n) gvk::draw_enemy_bars(fb, bars, n);
 }

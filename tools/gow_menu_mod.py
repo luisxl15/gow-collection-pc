@@ -30,10 +30,10 @@ import psarc_gxp as P  # noqa: E402
 
 # Estado de todas as opções num número só, na variável PS2_Cheat (campo +0x2bc do objeto de opções,
 # sem tratador no jogo): textura | áudio << 2 | resolução << 4 | fps << 7 | vsync << 9 | QTE automático << 10 |
-# contador << 11 | modo << 12 | cheats: vida << 13, magia << 14, fúria << 15 | FPS medidos << 17. As alternâncias têm um
+# contador << 11 | modo << 12 | cheats: vida << 13, magia << 14, fúria << 15 | barras de vida << 16 | FPS medidos << 17. As alternâncias têm um
 # bit (0/1) e o menu as lê como 1/2.
 # Ver runtime/vitart/game_options.cpp.
-FIELDS = [('_level0/:VtRage', 32768, 1), ('_level0/:VtMp', 16384, 1), ('_level0/:VtHp', 8192, 1), ('_level0/:VtDsp', 4096, 1), ('_level0/:VtCnt', 2048, 1), ('_level0/:VtQte', 1024, 1),
+FIELDS = [('_level0/:VtEhp', 65536, 1), ('_level0/:VtRage', 32768, 1), ('_level0/:VtMp', 16384, 1), ('_level0/:VtHp', 8192, 1), ('_level0/:VtDsp', 4096, 1), ('_level0/:VtCnt', 2048, 1), ('_level0/:VtQte', 1024, 1),
           ('_level0/:VtVsync', 512, 1), ('_level0/:VtFps', 128, 3), ('_level0/:VtRes', 16, 7),
           ('_level0/:VtAud', 4, 3), ('_level0/:VtTex', 1, 3)]
 RES_TEXT = {1: '1x  (960x544)', 2: '2x  (1920x1088)', 3: '3x  (2880x1632)', 4: '4x  (3840x2176)'}
@@ -48,6 +48,8 @@ LINES = {
     'cnt': ('VtFpsCounter', 'FPS Counter', '_level0/:VtCnt', '_level0/:VtCntText', 'toggle', {1: 'Off', 2: 'On'}),
     'dsp': ('VtDisplayMode', 'Display Mode', '_level0/:VtDsp', '_level0/:VtDspText', 'toggle', {1: 'Windowed', 2: 'Borderless'}),
     'qte': ('VtAutoQte', 'Auto QTE', '_level0/:VtQte', '_level0/:VtQteText', 'toggle', {1: 'Off', 2: 'On'}),
+    # barras de vida dos inimigos (games/gow/enemy_hp.cpp); só o GoW2 tem
+    'ehp': ('VtEnemyHp', 'Enemy Health', '_level0/:VtEhp', '_level0/:VtEhpText', 'toggle', {1: 'Off', 2: 'On'}),
     # cheats (runtime/vitart/game_options.cpp, cheats_tick) e o desbloqueio de todos os troféus (ação: X uma vez)
     'hp': ('VtInfHealth', 'Infinite Health', '_level0/:VtHp', '_level0/:VtHpText', 'toggle', {1: 'Off', 2: 'On'}),
     'mp': ('VtInfMagic', 'Infinite Magic', '_level0/:VtMp', '_level0/:VtMpText', 'toggle', {1: 'Off', 2: 'On'}),
@@ -82,8 +84,8 @@ GAMES = {
         state='PS2_OverUnder', wad=(1, b'FLP_HUDA'), shell=(1, b'FLP_ShellA'), nobody=(0, 24),  # tag 0: parâmetro (o tamanho é o valor)
         new=[(7, 'res'), (8, 'fps'), (9, 'vsync'), (10, 'cnt'), (11, 'dsp'), (12, 'qte'), (13, 'tex'), (14, 'aud'),
              (15, 'hp'), (16, 'mp'), (17, 'rage'), (18, 'trophy'), (19, 'cat_gfx'), (20, 'cat_game'), (21, 'cat_cheat'),
-             (22, 'back')],
-        pages={0: [1, 2, 3, 4, 5, 19, 20, 21, 6], 1: [13, 7, 8, 9, 10, 11, 22], 2: [14, 12, 22], 3: [15, 16, 17, 18, 22]},
+             (22, 'back'), (23, 'ehp')],
+        pages={0: [1, 2, 3, 4, 5, 19, 20, 21, 6], 1: [13, 7, 8, 9, 10, 11, 22], 2: [14, 12, 23, 22], 3: [15, 16, 17, 18, 22]},
         old={1: ('MessageTips', 'A'), 2: ('MusicVolume', 'A'), 3: ('SFXVolume', 'A'), 4: ('Controller', 'B'),
              5: ('FlightControls', 'A'), 6: ('Return', 'B')},
         y=(-165.0, 207.5), row_k=1.0, frames=(9, 10, 11), kx=19, x_state='4',
@@ -271,7 +273,7 @@ def show_script(f):
         a.label('f' + name)
     # alternâncias: um bit (0/1) na palavra -> 1/2 como o menu usa
     for q in ('_level0/:VtQte', '_level0/:VtVsync', '_level0/:VtCnt', '_level0/:VtDsp', '_level0/:VtHp', '_level0/:VtMp',
-              '_level0/:VtRage'):
+              '_level0/:VtRage', '_level0/:VtEhp'):
         a.getv(q).push(1).eq().not_().jumpif('q0' + q)
         a.setv(q, 2).jump('q1' + q)
         a.label('q0' + q)

@@ -79,6 +79,7 @@ struct Options {
 };
 Options g_opt;
 // Pedidos vindos do menu (thread do jogo), aplicados no próximo quadro: 0 = nenhum.
+std::atomic<uint32_t> g_req_ehp{0};
 std::atomic<uint32_t> g_req_tex{0}, g_req_aud{0}, g_req_res{0}, g_req_fps{0}, g_req_cnt{0}, g_req_dsp{0}, g_req_vsync{0}, g_req_qte{0},
     g_req_hp{0}, g_req_mp{0}, g_req_rage{0}, g_req_trophy{0}, g_req_restart{0};
 // Carregador de mods (hle_io.cpp, docs/modding/README.md): mod_<id>=0/1 no ini (vale ao reiniciar). O menu lista os mods
@@ -184,7 +185,7 @@ uint32_t encode() {
     fps = fps > 127 ? 127 : fps; // a palavra passa por float no menu: até 2^24
     return tex | aud << 2 | cur_scale() << 4 | g_opt.fps << 7 | (g_opt.vsync ? 1u : 0u) << 9 |
            (g_opt.auto_qte ? 1u : 0u) << 10 | (g_opt.counter ? 1u : 0u) << 11 | (g_opt.borderless ? 1u : 0u) << 12 |
-           (g_opt.inf_health ? 1u : 0u) << 13 | (g_opt.inf_magic ? 1u : 0u) << 14 | (g_opt.inf_rage ? 1u : 0u) << 15 | fps << 17;
+           (g_opt.inf_health ? 1u : 0u) << 13 | (g_opt.inf_magic ? 1u : 0u) << 14 | (g_opt.inf_rage ? 1u : 0u) << 15 | (g_opt.hp_bars ? 1u : 0u) << 16 | fps << 17;
 }
 
 bool is_gow1();
@@ -230,6 +231,7 @@ void on_import(arc_ctx *ctx, uint32_t stub) {
     if (!std::strcmp(key, "dsp")) g_req_dsp = v;
     if (!std::strcmp(key, "vsync")) g_req_vsync = v;
     if (!std::strcmp(key, "qte")) g_req_qte = v;
+    if (!std::strcmp(key, "ehp")) g_req_ehp = v;
     if (!std::strcmp(key, "hp")) g_req_hp = v;
     if (!std::strcmp(key, "mp")) g_req_mp = v;
     if (!std::strcmp(key, "rage")) g_req_rage = v;
@@ -513,6 +515,10 @@ void game_options_tick() {
     if (const uint32_t v = g_req_qte.exchange(0); (v == 1 || v == 2) && (v == 2) != g_opt.auto_qte) {
         g_opt.auto_qte = v == 2, changed = true;
         logf("vitart: QTE automático %s", g_opt.auto_qte ? "ligado" : "desligado");
+    }
+    if (const uint32_t v = g_req_ehp.exchange(0); (v == 1 || v == 2) && (v == 2) != g_opt.hp_bars) {
+        g_opt.hp_bars = v == 2, changed = true;
+        logf("vitart: barras de vida dos inimigos %s", g_opt.hp_bars ? "ligadas" : "desligadas");
     }
     if (const uint32_t v = g_req_cnt.exchange(0); (v == 1 || v == 2) && (v == 2) != g_opt.counter) {
         g_opt.counter = v == 2, changed = true;

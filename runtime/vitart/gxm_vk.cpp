@@ -983,17 +983,22 @@ void draw_enemy_bars(uint32_t color_addr, const EnemyBar *bars, uint32_t n) {
     if (!frame_reserve(n * ((VkDeviceSize)im.h * im.h / 64 * 4 + 64 * 1024))) return;
     end_pass();
     std::vector<uint32_t> px;
+    std::vector<Span> spans;
     std::vector<VkBufferImageCopy> regs;
     for (uint32_t i = 0; i < n; i++) {
         uint32_t bw, bh;
         int32_t x0, y0;
-        if (!ovl::enemy_bar(im.w, im.h, bars[i], px, bw, bh, x0, y0)) continue;
-        VkBufferImageCopy c{};
-        c.bufferOffset = ring_put(px.data(), (VkDeviceSize)bw * bh * 4, 16);
-        c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        c.imageOffset = {x0, y0, 0};
-        c.imageExtent = {bw, bh, 1};
-        regs.push_back(c);
+        if (!ovl::enemy_bar(im.w, im.h, bars[i], px, bw, bh, x0, y0, spans)) continue;
+        const VkDeviceSize base = ring_put(px.data(), (VkDeviceSize)bw * bh * 4, 16);
+        for (const Span &s : spans) { // só os pedaços opacos
+            VkBufferImageCopy c{};
+            c.bufferOffset = base + ((VkDeviceSize)s.y * bw + s.x) * 4;
+            c.bufferRowLength = bw;
+            c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            c.imageOffset = {x0 + (int32_t)s.x, y0 + (int32_t)s.y, 0};
+            c.imageExtent = {s.w, 1, 1};
+            regs.push_back(c);
+        }
     }
     if (regs.empty()) return;
     barrier(im, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);

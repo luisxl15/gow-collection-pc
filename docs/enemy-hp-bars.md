@@ -1,8 +1,13 @@
-# Barras de vida dos inimigos (como no GoW3)
+# Barras de vida dos inimigos
 
-Estado em 25/10: **GoW2 funcionando**. `enemy_hp.cpp: enemy_hp_draw` monta as barras no present (antes da captura
-de teste) e `gxm_vk.cpp: draw_enemy_bars` as copia para o alvo de cor pelo anel de upload. Opção
-`enemy_health_bars=1` no `vitart_options.ini` (padrão ligado; ainda sem linha no menu). Testes: `VITART_HPBAR_ALL=1`
+Estado em 27/10: **GoW2 funcionando**. `games/gow/enemy_hp.cpp: enemy_hp_draw` monta as barras no present (antes
+da captura de teste); `ovl::enemy_bar` (gxm_overlay.cpp) desenha cada uma e os renderizadores copiam só os trechos
+opacos para o alvo de cor. Liga/desliga em **Options > Audio & Gameplay > Enemy Health** no menu de pausa, ou
+`enemy_health_bars=1` no `vitart_options.ini` (padrão ligado; bit 16 da palavra de estado do menu).
+
+Visual no jeito dos GoW novos: número (a vida que falta, já que o GoW2 não tem nível), seta `<`, filete dourado
+(claro em cima, escuro embaixo; a parte perdida fica escura), seta `>`, tudo com contorno escuro de 1 px. O
+filete tem 0,62% da altura do alvo de espessura e 22 vezes isso de comprimento. Testes: `VITART_HPBAR_ALL=1`
 mostra a barra em todas as criaturas, `VITART_HPBAR_H` muda a altura (padrão 42 unidades acima dos pés),
 `VITART_ENEMYLOG=1` liga o diagnóstico (`enemy_log.txt`, `enemy_hp_changes.txt`).
 
@@ -35,10 +40,8 @@ Atenção ao testar: a entrada automática dos scripts aperta X (pulo); para fer
    TRANSFER_DST, `vkCmdCopyBufferToImage`, barreira de volta para COLOR_ATTACHMENT, no `g_cmd` do quadro).
 2. `enemy_hp.cpp` monta a lista: criaturas com a vtable do Kratos, sem o Kratos, `0 < vida < máxima`, em gameplay
    (`[0x812ec498] == 0xc`); ponto da cabeça = `+0x80` + altura (medir; começar com ~30 unidades em y).
-3. Estilo: moldura escura, fundo vermelho-escuro, preenchimento vermelho em degradê, largura ~8,5% da altura do
-   alvo e altura ~1,1%.
-4. Opção no menu (Graphics ou Audio & Gameplay) e em `vitart_options.ini` (`enemy_health_bars=1`). Na palavra de
-   estado não há bit livre abaixo de 2^24 (o contador de FPS usa os bits 17..23): precisa de outra variável.
+3. Estilo: feito (ver acima). O primeiro era uma barra vermelha com moldura, trocada pelo filete dourado.
+4. Opção no menu: feita, linha Enemy Health no GoW2, bit 16 da palavra de estado (estava livre).
 5. GoW1: repetir a busca (o medidor de chefe do GoW1 tem as mesmas strings `EnemyMeter_Value*`).
 
 ## Ferramentas
