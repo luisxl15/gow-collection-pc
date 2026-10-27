@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <vector>
 #include <windows.h>
 
@@ -36,9 +37,9 @@ float rdf(uint32_t a) {
 // Procura a matriz da câmera: rotação ortonormal (+ translação) que põe o Kratos à frente, a uma distância de câmera.
 // Dois arranjos: 3x4 por linhas (t na 4a coluna) e 4x4 por colunas (t em m[12..14]).
 std::vector<uint32_t> g_cams; // matrizes achadas na última varredura
-void scan_camera(FILE *log, uint32_t kratos, const uint32_t *enemies, int ne) {
+void scan_camera(FILE *log, uint32_t kratos, const uint32_t *enemies, int ne, uint32_t pos_off = 0x80) {
     g_cams.clear();
-    const float P[3] = {rdf(kratos + 0x80), rdf(kratos + 0x84), rdf(kratos + 0x88)};
+    const float P[3] = {rdf(kratos + pos_off), rdf(kratos + pos_off + 4), rdf(kratos + pos_off + 8)};
     int found = 0;
     for (uint32_t a = 0x81000000u; a < 0x90000000u && found < 400;) {
         MEMORY_BASIC_INFORMATION mi{};
@@ -82,7 +83,7 @@ void scan_camera(FILE *log, uint32_t kratos, const uint32_t *enemies, int ne) {
                     fprintf(log, "  cam? %08x lay%d kratos_v=(%.0f %.0f %.0f)", q, lay, v[0], v[1], v[2]);
                     if (g_cams.size() < 12) g_cams.push_back(q);
                     for (int e = 0; e < ne && e < 6; e++) {
-                        const float X[3] = {rdf(enemies[e] + 0x80), rdf(enemies[e] + 0x84), rdf(enemies[e] + 0x88)};
+                        const float X[3] = {rdf(enemies[e] + pos_off), rdf(enemies[e] + pos_off + 4), rdf(enemies[e] + pos_off + 8)};
                         float w[3];
                         view(X, w);
                         fprintf(log, " e(%.0f %.0f %.0f)", w[0], w[1], w[2]);
@@ -164,33 +165,244 @@ void diag_gow2(uint32_t frame) {
     fflush(log);
 }
 
-// GoW1: tabela 0x812a6f48, Kratos [[0x812a6fa4]+4], estado 0x812c2e04 (casados com o GoW2 pelo código). Lista as
-// criaturas, procura a câmera e quem no segmento de dados aponta pra perto dela
+// matriz mundo -> clip (4x4 por colunas, como a do GoW2 em The_Viewport +0x40): a linha do w é um vetor unitário
+// (a direção da câmera) e o ponto P cai dentro da tela com w > 0; os inimigos também, se houver
+std::vector<uint32_t> g_clips;
+void scan_clip(FILE *log, const float *P, const float (*E)[3], int ne) {
+    g_clips.clear();
+    for (uint32_t a = 0x81000000u; a < 0x90000000u && g_clips.size() < 16;) {
+        MEMORY_BASIC_INFORMATION mi{};
+        if (!VirtualQuery(mem_base() + a, &mi, sizeof mi)) break;
+        const uint32_t end =
+            (uint32_t)std::min<uint64_t>(0x90000000ull, (uint64_t)((uint8_t *)mi.BaseAddress - mem_base()) + mi.RegionSize);
+        if (mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+            for (uint32_t q = (a + 15) & ~15u; q + 64 <= end && g_clips.size() < 16; q += 16) {
+                const float *m = ptr<float>(q);
+                const float wl = m[3] * m[3] + m[7] * m[7] + m[11] * m[11];
+                if (!(std::fabs(wl - 1.f) < 0.01f) || !std::isfinite(m[15])) continue;
+                auto clip = [&](const float *X, float &sx, float &sy, float &w) {
+                    w = m[3] * X[0] + m[7] * X[1] + m[11] * X[2] + m[15];
+                    sx = (m[0] * X[0] + m[4] * X[1] + m[8] * X[2] + m[12]) / w;
+                    sy = (m[1] * X[0] + m[5] * X[1] + m[9] * X[2] + m[13]) / w;
+                };
+                float sx, sy, w;
+                clip(P, sx, sy, w);
+                if (!(w > 1.f && w < 20000.f && std::fabs(sx) < 1.f && std::fabs(sy) < 1.f)) continue;
+                // câmera de verdade: linhas x, y e w ortogonais, escalas x/y de perspectiva, distância razoável
+                const float xr[3] = {m[0], m[4], m[8]}, yr[3] = {m[1], m[5], m[9]}, wr[3] = {m[3], m[7], m[11]};
+                auto dot = [](const float *u, const float *v) { return u[0] * v[0] + u[1] * v[1] + u[2] * v[2]; };
+                const float lx = std::sqrt(dot(xr, xr)), ly = std::sqrt(dot(yr, yr));
+                if (!(lx > 0.5f && lx < 5.f && ly > 0.5f && ly < 5.f) || w < 50.f || w > 5000.f) continue;
+                if (std::fabs(dot(xr, wr)) > 0.02f * lx || std::fabs(dot(yr, wr)) > 0.02f * ly ||
+                    std::fabs(dot(xr, yr)) > 0.02f * lx * ly)
+                    continue;
+                int in = 0;
+                for (int e = 0; e < ne; e++) {
+                    float ex, ey, ew;
+                    clip(E[e], ex, ey, ew);
+                    in += ew > 1.f && std::fabs(ex) < 1.2f && std::fabs(ey) < 1.2f;
+                }
+                if (ne && in == 0) continue;
+                g_clips.push_back(q);
+                fprintf(log, "  clip? %08x kratos=(%.2f %.2f w%.0f) inimigos na tela %d/%d\n   ", q, sx, sy, w, in, ne);
+                for (int i = 0; i < 16; i++) fprintf(log, " %.4g", m[i]);
+                fprintf(log, "\n");
+            }
+        a = end;
+    }
+    for (uint32_t c : g_clips)
+        for (uint32_t a = 0x81200000u; a < 0x81800000u; a += 4) {
+            if ((a & 0xFFFF) == 0 && !readable(a, 0x10000)) {
+                a += 0xFFFC;
+                continue;
+            }
+            const uint32_t v = rd32(a);
+            if (v <= c && c - v < 0x1000) fprintf(log, "  ref %08x -> %08x (clip %08x, +%x)\n", a, v, c, c - v);
+        }
+}
+
+// câmera guardada como matriz de mundo (eixos + posição, a inversa da vista): eixos ortonormais, a posição a uma
+// distância razoável do Kratos e, com a projeção dos shaders (fx, fy), o Kratos perto do centro da tela.
+// Grava os candidatos e quem aponta pra eles
+void scan_camworld(FILE *log, const float *P, float fx, float fy) {
+    int found = 0;
+    std::vector<uint32_t> hits;
+    for (uint32_t a = 0x81000000u; a < 0x90000000u && found < 60;) {
+        MEMORY_BASIC_INFORMATION mi{};
+        if (!VirtualQuery(mem_base() + a, &mi, sizeof mi)) break;
+        const uint32_t end =
+            (uint32_t)std::min<uint64_t>(0x90000000ull, (uint64_t)((uint8_t *)mi.BaseAddress - mem_base()) + mi.RegionSize);
+        if (mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+            for (uint32_t q = (a + 15) & ~15u; q + 64 <= end && found < 60; q += 16) {
+                const float *m = ptr<float>(q);
+                for (int lay = 0; lay < 2; lay++) {
+                    // eixo k: lay 0 = colunas m[4k..], posição m[12..]; lay 1 = linhas, posição m[3], m[7], m[11]
+                    auto A = [&](int k, int i) { return lay == 0 ? m[4 * k + i] : m[4 * i + k]; };
+                    const float t[3] = {lay == 0 ? m[12] : m[3], lay == 0 ? m[13] : m[7], lay == 0 ? m[14] : m[11]};
+                    bool ok = true;
+                    for (int i = 0; i < 3 && ok; i++)
+                        for (int j = i; j < 3 && ok; j++) {
+                            const float dp = A(i, 0) * A(j, 0) + A(i, 1) * A(j, 1) + A(i, 2) * A(j, 2);
+                            ok = std::fabs(dp - (i == j ? 1.f : 0.f)) < 2e-3f;
+                        }
+                    if (!ok) continue;
+                    const float d[3] = {P[0] - t[0], P[1] - t[1], P[2] - t[2]};
+                    const float dist = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                    if (!(dist > 80.f && dist < 5000.f)) continue;
+                    const float vx = d[0] * A(0, 0) + d[1] * A(0, 1) + d[2] * A(0, 2);
+                    const float vy = d[0] * A(1, 0) + d[1] * A(1, 1) + d[2] * A(1, 2);
+                    const float vz = d[0] * A(2, 0) + d[1] * A(2, 1) + d[2] * A(2, 2);
+                    if (vz > -50.f) continue; // a câmera olha para -z
+                    const float sx = fx * vx / -vz, sy = fy * vy / -vz;
+                    if (std::fabs(sx) > 0.7f || std::fabs(sy) > 0.9f) continue;
+                    found++;
+                    hits.push_back(q);
+                    fprintf(log, "  camw %08x lay%d dist=%.0f tela=(%.2f %.2f) pos=(%.0f %.0f %.0f)\n", q, lay, dist, sx, sy, t[0],
+                            t[1], t[2]);
+                }
+            }
+        a = end;
+    }
+    for (uint32_t c : hits)
+        for (uint32_t a = 0x81200000u; a < 0x81800000u; a += 4) {
+            if ((a & 0xFFFF) == 0 && !readable(a, 0x10000)) {
+                a += 0xFFFC;
+                continue;
+            }
+            const uint32_t v = rd32(a);
+            if (v <= c && c - v < 0x1000) fprintf(log, "  wref %08x -> %08x (camw %08x, +%x)\n", a, v, c, c - v);
+        }
+}
+
+// GoW1: tabela 0x812a6f48, Kratos [[0x812a6fa4]+4] com a posição em +0x38 (casados com o GoW2 pelo código e
+// medidos). Lista as classes da tabela, grava os bytes dos objetos que não são o Kratos (pra achar a vida) e procura
+// a câmera a partir da posição do Kratos, com quem no segmento de dados aponta pra perto dela
 void diag_gow1(uint32_t frame) {
     static FILE *log = fopen("enemy_log_gow1.txt", "w");
+    static FILE *bin = fopen("enemy_dump_gow1_e.bin", "wb");
     if (!log) return;
     const uint32_t table = rd32(0x812a6f48u), kp = rd32(0x812a6fa4u);
     const uint32_t kratos = kp && readable(kp + 4, 4) ? rd32(kp + 4) : 0;
     fprintf(log, "q%u tabela=%08x kratos=%08x estado=%08x\n", frame, table, kratos, rd32(0x812c2e04u));
-    if (kratos && readable(kratos, 0x180))
-        fprintf(log, "  kratos vt=%08x hp=%g/%g pos=(%.0f %.0f %.0f)\n", rd32(kratos), rdf(kratos + 0x170),
-                rdf(kratos + 0x174), rdf(kratos + 0x80), rdf(kratos + 0x84), rdf(kratos + 0x88));
+    if (!kratos || !readable(kratos, 0x800)) return fflush(log), void();
+    fprintf(log, "  kratos pos=(%.0f %.0f %.0f)\n", rdf(kratos + 0x38), rdf(kratos + 0x3c), rdf(kratos + 0x40));
     uint32_t enemies[64];
     int ne = 0;
-    if (table && readable(table, 8) && kratos)
+    std::map<uint32_t, int> classes;
+    if (table && readable(table, 8))
         for (uint32_t k = 0; k < 1024; k++) {
             const uint32_t e = table + 8 + 12 * k;
-            if (!readable(e, 12)) break;
+            if ((k & 63) == 0 && !readable(e, 12 * 64)) break;
             const uint32_t h = rd32(e), obj = rd32(e + 8);
-            if (!obj || (h >> 23) != k || !readable(obj, 0x400) || rd32(obj) != rd32(kratos)) continue;
-            fprintf(log, "  k%-4u obj=%08x hp=%g/%g pos=(%.0f %.0f %.0f)%s\n", k, obj, rdf(obj + 0x170), rdf(obj + 0x174),
-                    rdf(obj + 0x80), rdf(obj + 0x84), rdf(obj + 0x88), obj == kratos ? " KRATOS" : "");
-            if (obj != kratos && ne < 64) enemies[ne++] = obj;
+            if (!obj || (h >> 23) != k || obj == kratos || !readable(obj, 0x800)) continue;
+            const uint32_t vt = rd32(obj);
+            if (vt < 0x81000000u || vt > 0x81400000u) continue;
+            classes[vt]++;
+            const float x = rdf(obj + 0x38), y = rdf(obj + 0x3c), z = rdf(obj + 0x40);
+            const float dx = x - rdf(kratos + 0x38), dz = z - rdf(kratos + 0x40);
+            if (!(std::isfinite(x) && std::isfinite(y) && std::isfinite(z)) || dx * dx + dz * dz > 1500.f * 1500.f) continue;
+            if (ne < 64) enemies[ne++] = obj;
+            if (bin) {
+                fwrite(&frame, 4, 1, bin), fwrite(&obj, 4, 1, bin), fwrite(&vt, 4, 1, bin);
+                fwrite(ptr<uint8_t>(obj), 1, 0x800, bin);
+            }
         }
-    if (kratos && frame % 600 == 0) {
-        scan_camera(log, kratos, enemies, ne);
+    fprintf(log, "  classes:");
+    for (auto &c : classes) fprintf(log, " %08x x%d", c.first, c.second);
+    fprintf(log, "\n  perto do Kratos: %d\n", ne);
+    if (frame % 600 == 0) { // posição viva em +0x78 (medida)
+        const float P[3] = {rdf(kratos + 0x78), rdf(kratos + 0x7c) + 40.f, rdf(kratos + 0x80)};
+        float E[64][3];
+        for (int e = 0; e < ne; e++) E[e][0] = rdf(enemies[e] + 0x78), E[e][1] = rdf(enemies[e] + 0x7c), E[e][2] = rdf(enemies[e] + 0x80);
+        fprintf(log, "  estado %08x kratos78=(%.0f %.0f %.0f)\n", rd32(0x812c2e04u), P[0], P[1], P[2]);
+        scan_clip(log, P, E, ne);
+    }
+    if (frame % 120 == 60) { // g_ViewProjection dos shaders: projeta o Kratos e os inimigos com ela
+        float vp[16];
+        uint32_t age = 0;
+        if (last_view_projection(vp, age)) {
+            auto proj = [&](uint32_t o, float &sx, float &sy, float &w) {
+                const float X = rdf(o + 0x78), Y = rdf(o + 0x7c), Z = rdf(o + 0x80);
+                for (int lay = 0; lay < 1; lay++) {
+                    w = vp[3] * X + vp[7] * Y + vp[11] * Z + vp[15];
+                    sx = (vp[0] * X + vp[4] * Y + vp[8] * Z + vp[12]) / w;
+                    sy = (vp[1] * X + vp[5] * Y + vp[9] * Z + vp[13]) / w;
+                }
+            };
+            float sx, sy, w;
+            proj(kratos, sx, sy, w);
+            fprintf(log, "  vp idade %u kratos=(%.2f %.2f w%.0f)", age, sx, sy, w);
+            for (int e = 0; e < ne && e < 8; e++) {
+                proj(enemies[e], sx, sy, w);
+                fprintf(log, " e(%.2f %.2f w%.0f)", sx, sy, w);
+            }
+            fprintf(log, "\n   ");
+            for (int i = 0; i < 16; i++) fprintf(log, " %.4g", vp[i]);
+            fprintf(log, "\n");
+        } else {
+            fprintf(log, "  vp: nenhuma g_ViewProjection ainda\n");
+        }
+    }
+    if (frame % 120 == 30) { // g_Transforms[0] mais repetidos como vista, com a projeção dos shaders
+        float pj[16], tf[64][16];
+        int cnt[64];
+        const int n = frame_transforms(tf, cnt, 64);
+        if (last_projection(pj) && n) {
+            const float X = rdf(kratos + 0x78), Y = rdf(kratos + 0x7c) + 30.f, Z = rdf(kratos + 0x80);
+            fprintf(log, "  tf: %d matrizes, kratos=(%.0f %.0f %.0f) fx=%.3f fy=%.3f\n", n, X, Y, Z, pj[0], pj[5]);
+            for (int i = 0; i < n; i++) {
+                if (cnt[i] < 3) continue;
+                const float *m = tf[i];
+                for (int lay = 0; lay < 2; lay++) {
+                    float v[3];
+                    for (int r = 0; r < 3; r++)
+                        v[r] = lay == 0 ? m[r] * X + m[4 + r] * Y + m[8 + r] * Z + m[12 + r]   // colunas
+                                        : m[4 * r] * X + m[4 * r + 1] * Y + m[4 * r + 2] * Z + m[4 * r + 3]; // linhas 3x4
+                    if (v[2] > -10.f) continue;
+                    const float sx = pj[0] * v[0] / -v[2], sy = pj[5] * v[1] / -v[2];
+                    if (std::fabs(sx) > 1.f || std::fabs(sy) > 1.f) continue;
+                    fprintf(log, "   tf#%d x%d lay%d kratos tela=(%.2f %.2f) z=%.0f :", i, cnt[i], lay, sx, sy, v[2]);
+                    for (int k = 0; k < 16; k++) fprintf(log, " %.4g", m[k]);
+                    fprintf(log, "\n");
+                }
+            }
+        }
+    }
+    if (frame % 600 == 300) { // câmera como matriz de mundo, testada com a projeção dos shaders
+        float pj[16];
+        if (last_projection(pj)) {
+            const float P[3] = {rdf(kratos + 0x78), rdf(kratos + 0x7c) + 30.f, rdf(kratos + 0x80)};
+            fprintf(log, "  camworld: kratos=(%.0f %.0f %.0f) fx=%.3f fy=%.3f\n", P[0], P[1], P[2], pj[0], pj[5]);
+            scan_camworld(log, P, pj[0], pj[5]);
+        }
+    }
+    if (false) { // vista na memória do jogo + projeção dos shaders
+        scan_camera(log, kratos, enemies, ne, 0x78);
+        float pj[16];
+        if (last_projection(pj)) {
+            fprintf(log, "  proj:");
+            for (int i = 0; i < 16; i++) fprintf(log, " %.4g", pj[i]);
+            fprintf(log, "\n");
+        }
+        for (uint32_t cam : g_cams) {
+            const float *m = ptr<float>(cam);
+            fprintf(log, "  cam %08x:", cam);
+            for (int i = 0; i < 16; i++) fprintf(log, " %.4g", m[i]);
+            fprintf(log, "\n");
+            for (uint32_t a = 0x81200000u; a < 0x81800000u; a += 4) {
+                if ((a & 0xFFFF) == 0 && !readable(a, 0x10000)) {
+                    a += 0xFFFC;
+                    continue;
+                }
+                const uint32_t v = rd32(a);
+                if (v <= cam && cam - v < 0x1000) fprintf(log, "  vref %08x -> %08x (cam %08x, +%x)\n", a, v, cam, cam - v);
+            }
+        }
+    }
+    if (false) {
+        scan_camera(log, kratos, enemies, ne, 0x38);
         for (uint32_t cam : g_cams)
-            for (uint32_t a = 0x81200000u; a < 0x81800000u; a += 4) { // dados do gow1
+            for (uint32_t a = 0x81200000u; a < 0x81800000u; a += 4) {
                 if ((a & 0xFFFF) == 0 && !readable(a, 0x10000)) {
                     a += 0xFFFC;
                     continue;
@@ -199,6 +411,7 @@ void diag_gow1(uint32_t frame) {
                 if (v <= cam && cam - v < 0x1000) fprintf(log, "  ref %08x -> %08x (cam %08x, +%x)\n", a, v, cam, cam - v);
             }
     }
+    if (bin) fflush(bin);
     fflush(log);
 }
 

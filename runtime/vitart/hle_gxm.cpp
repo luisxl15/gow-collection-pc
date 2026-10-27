@@ -238,6 +238,38 @@ static uint32_t gxp_param(uint32_t prog, uint32_t i);
 static int g_vk = -1; // -1 = ainda não decidido
 static std::string g_spv_dir;
 static std::string g_shader_ext = ".spv"; // ".dx11" no Direct3D 11
+static std::mutex g_proj_lock;
+static float g_last_proj[16];
+static bool g_proj_ok = false;
+static std::atomic<uint32_t> g_present_frame{0}; // quadros apresentados
+static float g_last_vp[16];
+static std::vector<std::pair<std::array<float, 16>, int>> g_tf_cur, g_tf_last;
+static uint32_t g_tf_frame = 0;
+// os g_Transforms[0] do último quadro inteiro, com quantos desenhos usaram cada um
+int frame_transforms(float (*out)[16], int *count, int max) {
+    std::lock_guard<std::mutex> lk(g_proj_lock);
+    int n = 0;
+    for (auto &e : g_tf_last) {
+        if (n >= max) break;
+        std::memcpy(out[n], e.first.data(), sizeof(float) * 16);
+        count[n++] = e.second;
+    }
+    return n;
+}
+static uint32_t g_vp_frame = 0;
+// g_ViewProjection do último desenho que a usou e há quantos quadros foi; false se nunca apareceu
+bool last_view_projection(float out[16], uint32_t &age) {
+    std::lock_guard<std::mutex> lk(g_proj_lock);
+    if (!g_vp_frame) return false;
+    std::memcpy(out, g_last_vp, sizeof g_last_vp);
+    age = g_present_frame.load() - g_vp_frame;
+    return true;
+}
+bool last_projection(float out[16]) {
+    std::lock_guard<std::mutex> lk(g_proj_lock);
+    if (g_proj_ok) std::memcpy(out, g_last_proj, sizeof g_last_proj);
+    return g_proj_ok;
+}
 static std::mutex g_vk_mutex;
 static std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint32_t>>> g_spv; // programa -> SPIR-V
 // Texturas decodificadas por descritor. O conteúdo no guest é conferido (hash) uma vez por quadro
@@ -529,7 +561,6 @@ static std::shared_ptr<std::vector<uint8_t>> texpack_take(uint64_t key, const gx
     return job->px;
 }
 static std::map<std::array<uint32_t, 4>, TexEntry> g_texcache;
-static std::atomic<uint32_t> g_present_frame{0};
 static uint64_t content_hash(const uint8_t *p, size_t n, uint64_t h) {
     size_t i = 0;
     for (; i + 8 <= n; i += 8) {
@@ -677,6 +708,8 @@ static const PbrProgInfo &pbr_prog(uint32_t prog) {
         if (cat == 2 && !std::strcmp(name, "sTextureSampler")) info.diffuse = res;
         if (cat != 1 || cont != 14) continue;
         if (!std::strcmp(name, "g_Projection")) info.vi.proj = res;
+        else if (!std::strcmp(name, "g_ViewProjection")) info.vi.view_proj = res;
+        else if (!std::strcmp(name, "g_Transforms")) info.vi.transforms = res;
         else if (!std::strcmp(name, "g_LightDir")) info.vi.light_dir = res;
         else if (!std::strcmp(name, "g_LightColor")) info.vi.light_color = res;
         else if (!std::strcmp(name, "g_Ambient")) info.vi.ambient = res;
@@ -977,6 +1010,32 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
             }
         }
         d.textures.push_back(t);
+    }
+    if (c.vuniform) { // a última projeção de perspectiva, pro jogo projetar coisas na tela (last_projection)
+        if (const int ti = pbr_prog(vp->program).vi.transforms; ti >= 0 && (uint32_t)ti + 16 <= vsize / 4) {
+            // g_Transforms[0] de cada desenho, contados por quadro (o mais repetido tende a ser a vista)
+            std::lock_guard<std::mutex> lk(g_proj_lock);
+            const uint32_t fr = g_present_frame.load();
+            if (fr != g_tf_frame) g_tf_last.swap(g_tf_cur), g_tf_cur.clear(), g_tf_frame = fr;
+            std::array<float, 16> m;
+            std::memcpy(m.data(), ptr<float>(c.vuniform) + ti, sizeof(float) * 16);
+            bool seen = false;
+            for (auto &e : g_tf_cur)
+                if (e.first == m) e.second++, seen = true;
+            if (!seen && g_tf_cur.size() < 256) g_tf_cur.push_back({m, 1});
+        }
+        const int vpi = pbr_prog(vp->program).vi.view_proj;
+        if (vpi >= 0 && (uint32_t)vpi + 16 <= vsize / 4) { // mundo -> clip pronto (g_ViewProjection)
+            std::lock_guard<std::mutex> lk(g_proj_lock);
+            std::memcpy(g_last_vp, ptr<float>(c.vuniform) + vpi, sizeof g_last_vp);
+            g_vp_frame = g_present_frame.load();
+        }
+        float cm[16];
+        if (pbr::projection(pbr_prog(vp->program).vi, ptr<float>(c.vuniform), vsize / 4, cm)) {
+            std::lock_guard<std::mutex> lk(g_proj_lock);
+            std::memcpy(g_last_proj, cm, sizeof cm);
+            g_proj_ok = true;
+        }
     }
     if (c.vuniform && pbr::config().post)
         d.view_inv_ok = pbr::inv_projection(pbr_prog(vp->program).vi, ptr<float>(c.vuniform), vsize / 4, d.view_inv);

@@ -27,4 +27,11 @@ bool game_in_gameplay();
 uint32_t game_qte_auto(uint8_t &lx, uint8_t &ly);
 std::string renderer_choice();        // lido do ini antes de abrir o renderizador
 
+// do runtime pro jogo: a última g_Projection (colunas) que passou num shader de vértice
+bool last_projection(float out[16]);
+// a última g_ViewProjection (mundo -> clip) e há quantos quadros ela passou
+bool last_view_projection(float out[16], uint32_t &age);
+// g_Transforms[0] distintos do último quadro e quantos desenhos usaram cada um
+int frame_transforms(float (*out)[16], int *count, int max);
+
 } // namespace vt

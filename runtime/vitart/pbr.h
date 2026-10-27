@@ -62,10 +62,12 @@ std::shared_ptr<const Material> neutral();
 
 // Uniforms do programa de vértice (palavra no default uniform buffer; -1 = o programa não tem).
 struct VertexInfo {
-    int proj = -1, light_dir = -1, light_color = -1, ambient = -1;
+    int proj = -1, light_dir = -1, light_color = -1, ambient = -1, view_proj = -1; // view_proj: g_ViewProjection
+    int transforms = -1; // g_Transforms (vista x mundo; no cenário estático, a própria vista)
 };
 // Parâmetros por desenho (layout PARAMS de pbr.py). vu: default uniform buffer do vértice. false se o
 // desenho não tem projeção em perspectiva (HUD, passadas de tela): fica sem PBR.
+bool projection(const VertexInfo &vi, const float *vu, uint32_t vu_words, float cm[16]);
 // Inversa de g_Projection (NDC do GXM -> câmera, coluna a coluna); false se não é perspectiva.
 bool inv_projection(const VertexInfo &vi, const float *vu, uint32_t vu_words, float out[16]);
 bool params(const VertexInfo &vi, const float *vu, uint32_t vu_words, uint32_t present_frame,

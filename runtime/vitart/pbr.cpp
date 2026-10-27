@@ -406,6 +406,21 @@ std::shared_ptr<const Material> neutral() {
     return m;
 }
 
+// g_Projection em colunas (clip = soma col_k * v_k); false se não é perspectiva
+bool projection(const VertexInfo &vi, const float *vu, uint32_t vu_words, float cm[16]) {
+    if (vi.proj < 0 || (uint32_t)vi.proj + 16 > vu_words) return false;
+    float p[16];
+    std::memcpy(p, vu + vi.proj, sizeof p);
+    if (w_row_is_perspective(p, 3, 7, 11, 15)) {
+        std::memcpy(cm, p, sizeof p);
+        return true;
+    }
+    if (!w_row_is_perspective(p, 12, 13, 14, 15)) return false;
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++) cm[c * 4 + r] = p[r * 4 + c];
+    return true;
+}
+
 bool inv_projection(const VertexInfo &vi, const float *vu, uint32_t vu_words, float out[16]) {
     if (vi.proj < 0 || (uint32_t)vi.proj + 16 > vu_words) return false;
     float p[16], cm[16];
