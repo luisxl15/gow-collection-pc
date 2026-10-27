@@ -8,6 +8,7 @@
 // cada desenho diz onde começam os dele (contrato em vitarecomp/usse/translate.py, D3D_*).
 // Fica de fora o pós-processamento de tela (shaders de computação do Vulkan, desligado por padrão).
 #include "gxm_vk.h"
+#include "game.h"
 #include "d3d11_blit.h"
 #include "gxm_overlay.h"
 #include "gxm_window.h"
@@ -510,7 +511,7 @@ bool make_backbuffer() {
     return true;
 }
 bool create_swapchain() {
-    if (!win::create(L"God of War (vitart, Direct3D 11)")) return g_err = "CreateWindowEx falhou", false;
+    if (!win::create((std::wstring(vt::game_window_title()) + L" (vitart, Direct3D 11)").c_str())) return g_err = "CreateWindowEx falhou", false;
     ComPtr<IDXGIDevice> xdev;
     ComPtr<IDXGIAdapter> adapter;
     ComPtr<IDXGIFactory> factory;

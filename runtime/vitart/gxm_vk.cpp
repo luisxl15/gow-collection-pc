@@ -6,6 +6,7 @@
 // próprio fluxo (sem laço de realimentação e sem esperar a GPU). A espera só acontece ao apresentar, ao
 // ler um alvo ou quando o anel enche.
 #include "gxm_vk.h"
+#include "game.h"
 #include "gxm_overlay.h"
 #include "gxm_window.h"
 #include "pbr.h"
@@ -868,7 +869,7 @@ static bool create_swapchain() {
 
 
 static bool create_window() {
-    if (!win::create(L"God of War (vitart, Vulkan)")) {
+    if (!win::create((std::wstring(vt::game_window_title()) + L" (vitart, Vulkan)").c_str())) {
         g_err = "CreateWindowEx falhou";
         return false;
     }

@@ -18,7 +18,6 @@
 #include <unordered_map>
 
 namespace vt {
-int game_id(); // game_options.cpp
 }
 
 namespace vt::pbr {
@@ -190,10 +189,9 @@ std::unordered_map<uint64_t, Files> g_index;
 void index_load() {
     static bool done = false;
     if (done) return;
-    const int game = vt::game_id(); // só os materiais do jogo em execução (como o pack de texturas)
-    if (!game) return;
+    if (!vt::game_id()) return; // só os materiais do jogo que está rodando
     done = true;
-    const std::string want = game == 1 ? "gow1" : "gow2";
+    const std::string want = vt::game_tag();
     std::error_code ec;
     const std::filesystem::path root = std::filesystem::path(data_path()) / "pbr";
     for (auto &dir : std::filesystem::directory_iterator(root, ec)) {

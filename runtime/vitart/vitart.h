@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 
+#include "game.h"
+
 extern "C" {
 #include "arc_abi.h"
 }

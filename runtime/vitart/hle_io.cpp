@@ -226,7 +226,7 @@ static std::vector<uint8_t> read_entry(const std::vector<uint8_t> &toc, const st
     }
     return out;
 }
-// WAD (GoW1: sem corpo a tag 24; GoW2: 0, 2, 3 e 24 -- nelas o "tamanho" é um valor).
+// registros do WAD; quais têm corpo é o jogo que sabe (game_wad_has_body)
 struct WadRec {
     uint16_t tag, flags;
     uint32_t size;
@@ -234,13 +234,13 @@ struct WadRec {
     std::vector<uint8_t> body;
     bool has_body;
 };
-static std::vector<WadRec> wad_parse(const std::vector<uint8_t> &d, bool gow2) {
+static std::vector<WadRec> wad_parse(const std::vector<uint8_t> &d, const std::string &psarc) {
     std::vector<WadRec> out;
     size_t o = 0;
     while (o + 32 <= d.size()) {
         WadRec r;
         memcpy(&r.tag, &d[o], 2), memcpy(&r.flags, &d[o + 2], 2), memcpy(&r.size, &d[o + 4], 4), memcpy(r.name, &d[o + 8], 24);
-        r.has_body = !(r.tag == 24 || (gow2 && (r.tag == 0 || r.tag == 2 || r.tag == 3)));
+        r.has_body = game_wad_has_body(r.tag, psarc);
         const size_t len = r.has_body ? std::min<size_t>(r.size, d.size() - o - 32) : 0;
         r.body.assign(d.begin() + o + 32, d.begin() + o + 32 + len);
         out.push_back(std::move(r));
@@ -323,7 +323,6 @@ static std::shared_ptr<PsarcPatch> psarc_patch(const std::string &hp) {
         fclose(ps);
         return have ? slot = pt : nullptr;
     }
-    const bool gow2 = name.find("gow2") != std::string::npos;
     {
         const std::vector<uint8_t> man = read_entry(pt->toc, pt->extra, pt->orig, ps, 0);
         std::string cur;
@@ -375,7 +374,7 @@ static std::shared_ptr<PsarcPatch> psarc_patch(const std::string &hp) {
                 _stricmp(pn, name.c_str()) != 0)
                 continue;
             auto it = wads.find(idx);
-            if (it == wads.end()) it = wads.emplace(idx, wad_parse(read_entry(boot_toc, pt->extra, pt->orig, ps, idx), gow2)).first;
+            if (it == wads.end()) it = wads.emplace(idx, wad_parse(read_entry(boot_toc, pt->extra, pt->orig, ps, idx), name)).first;
             unsigned seen = 0;
             bool done = false;
             for (WadRec &r : it->second) {

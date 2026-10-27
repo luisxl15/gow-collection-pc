@@ -150,25 +150,10 @@ VT_HLE(sceAudioOutOutput) {
 }
 
 // =================================================================== entrada
-// Teclado e mouse no esquema do God of War (2018) para PC (padrões do jogo: Shacknews e Magic Game World),
-// com a ação de cada tecla levada ao botão que faz o mesmo nos GoW do Vita:
-//   WASD = analógico esquerdo (andar)          Shift + WASD = analógico direito (esquiva/rolamento)
-//   botão esquerdo = quadrado (ataque leve)    botão direito = triângulo (ataque pesado)
-//   botão do meio / F = círculo (agarrar)      Shift + botão do meio / V = L3+R3 (fúria: Rage of the Gods)
-//   Espaço = X (pular; esquiva no GoW 2018)    Q = L1 (defender/aparar)
-//   Ctrl esquerdo = L2 (mirar no 2018)         E = interagir (R2 no GoW1: baús, portas; R1 no GoW2)
-//   R = o outro R (R1 no GoW1, R2 no GoW2)     1 2 3 4 / setas = direcional (magias)
-//   Esc / Backspace = SELECT (pausa nos dois)  I / K / Tab / Enter = START (Power Up)
-//   C = L1+R1 no GoW2 (Amuleto das Moiras: congela o tempo)
-// Só com a janela do jogo em foco (o teclado é global no Windows). Controles (XInput, DualShock 4,
-// DualSense) em host_input.cpp, somados. O último usado decide os ícones dos botões (input_kbm_active).
-// Modo PS TV por padrão (o jogo tem caminho próprio, wad/_VitaTV, com L2/R2/L3/R3 no controle);
-// VITART_HANDHELD=1 volta ao portátil, em que L2/R2 eram gestos no painel traseiro.
+// teclado e mouse: WASD anda, Shift+WASD vai pro analógico direito, o resto o jogo decide (game.h).
+// só vale com a janela em foco; controles somam por cima (host_input.cpp)
 void video_skip_request(); // hle_io.cpp
 void video_skip_tick();
-int game_id();             // game_options.cpp
-bool game_in_gameplay();
-uint32_t game_qte_auto(uint8_t &lx, uint8_t &ly);
 bool handheld_mode() {
     static const bool h = getenv("VITART_HANDHELD") && *getenv("VITART_HANDHELD") == '1';
     return h;
@@ -183,18 +168,8 @@ static KbmInput keyboard_mouse() {
 #ifdef _WIN32
     if (!gvk::has_focus()) return k;
     auto down = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
-    const bool g2 = game_id() == 2;
     const bool shift = down(VK_SHIFT);
-    struct { int vk; uint32_t bit; } map[] = {
-        { VK_SPACE, 0x4000 }, { VK_LBUTTON, 0x8000 }, { VK_RBUTTON, 0x1000 }, { 'F', 0x2000 }, { 'Q', 0x400 },
-        { VK_LCONTROL, 0x100 }, { 'E', g2 ? 0x800u : 0x200u }, { 'R', g2 ? 0x200u : 0x800u }, { 'V', 0x6 },
-        { '1', 0x10 }, { '2', 0x20 }, { '3', 0x40 }, { '4', 0x80 }, { VK_UP, 0x10 }, { VK_RIGHT, 0x20 },
-        { VK_DOWN, 0x40 }, { VK_LEFT, 0x80 }, { VK_ESCAPE, 0x1 }, { VK_BACK, 0x1 }, { 'I', 0x8 }, { 'K', 0x8 },
-        { VK_TAB, 0x8 }, { VK_RETURN, 0x8 }, { 'C', g2 ? 0xC00u : 0u },
-    };
-    for (auto &m : map)
-        if (down(m.vk)) k.buttons |= m.bit;
-    if (down(VK_MBUTTON)) k.buttons |= shift ? 0x6u : 0x2000u;
+    k.buttons = game_keyboard_buttons(down);
     k.mx = (down('D') ? 1 : 0) - (down('A') ? 1 : 0);
     k.my = (down('S') ? 1 : 0) - (down('W') ? 1 : 0);
     k.roll = shift;

@@ -238,7 +238,6 @@ static uint32_t gxp_param(uint32_t prog, uint32_t i);
 static int g_vk = -1; // -1 = ainda não decidido
 static std::string g_spv_dir;
 static std::string g_shader_ext = ".spv"; // ".dx11" no Direct3D 11
-std::string renderer_choice(); // game_options.cpp
 static std::mutex g_vk_mutex;
 static std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint32_t>>> g_spv; // programa -> SPIR-V
 // Texturas decodificadas por descritor. O conteúdo no guest é conferido (hash) uma vez por quadro
@@ -290,17 +289,14 @@ bool texpack_available() {
     texpack_load();
     return !g_texpack.empty();
 }
-int game_id(); // game_options.cpp: 1 = GoW1, 2 = GoW2, 0 = menu da coletânea
-void enemy_hp_draw(uint32_t fb); // enemy_hp.cpp: barras de vida dos inimigos
 static void texpack_load() {
     static bool done = false;
     if (done) return;
     // Só os packs do jogo em execução (texpack/gow1 no GoW1...): carregar todos fazia o pack do GoW1 trocar
     // texturas do GoW2 que têm o mesmo tamanho e o mesmo começo (as faixas estranhas no menu principal do GoW2).
-    const int game = game_id();
-    if (!game) return; // menu da coletânea: nada ainda (o jogo, quando abrir, carrega o dele)
+    if (!game_id()) return; // nada carregado ainda; o jogo, quando abrir, carrega o dele
     done = true;
-    const std::string want = game == 1 ? "gow1" : "gow2";
+    const std::string want = game_tag();
     std::error_code ec;
     const std::filesystem::path root = std::filesystem::path(data_path()) / "texpack";
     for (auto &dir : std::filesystem::directory_iterator(root, ec)) {
@@ -1025,7 +1021,6 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
         g_vk_draws++;
 }
 
-void game_options_tick();
 // Travadas: quadro com intervalo > 25 ms (depois do carregamento) vai para o log com o que aconteceu
 // nele -- texturas e pipelines novos, tempos de criação --, e a cada 10 s sai um resumo do ritmo.
 static void hitch_tick() {

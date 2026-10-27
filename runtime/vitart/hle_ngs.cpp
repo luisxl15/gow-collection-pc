@@ -31,7 +31,6 @@
 #include <vector>
 
 namespace vt {
-int game_id(); // game_options.cpp: 1 = GoW1, 2 = GoW2
 namespace {
 
 constexpr uint32_t SCE_OK = 0;
@@ -312,8 +311,8 @@ static bool available() {
         // Sons extraídos (tools/ps2_audio_extract.py): <dados>/ps2audio.bin + ps2audio_files.idx, sem ISO.
         // Sem eles: a ISO do iniciador (VITART_PS2_AUDIO) ou a lembrada em vitart_options.ini (ps2_iso=).
         // GoW2: ps2audio_gow2.bin + ps2audio_gow2_files.idx (só os extraídos; a ISO lembrada é a do GoW1)
-        const bool g2 = game_id() == 2;
-        const std::string pre = data_path() + (g2 ? "/ps2audio_gow2" : "/ps2audio");
+        const std::string pre = data_path() + "/" + game_audio_prefix();
+        const bool g2 = std::strcmp(game_audio_prefix(), "ps2audio") != 0; // a ISO lembrada só serve pro prefixo base
         std::string iso, idx = pre + ".idx";
         if (FILE *b = fopen((pre + ".bin").c_str(), "rb")) {
             fclose(b);
