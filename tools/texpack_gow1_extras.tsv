@@ -183,3 +183,5 @@ d9c28db8fe538798	a88b219412772a2f-6494c475cf238361-0000511b.png	Power Up: placa 
 a418bf6e9a972c59	fixo:icone_laminas_power_up.png	ícone das Lâminas do Caos (Vita ampliado 4x)
 be555e25b36c7d79	fixo:adaga_power_up.png	lâmina do Power Up (Vita ampliado 4x)
 0ae7e14431558757	fixo:barra_hud_pack.png	barra de vida/magia do HUD: a do pack ("Huds and Icon"), com os medidores movidos para as fendas dela (gow_menu_mod.py, HUD_PACK)
+5a039a6a481bd42f	esrgan_5a039a6a481bd42f.png	anel de pedra do Power Up (hud028), Real-ESRGAN x4 do original do Vita
+69bb9e8f27e60457	esrgan_69bb9e8f27e60457.png	pedra do canto do Power Up (hud004), Real-ESRGAN x4
