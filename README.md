@@ -28,6 +28,13 @@ em tempo de execução.
 Leia **[docs/viabilidade.md](docs/viabilidade.md)** para as conclusões, os
 limites e o caminho para um jogo real.
 
+## God of War Collection no PC
+
+O laboratório chegou a um porte completo: o God of War Collection do Vita roda nativo no PC, recompilado do ARM para C
+sobre o runtime **vitart** (Vulkan ou Direct3D 11). Como compilar a partir do PKG e da licença:
+[docs/BUILD.md](docs/BUILD.md). Mods: [docs/modding/README.md](docs/modding/README.md) e o
+[conversor de mods do PS2](docs/modding/conversor-ps2.md).
+
 ## Uso rápido
 
 ```bash

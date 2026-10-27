@@ -103,6 +103,9 @@ O que é convertido:
 | Materiais, animações, scripts, efeitos, esqueleto | iguais (o Vita usa os mesmos registros do PS2) |
 | Vídeos (`.PSS`, `.PSW`) | ignorados (o Vita tem os próprios) |
 
+Como funciona por dentro (patch em fluxo, conversão de texturas e malhas, instalação e carregamento):
+[conversor-ps2.md](conversor-ps2.md).
+
 Limitações:
 
 - **Só o GoW2.** O GoW1 do PS2 usa outro formato de malha; o conversor dele ainda não existe (as texturas do GoW1 já
