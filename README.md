@@ -1,3 +1,7 @@
+> **⚠️ NÃO É FUNCIONAL AINDA.** Projeto em desenvolvimento: não espere compilar e jogar.
+>
+> **⚠️ NOT FUNCTIONAL YET.** Work in progress: do not expect to build and play.
+
 # vita-recomp-lab
 
 Laboratório de **recompilação estática para ports nativos no PS Vita**.
